@@ -199,18 +199,23 @@ if [[ $resp = 1* ]]; then
 	uninstall_appimage_scripts | zenity --progress --title="Uninstall" --text="Uninstaller is removing...:\n$HOME/Desktop/Logos.sh\n$APPDIR_BIN" --pulsate --auto-close
 	uninstall_appimage | zenity --progress --title="Uninstall" --text="Uninstaller is removing...:\n$APPDIR" --pulsate --auto-close
 	uninstall_wine32_bottle | zenity --progress --title="Uninstall" --text="Uninstaller is removing ~/.wine32..." --pulsate --auto-close
+	gtk_info "Operation complete!"
 else
 	if [[ $resp = 2* ]]; then
 		uninstall_wine32_app | zenity --progress --title="Uninstall" --text="Wine is running Uninstaller for ~/.wine32..." --pulsate --auto-close
+		gtk_info "Operation complete!"
 	else
 		if [[ $resp = 3* ]]; then
 			uninstall_appimage_scripts | zenity --progress --title="Uninstall" --text="Uninstaller is removing...:\n$HOME/Desktop/Logos.sh\n$APPDIR_BIN" --pulsate --auto-close
+			gtk_info "Operation complete!"
 		else
 			if [[ $resp = 4* ]]; then
 				uninstall_wine32_bottle | zenity --progress --title="Uninstall" --text="Uninstaller is removing ~/.wine32..." --pulsate --auto-close
+				gtk_info "Operation complete!"
 			else
 				if [[ $resp = 5* ]]; then
 					uninstall_appimage | zenity --progress --title="Uninstall" --text="Uninstaller is removing...:\n$APPDIR" --pulsate --auto-close
+					gtk_info "Operation complete!"
 				fi
 			fi
 		fi
