@@ -147,7 +147,6 @@ def ensure_product_installer_download(app: App):
     logging.debug(f"> '{downloaded_file}' exists?: {Path(downloaded_file).is_file()}")  # noqa: E501
 
 
-
 def ensure_wineprefix_init(app: App):
     app.installer_step_count += 1
     ensure_product_installer_download(app=app)
