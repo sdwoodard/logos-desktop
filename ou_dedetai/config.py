@@ -438,7 +438,7 @@ class PersistentConfiguration:
                 if (isinstance(v, str) and v.startswith(self.install_dir)): #noqa: E501
                     output[k] = utils.get_relative_path(v, self.install_dir)
 
-            portable_config_path = os.path.expanduser(self.install_dir + f"/{constants.BINARY_NAME}.json")
+            portable_config_path = os.path.expanduser(self.install_dir + f"/{constants.BINARY_NAME}.json") #noqa: E501
             self.write_json_file(output, portable_config_path)
 
         self.write_json_file(output, config_file_path)
@@ -616,7 +616,10 @@ class Config:
     def faithlife_product_version(self) -> str:
         if self._overrides.faithlife_product_version is not None:
             return self._overrides.faithlife_product_version
-        return "10"  # Keep following for historical reasons.
+        if self._raw.faithlife_product_version is not None:
+            return self._raw.faithlife_product_version
+        return "10"
+        # Keep following in case we need to prompt for additional versions in the future
         #question = f"Which version of {self.faithlife_product} should the script install?: "  # noqa: E501
         #options = constants.FAITHLIFE_PRODUCT_VERSIONS
         #return self._ask_if_not_found("faithlife_product_version", question, options, []) # noqa: E501
