@@ -349,7 +349,12 @@ def install_msi(app: App):
 
     # Add passive mode if specified
     if app.conf._overrides.faithlife_install_passive is True:
-        exe_args.append("/passive")
+        # Ensure the user agrees to the EULA. Exit if they don't.
+        if (
+            app.conf._overrides.agreed_to_faithlife_terms or
+            app.approve_or_exit("Do you agree to Faithlife's EULA? https://faithlife.com/terms")
+        ):
+            exe_args.append("/passive")
 
     # Add MST transform if needed
     release_version = app.conf.installed_faithlife_product_release or app.conf.faithlife_product_version  # noqa: E501

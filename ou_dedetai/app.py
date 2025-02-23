@@ -124,10 +124,11 @@ class App(abc.ABC):
 
         return answer
 
-    def approve_or_exit(self, question: str, context: Optional[str] = None):
+    def approve_or_exit(self, question: str, context: Optional[str] = None) -> bool:
         """Asks the user a question, if they refuse, shutdown"""
         if not self.approve(question, context):
             self.exit(f"User refused the prompt: {question}")
+        return True
 
     def approve(self, question: str, context: Optional[str] = None) -> bool:
         """Asks the user a y/n question"""

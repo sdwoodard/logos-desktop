@@ -76,12 +76,18 @@ def get_parser():
     )
     cfg.add_argument(
         '-P', '--passive', action='store_true',
-        help='run product installer non-interactively',
+        help='run product installer non-interactively. '
+        'Consider agreeing to the terms as well --i-agree-to-faithlife-terms',
     )
     cfg.add_argument(
         '-y', '--assume-yes', action='store_true',
         help='Assumes yes (or default) to all prompts. '
-        'Useful for entirely non-interactive installs',
+        'Useful for entirely non-interactive installs. '
+        'Consider agreeing to the terms as well --i-agree-to-faithlife-terms',
+    )
+    cfg.add_argument(
+        '--i-agree-to-faithlife-terms', action='store_true',
+        help='By passing this flag you agree to https://faithlife.com/terms',
     )
     cfg.add_argument(
         '-q', '--quiet', action='store_true',
@@ -229,11 +235,18 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
             message = f"Custom binary path does not exist: \"{args.custom_binary_path}\"\n"  # noqa: E501
             parser.exit(status=1, message=message)
 
+    if args.assume_yes and not args.i_agree_to_faithlife_terms:
+        message = "Non-interactive installations MUST also agree to the EULA https://faithlife.com/terms via the flag --i-agree-to-faithlife-terms\n"  # noqa: E501
+        parser.exit(status=1, message=message)
+
     if args.assume_yes:
         ephemeral_config.assume_yes = True
 
     if args.passive or args.assume_yes:
         ephemeral_config.faithlife_install_passive = True
+
+    if args.i_agree_to_faithlife_terms:
+        ephemeral_config.agreed_to_faithlife_terms = True
 
 
     def cli_operation(action: str) -> Callable[[EphemeralConfiguration], None]:

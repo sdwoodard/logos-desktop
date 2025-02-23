@@ -241,6 +241,13 @@ class EphemeralConfiguration:
     # Start of values just set via cli arg
     faithlife_install_passive: bool = False
     app_run_as_root_permitted: bool = False
+    agreed_to_faithlife_terms: bool = False
+    """The user expressed clear agreement with faithlife's terms.
+    Normally the MSI would prompt for this as well.
+
+    DO NOT set this unless clear beyond a reasonable doubt the user knows
+    what they're doing - agreeing to https://faithlife.com/terms
+    """
 
     @classmethod
     def from_legacy(cls, legacy: LegacyConfiguration) -> "EphemeralConfiguration":
