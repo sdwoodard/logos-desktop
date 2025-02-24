@@ -46,7 +46,7 @@ class TUI(App):
         # else:
         #    self.title = f"Welcome to {constants.APP_NAME} ({constants.LLI_CURRENT_VERSION})"  # noqa: E501
         self.console_message = "Starting TUI…"
-        self.llirunning = True
+        self.is_running = True
         self.active_progress = False
         self.tmp = ""
 
@@ -329,9 +329,17 @@ class TUI(App):
             logging.error(f"An error occurred in end_curses(): {e}")
             raise
 
+    def _exit(self, reason, intended = False):
+        message = f"Exiting {constants.APP_NAME} due to {reason}…"
+        if not intended:
+            message += "\n" + constants.SUPPORT_MESSAGE
+        self._status(message)
+        time.sleep(30)
+        self.end(None, None)
+
     def end(self, signal, frame):
         logging.debug("Exiting…")
-        self.llirunning = False
+        self.is_running = False
         curses.endwin()
 
     def update_main_window_contents(self):
@@ -401,7 +409,7 @@ class TUI(App):
         check_resize_last_time = last_time = time.time()
         self.logos.monitor()
 
-        while self.llirunning:
+        while self.is_running:
             if self.window_height >= 10 and self.window_width >= 35:
                 self.terminal_margin = 2
                 if not self.resizing:
@@ -415,6 +423,8 @@ class TUI(App):
                             self.active_screen.screen_id,
                             self.choice_q.get(),
                         )
+                        if self.active_screen.screen_id == 2:
+                            self.tui_screens.pop()
 
                     if len(self.tui_screens) == 0:
                         self.active_screen = self.menu_screen
@@ -526,7 +536,7 @@ class TUI(App):
         if choice is None or choice == "Exit":
             logging.info("Exiting installation.")
             self.tui_screens = []
-            self.llirunning = False
+            self.is_running = False
         elif choice.startswith("Install"):
             self.reset_screen()
             self.installer_step = 0

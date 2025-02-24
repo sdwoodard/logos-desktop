@@ -90,12 +90,15 @@ class GuiApp(App):
             super()._status(message, percent)
 
     def approve(self, question: str, context: str | None = None) -> bool:
-        return messagebox.askquestion(question, context) == 'yes'
+        if context is None:
+            context = ""
+        message = f"{context}\n{question}"
+        return messagebox.askquestion(question, message.strip()) == 'yes'
 
     def _exit(self, reason: str, intended: bool = False):
         # Create a little dialog before we die so the user can see why this happened
         if not intended:
-            gui.show_error(reason, detail=constants.SUPPORT_MESSAGE, fatal=True)
+            gui.show_error(reason, detail=constants.SUPPORT_MESSAGE, fatal=False)
         self.root.destroy()
     
     @property
