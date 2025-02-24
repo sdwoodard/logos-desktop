@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import Callable, Optional
 import requests
 import shutil
 import sys
@@ -153,6 +153,9 @@ class CachedRequests:
 
     last_updated: Optional[float] = None
 
+    _update_hook: Optional[Callable[[], None]] = None
+
+
     @classmethod
     def load(cls) -> "CachedRequests":
         """Load the cache from file if exists"""
@@ -179,8 +182,14 @@ class CachedRequests:
         path = Path(constants.NETWORK_CACHE_PATH)
         path.parent.mkdir(exist_ok=True, parents=True)
         with open(path, "w") as f:
-            json.dump(self.__dict__, f, indent=4, sort_keys=True, default=vars)
+            output = self.__dict__.copy()
+            for output_key in self.__dict__.keys():
+                if output_key.startswith("_"):
+                    del output[output_key]
+            json.dump(output, f, indent=4, sort_keys=True, default=vars)
             f.write("\n")
+        if self._update_hook:
+            self._update_hook()
 
 
     def _is_fresh(self) -> bool:
@@ -206,8 +215,13 @@ class NetworkRequests:
 
     # This struct uses functions to call due to some of the values requiring parameters
 
-    def __init__(self, force_clean: Optional[bool] = None) -> None:
+    def __init__(
+        self,
+        force_clean: Optional[bool] = None,
+        hook: Callable[[], None] | None = None
+    ) -> None:
         self._cache = CachedRequests.load()
+        self._cache._update_hook = hook
         self._cache.clean_if_stale(force=force_clean or False)
 
     def _faithlife_product_releases(

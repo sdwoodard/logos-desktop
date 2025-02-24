@@ -528,7 +528,13 @@ class Config:
         self._raw = PersistentConfiguration.load_from_path(ephemeral_config.config_path)
         self._overrides = ephemeral_config
 
-        self._network = network.NetworkRequests(ephemeral_config.check_updates_now)
+        def _network_cache_hook():
+            self.app._config_updated_event.set()
+
+        self._network = network.NetworkRequests(
+            ephemeral_config.check_updates_now,
+            hook=_network_cache_hook
+        )
 
         logging.debug("Current persistent config:")
         for k, v in self._raw.__dict__.items():
