@@ -782,6 +782,8 @@ class Config:
         # Return the full path so we the callee doesn't need to think about it
         if self._raw.wine_binary is not None and not Path(self._raw.wine_binary).exists() and (Path(self.install_dir) / self._raw.wine_binary).exists(): # noqa: E501
             return str(Path(self.install_dir) / self._raw.wine_binary)
+        if not Path(output).exists():
+            logging.warning(f"Wine binary {output} doesn't exist")
         return output
 
     @wine_binary.setter

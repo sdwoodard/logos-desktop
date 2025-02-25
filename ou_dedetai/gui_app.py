@@ -10,6 +10,7 @@ from queue import Queue
 import shutil
 from threading import Event
 import threading
+import time
 from tkinter import PhotoImage, messagebox
 from tkinter import Tk
 from tkinter import Toplevel
@@ -88,6 +89,9 @@ class GuiApp(App):
         self._status_gui.statusvar.set(message)
         if message:
             super()._status(message, percent)
+
+    def clear_status(self):
+        self._status('', 0)
 
     def approve(self, question: str, context: str | None = None) -> bool:
         if context is None:
@@ -249,7 +253,7 @@ class ChoicePopUp:
 
 
 class InstallerWindow:
-    def __init__(self, new_win, root: Root, app: "ControlWindow", **kwargs):
+    def __init__(self, new_win, root: Root, app: "GuiApp", **kwargs):
         # Set root parameters.
         self.win = new_win
         self.root = root
@@ -694,13 +698,11 @@ class ControlWindow(GuiApp):
         else:
             return 'DISABLED'
 
-    def clear_status(self):
-        self._status('', 0)
 
-
-def control_panel_app(
+def start_gui_app(
     ephemeral_config: EphemeralConfiguration,
-    recovery: Optional[Callable[[App], None]] = None
+    recovery: Optional[Callable[[App], None]] = None,
+    install_only: bool = False
 ):
     classname = constants.BINARY_NAME
     root = Root(className=classname)
@@ -712,20 +714,40 @@ def control_panel_app(
     root.title(f"{constants.APP_NAME} Control Panel")
     root.resizable(False, False)
 
-    control_gui = gui.ControlGui(root)
+    def _start_install() -> Callable[[], None]:
+        # This needs to be created before root.mainloop is called
+        installer_gui = gui.StatusWithLabelGui(root, "Installing FaithLife app")
+        def _run():
+            app = GuiApp(root, installer_gui, ephemeral_config)
+            # This may take a minute to run, as it may need to reach out to the internet
+            app.populate_defaults()
+            installer.install(app)
+            # Wait for a couple seconds so user can understand they're done.
+            time.sleep(3)
+            root.destroy()
+        return _run
 
-    def _start_control_panel():
-        if recovery:
-            recovery_gui = gui.RecoveryGui(root)
-            recovery(GuiApp(root, recovery_gui, ephemeral_config))
-            recovery_gui.destroy()
-        ControlWindow(root, control_gui, ephemeral_config, class_=classname)
+    def _start_control_panel() -> Callable[[], None]:
+        # This needs to be created before root.mainloop is called
+        control_gui = gui.ControlGui(root)
+        def _run():
+            if recovery:
+                recovery_gui = gui.StatusWithLabelGui(root, "Recovering FaithLife app")
+                recovery(GuiApp(root, recovery_gui, ephemeral_config))
+                recovery_gui.destroy()
+            ControlWindow(root, control_gui, ephemeral_config, class_=classname)
+        return _run
+
+    if install_only:
+        target=_start_install()
+    else:
+        target=_start_control_panel()
 
     # Start the control panel on a new thread so it can open dialogs
     # as a part of it's constructor
     threading.Thread(
         name=f"{constants.APP_NAME} GUI main loop",
-        target=_start_control_panel,
+        target=target,
         daemon=True
     ).start()
 

@@ -44,10 +44,10 @@ class ChoiceGui(Frame):
         # Place widgets.
         row = 0
         self.question_label.grid(column=0, row=row, sticky='nws', pady=2)
-        self.answer_dropdown.grid(column=1, row=row, sticky='w', pady=2)
+        self.answer_dropdown.grid(column=1, row=row, sticky='w', pady=2, columnspan=2)
         row += 1
-        self.cancel_button.grid(column=3, row=row, sticky='e', pady=2)
-        self.okay_button.grid(column=4, row=row, sticky='e', pady=2)
+        self.cancel_button.grid(column=1, row=row, sticky='e', pady=2)
+        self.okay_button.grid(column=2, row=row, sticky='e', pady=2)
 
 
 class InstallerGui(Frame):
@@ -148,27 +148,27 @@ class StatusGui(Frame):
             self,
             mode='indeterminate',
             orient='horizontal',
-            variable=self.progressvar
+            variable=self.progressvar,
+            # This length sets the minimum length of the progress bar
+            length=350
         )
         self.progress.state(['disabled'])
 
 
-class RecoveryGui(StatusGui):
-    def __init__(self, root, *args, **kwargs):
-        super(RecoveryGui, self).__init__(root, **kwargs)
+class StatusWithLabelGui(StatusGui):
+    def __init__(self, root, label: str, *args, **kwargs):
+        super(StatusWithLabelGui, self).__init__(root, **kwargs)
 
-        self.app_label = Label(self, text="Recovering FaithLife app")
-        self.app_label.grid(column=0, row=0, columnspan=3, sticky='we', pady=2)  # noqa: E501
-        Separator(self, orient='horizontal').grid(column=0, row=1)
-        self.message_label.grid(column=0, row=2, columnspan=3, sticky='we', pady=2)  # noqa: E501
-        self.progress.grid(column=0, row=3, columnspan=3, sticky='we', pady=2)  # noqa: E501
+        self.app_label = Label(self, text=label, font=('TkDefaultFont', 16))
+        self.app_label.grid(column=0, row=0, sticky='we', pady=2)
+        Separator(self, orient='horizontal').grid(column=0, row=1, sticky='ew')
+        self.message_label.grid(column=0, row=2, sticky='we', pady=2)
+        self.progress.grid(column=0, row=3, sticky='we', pady=2)
 
 
 class ControlGui(StatusGui):
     def __init__(self, root, *args, **kwargs):
         super(ControlGui, self).__init__(root, **kwargs)
-        self.config(padding=5)
-        self.grid(row=0, column=0, sticky='nwes')
 
         # Run/install app button
         self.app_buttonvar = StringVar()

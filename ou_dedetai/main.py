@@ -264,7 +264,6 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         'backup',
         'create_shortcuts',
         'edit_config',
-        'install_app',
         'install_dependencies',
         'install_icu',
         'remove_index_files',
@@ -296,6 +295,8 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
                 ephemeral_config.wine_args = getattr(args, 'wine')
             run_action = cli_operation(arg)
             break
+    if getattr(args, "install_app"):
+        run_action = install_app
     if run_action is None:
         run_action = run_control_panel
     logging.debug(f"{run_action=}")
@@ -306,7 +307,7 @@ def run_control_panel(ephemeral_config: EphemeralConfiguration):
     dialog = ephemeral_config.dialog or system.get_dialog()
     logging.info(f"Using DIALOG: {dialog}")
     if dialog == 'tk':
-        gui_app.control_panel_app(ephemeral_config)
+        gui_app.start_gui_app(ephemeral_config)
     else:
         try:
             curses.wrapper(tui_app.control_panel_app, ephemeral_config)
@@ -321,6 +322,14 @@ def run_control_panel(ephemeral_config: EphemeralConfiguration):
         except Exception as e:
             logging.error(f"An error occurred in run_control_panel(): {e}")
             raise e
+
+def install_app(ephemeral_config: EphemeralConfiguration):
+    dialog = ephemeral_config.dialog or system.get_dialog()
+    logging.info(f"Using DIALOG: {dialog}")
+    if dialog == 'tk':
+        gui_app.start_gui_app(ephemeral_config, install_only=True)
+    else:
+        cli.CLI(ephemeral_config).install_app()
 
 
 def setup_config() -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]: #noqa: E501
