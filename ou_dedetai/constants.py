@@ -79,6 +79,8 @@ LEGACY_CONFIG_FILES = [
 ]
 LLI_AUTHOR = "Ferion11, John Goodman, T. H. Wright, N. Marti, N. Shaaban"
 LLI_CURRENT_VERSION = "4.0.0-beta.8"
+# This SHOULD match the version of winetricks we ship in the latest appimage
+WINETRICKS_VERSION = '20250102'
 DEFAULT_LOG_LEVEL = logging.WARNING
 LOGOS_BLUE = '#0082FF'
 LOGOS_GRAY = '#E7E7E7'

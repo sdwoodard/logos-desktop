@@ -191,6 +191,10 @@ def get_parser():
             '; WARNING: wine will not accept user input!'
         ),
     )
+    cmd.add_argument(
+        '--winetricks', nargs='*',
+        help="run winetricks command",
+    )
     return parser
 
 
@@ -282,11 +286,12 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         'update_self',
         'update_latest_appimage',
         'wine',
+        'winetricks',
     ]
 
     run_action = None
     for arg in actions:
-        if getattr(args, arg):
+        if getattr(args, arg) or getattr(args, arg) == []:
             if arg == "set_appimage":
                 ephemeral_config.wine_appimage_path = getattr(args, arg)[0]
                 if not utils.file_exists(ephemeral_config.wine_appimage_path):
@@ -295,8 +300,9 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
                 if not utils.check_appimage(ephemeral_config.wine_appimage_path):
                     e = f"{ephemeral_config.wine_appimage_path} is not an AppImage."
                     raise argparse.ArgumentTypeError(e)
-            elif arg == 'wine':
-                ephemeral_config.wine_args = getattr(args, 'wine')
+            # Re-use this variable for either wine or winetricks execution
+            elif arg == 'wine' or arg == 'winetricks':
+                ephemeral_config.wine_args = getattr(args, arg)
             run_action = cli_operation(arg)
             break
     if getattr(args, "install_app"):
@@ -430,7 +436,7 @@ def main():
     # program.
     # utils.die_if_running()
     if os.getuid() == 0 and not ephemeral_config.app_run_as_root_permitted:
-        print("Running Wine as root is highly discouraged. Use -f|--force-root if you must run as root. See https://wiki.winehq.org/FAQ#Should_I_run_Wine_as_root.3F", file=sys.stderr)  # noqa: E501
+        print("Running Wine/winetricks as root is highly discouraged. Use -f|--force-root if you must run as root. See https://wiki.winehq.org/FAQ#Should_I_run_Wine_as_root.3F", file=sys.stderr)  # noqa: E501
         sys.exit(1)
 
     # Print terminal banner

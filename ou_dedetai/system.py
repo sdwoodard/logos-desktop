@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 from collections.abc import MutableMapping
+import zipfile
 import distro
 import logging
 import os
@@ -12,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from ou_dedetai import constants
+from ou_dedetai import constants, network
 from ou_dedetai.app import App
 
 
@@ -397,8 +399,6 @@ def get_package_manager() -> PackageManager | None:
     os_name = distro.id()
     logging.debug(f"{os_name=}; {major_ver=}")
     # Check for package manager and associated packages.
-    # NOTE: cabextract and sed are included in the appimage, so they are not
-    # included as system dependencies.
 
     install_command: list[str]
     download_command: list[str]
@@ -418,6 +418,7 @@ def get_package_manager() -> PackageManager | None:
         packages = (
             "libfuse2 "  # appimages
             "binutils wget winbind "  # wine
+            "p7zip-full cabextract " # winetricks
         )
         # NOTE: Package names changed together for Ubuntu 24+, Debian 13+, and
         # derivatives. This does not include an exhaustive list of distros that
@@ -455,31 +456,35 @@ def get_package_manager() -> PackageManager | None:
         packages = (
             "fuse fuse-libs "  # appimages
             "mod_auth_ntlm_winbind samba-winbind samba-winbind-clients "  # wine  # noqa: E501
+            "cabextract " # winetricks
         )
         incompatible_packages = ""  # appimagelauncher handled separately
-    elif shutil.which('zypper') is not None:  # manjaro
+    elif shutil.which('zypper') is not None:  # OpenSUSE
         install_command = ["zypper", "--non-interactive", "install"]  # noqa: E501
         download_command = ["zypper", "download"]  # noqa: E501
         remove_command = ["zypper", "--non-interactive", "remove"]  # noqa: E501
         query_command =  ["zypper", "se", "-si"]
+        # This could also be a 'i+ | '
         query_prefix = 'i  | '
         packages = (
-            "fuse2 "  # appimages
+            "fuse "  # appimages
             "samba wget "  # wine
             "curl gawk grep "  # other
+            "7zip cabextract "  # winetricks
         )
         incompatible_packages = ""  # appimagelauncher handled separately
     elif shutil.which('apk') is not None:  # alpine
         install_command = ["apk", "--no-interactive", "add"]  # noqa: E501
         download_command = ["apk", "--no-interactive", "fetch"]  # noqa: E501
         remove_command = ["apk", "--no-interactive", "del"]  # noqa: E501
-        query_command = ["apk", "list", "-i"]
+        query_command = ["apk", "list", "-I"]
         query_prefix = ''
         packages = (
             "bash bash-completion "  # bash support
             "gcompat "  # musl to glibc
             #"fuse-common fuse fuse3 "  # appimages
             "wget curl "  # network
+            "7zip cabextract " # winetricks
             "samba sed grep gawk bash bash-completion "  # other
         )
         incompatible_packages = ""  # appimagelauncher handled separately
@@ -493,6 +498,7 @@ def get_package_manager() -> PackageManager | None:
             "fuse2 "  # appimages
             "samba wget "  # wine
             "curl gawk grep "  # other
+            "p7zip cabextract "  # winetricks (this will likely rename to 7zip shortly)
         )
         incompatible_packages = ""  # appimagelauncher handled separately
     elif shutil.which('pacman') is not None:  # arch, steamOS
@@ -502,12 +508,13 @@ def get_package_manager() -> PackageManager | None:
         query_command =  ["pacman", "-Q"]
         query_prefix = ''
         if os_name == "steamos":  # steamOS
-            packages = "patch wget sed grep gawk cabextract samba bc libxml2 curl print-manager system-config-printer cups-filters nss-mdns foomatic-db-engine foomatic-db-ppds foomatic-db-nonfree-ppds ghostscript glibc samba extra-rel/apparmor core-rel/libcurl-gnutls appmenu-gtk-module lib32-libjpeg-turbo qt5-virtualkeyboard wine-staging giflib lib32-giflib libpng lib32-libpng libldap lib32-libldap gnutls lib32-gnutls mpg123 lib32-mpg123 openal lib32-openal v4l-utils lib32-v4l-utils libpulse lib32-libpulse libgpg-error lib32-libgpg-error alsa-plugins lib32-alsa-plugins alsa-lib lib32-alsa-lib libjpeg-turbo lib32-libjpeg-turbo sqlite lib32-sqlite libxcomposite lib32-libxcomposite libxinerama lib32-libgcrypt libgcrypt lib32-libxinerama ncurses lib32-ncurses ocl-icd lib32-ocl-icd libxslt lib32-libxslt libva lib32-libva gtk3 lib32-gtk3 gst-plugins-base-libs lib32-gst-plugins-base-libs vulkan-icd-loader lib32-vulkan-icd-loader"  # noqa: E501
+            packages = "patch wget sed grep gawk p7zip cabextract samba bc libxml2 curl print-manager system-config-printer cups-filters nss-mdns foomatic-db-engine foomatic-db-ppds foomatic-db-nonfree-ppds ghostscript glibc samba extra-rel/apparmor core-rel/libcurl-gnutls appmenu-gtk-module lib32-libjpeg-turbo qt5-virtualkeyboard wine-staging giflib lib32-giflib libpng lib32-libpng libldap lib32-libldap gnutls lib32-gnutls mpg123 lib32-mpg123 openal lib32-openal v4l-utils lib32-v4l-utils libpulse lib32-libpulse libgpg-error lib32-libgpg-error alsa-plugins lib32-alsa-plugins alsa-lib lib32-alsa-lib libjpeg-turbo lib32-libjpeg-turbo sqlite lib32-sqlite libxcomposite lib32-libxcomposite libxinerama lib32-libgcrypt libgcrypt lib32-libxinerama ncurses lib32-ncurses ocl-icd lib32-ocl-icd libxslt lib32-libxslt libva lib32-libva gtk3 lib32-gtk3 gst-plugins-base-libs lib32-gst-plugins-base-libs vulkan-icd-loader lib32-vulkan-icd-loader"  # noqa: E501
         else:  # arch
             # logos_10_packages = "patch wget sed grep cabextract samba glibc samba apparmor libcurl-gnutls appmenu-gtk-module lib32-libjpeg-turbo wine giflib lib32-giflib libpng lib32-libpng libldap lib32-libldap gnutls lib32-gnutls mpg123 lib32-mpg123 openal lib32-openal v4l-utils lib32-v4l-utils libpulse lib32-libpulse libgpg-error lib32-libgpg-error alsa-plugins lib32-alsa-plugins alsa-lib lib32-alsa-lib libjpeg-turbo lib32-libjpeg-turbo sqlite lib32-sqlite libxcomposite lib32-libxcomposite libxinerama lib32-libgcrypt libgcrypt lib32-libxinerama ncurses lib32-ncurses ocl-icd lib32-ocl-icd libxslt lib32-libxslt libva lib32-libva gtk3 lib32-gtk3 gst-plugins-base-libs lib32-gst-plugins-base-libs vulkan-icd-loader lib32-vulkan-icd-loader"  # noqa: E501
             packages = (
                 "fuse2 "  # appimages
                 "binutils libwbclient samba wget "  # wine
+                "p7zip cabextract " # winetricks (p7zip used to be called pzip)
                 "openjpeg2 libxcomposite libxinerama "  # display
                 "ocl-icd vulkan-icd-loader "  # hardware
                 "alsa-plugins gst-plugins-base-libs libpulse openal "  # audio
@@ -586,6 +593,20 @@ def query_packages(package_manager: PackageManager, packages, mode="install") ->
                     logging.debug(f"'{p}' installed: {line}")
                     status[p] = "Installed"
                     break
+                elif package_manager.query[0] == 'zypper' and mode == "install":
+                    # This might be an issue for all OS' however at least on zypper when
+                    # the "fuse3" package is installed, it thinks the fuse package is
+                    # installed. Solve this by adding whitespace to the startswith
+                    package_line_start += " "
+                    # zypper also has two (known) possible prefixes 'i  | '
+                    # as set in query_prefix and 'i+ | '
+                    if (
+                        line.strip().startswith(package_line_start)
+                        or line.strip().startswith(f"i+ | {p} ")
+                    ):  # noqa: E501
+                        logging.debug(f"'{p}' installed: {line}")
+                        status[p] = "Installed"
+                        break
                 elif line.strip().startswith(package_line_start) and mode == "install":  # noqa: E501
                     logging.debug(f"'{p}' installed: {line}")
                     status[p] = "Installed"
@@ -710,15 +731,15 @@ def postinstall_dependencies_steamos(superuser_command: str):
     return command
 
 
-def postinstall_dependencies_alpine(superuser_command: str):
-    user = os.getlogin()
-    command = [
+def postinstall_dependencies_alpine(superuser_command: str) -> list[str]:
+    # user = os.getlogin()
+    command: list[str] = [
         #superuser_command, "modprobe ", "fuse ", "&& ",
-        #superuser_command, "bash ", "-c ", "if \( ! rc-service -e fuse ); then rc-update add fuse boot ", "&& ",
+        #superuser_command, "bash ", "-c ", "if \( ! rc-service -e fuse ); then rc-update add fuse boot ", "&& ", #noqa: E501
         #superuser_command, "sed ", "-i ", "'s/#user_allow_other/user_allow_other/g' ", "/etc/fuse.conf ", "&& ", #noqa: E501
         #superuser_command, "addgroup ", "fuse ", "&& ",
         #superuser_command, "adduser ", f"{user} ", "fuse ", "&& ",
-        #superuser_command, "bash ", "-c ", "if \( ! rc-service -e fuse ); then rc-service fuse restart ", "&& ",
+        #superuser_command, "bash ", "-c ", "if \( ! rc-service -e fuse ); then rc-service fuse restart ", "&& ", #noqa: E501
     ]
     return command
 
@@ -851,6 +872,9 @@ def install_dependencies(app: App, target_version=10):  # noqa: E501
         f"{app.superuser_command}", 'sh', '-c', '"', *command, '"'
     ]
     command_str = ' '.join(final_command)
+    # FIXME: consider how to tell the user which command we're running.
+    # When we install on the terminal the user doesn't know what they're sudo'ing
+    # logging.info(f"Running command: {command_str}")
 
     if not install_deps_failed:
         try:
@@ -872,6 +896,53 @@ def install_dependencies(app: App, target_version=10):  # noqa: E501
         else:
             logging.error("Please reboot then launch the installer again.")
             sys.exit(1)
+
+
+def ensure_winetricks(
+    app: App,
+    version=constants.WINETRICKS_VERSION,
+    status_messages: bool = True
+):
+    winetricks_path = Path(app.conf.installer_binary_dir) / "winetricks"
+
+    if winetricks_path.exists():
+        # No need to do anything
+        return
+
+    # Symlink if using an appimage
+    if (
+        app.conf.wine_binary_code in ["Recommended", "AppImage"]
+        and app.conf.wine_appimage_path is not None
+        and app.conf.wine_appimage_path.exists()
+    ):
+        winetricks_path.symlink_to(app.conf.wine_appimage_path)
+        logging.debug("Winetricks symlinked to appimage.")
+        return
+
+    # Otherwise download
+    if status_messages:
+        app.status(f"Installing winetricks v{version}…")
+    base_url = "https://codeload.github.com/Winetricks/winetricks/zip/refs/tags"  # noqa: E501
+    zip_name = f"{version}.zip"
+    network.logos_reuse_download(
+        f"{base_url}/{version}",
+        zip_name,
+        app.conf.download_dir,
+        app=app,
+        status_messages=status_messages
+    )
+    wtzip = f"{app.conf.download_dir}/{zip_name}"
+    logging.debug(f"Extracting winetricks script to {winetricks_path}…")
+    with zipfile.ZipFile(wtzip) as z:
+        for zi in z.infolist():
+            if zi.is_dir():
+                continue
+            zi.filename = Path(zi.filename).name
+            if zi.filename == 'winetricks':
+                z.extract(zi, path=str(winetricks_path.parent))
+                break
+    os.chmod(winetricks_path, 0o755)
+    logging.debug("Winetricks installed.")
 
 
 def check_incompatibilities(app: App):

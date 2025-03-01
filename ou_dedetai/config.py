@@ -328,8 +328,11 @@ class PersistentConfiguration:
     faithlife_product_logging: Optional[bool] = None
     install_dir: Optional[str] = None
     wine_binary: Optional[str] = None
-    # This is where to search for wine
+    # FIXME: Should this be stored independently of wine_binary
+    # (and potentially get out of sync), or
+    # Should we derive this value from wine_binary?
     wine_binary_code: Optional[str] = None
+    """This is the type of wine installation used"""
     backup_dir: Optional[str] = None
 
     # Color to use in curses. Either "System", "Logos", "Light", or "Dark"
@@ -714,6 +717,20 @@ class Config:
         return self._raw.app_release_channel
 
     @property
+    def winetricks_binary(self) -> str:
+        """Download winetricks if it doesn't exist"""
+        from ou_dedetai import system
+        # Path is now static, the installer puts a symlink here if we're using appimage
+        winetricks_path = Path(self.installer_binary_dir) / "winetricks"
+    
+        system.ensure_winetricks(
+            app=self.app,
+            status_messages=False
+        )
+
+        return self._absolute_from_install_dir(winetricks_path)
+
+    @property
     def install_dir_default(self) -> str:
         return f"{str(constants.XDG_DATA_HOME)}/{constants.BINARY_NAME}"  # noqa: E501
 
@@ -848,7 +865,7 @@ class Config:
             Path if wine is set to use an appimage, otherwise returns None"""
         if self._overrides.wine_appimage_path is not None:
             return Path(self._absolute_from_install_dir(self._overrides.wine_appimage_path)) #noqa: E501
-        if self.wine_binary.lower().endswith("appimage"):
+        if self.wine_binary.lower().endswith(".appimage"):
             return Path(self._absolute_from_install_dir(self.wine_binary))
         return None
     
