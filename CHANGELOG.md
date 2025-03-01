@@ -1,6 +1,20 @@
 # Changelog
 
-- 4.0.0-beta.8
+- 4.0.0-beta.9
+	- **Change default install dir to $XDG_DATA_HOME/FaithLife-Community/oudedetai (this will be ~/.local/share/FaithLife-Community/oudedetai on most systems). To restore the old behavior: `export INSTALLDIR=$HOME/LogosBible10` (#323) [T. H. Wright]**
+	- **Fixes crash in "Copy Bible Verse" and when first hitting "Continue" due to missing arial font (#335) [N. Shaaban]**
+	- Adds WINEDEBUG flags when --debug cli argument is passed (#346) [N. Shaaban]
+	- Fixes typo in default WINEDEBUG (#326) [T. H. Wright]
+	- Respects DIALOG even when specifying --install-app (#332) (useful for snap/flatpak) [N. Shaaban]
+	- Remove Logos 9 support (#322 #53) [T. H. Wright, N. Marti, N. Shaaban]
+	- Remove support for alpine appimage - use system wine instead. (#294) [T. H. Wright]
+	- Fixes disappearing TUI lines when window is somewhat small (#303) [T. H. Wright]
+	- Write a second copy of the config file into install_dir (#327) [T. H. Wright]
+	- Wraps GUI progress bar messages (#336, #312) [N. Shaaban]
+	- Ensures user agrees to the faithlife EULA when -y or --passive is passed (#241, #331) [N. Shaaban]
+	- Fixes bug where "Install" button stays greyed out on first install (#333, #334) [N. Shaaban]
+	- Start adding unittests (#337) [N. Marti]
+- 4.0.0-beta.8 (YANKED due to missing arial font #335)
 	- Fix dynamic linking in subprocess calls. (#292 #293) [N. Shaaban]
 	- Remove need for manual dependency installation on arch/~~alpine~~/fedora (#143 #236 #293). Alpine still needs to be fixed [N. Shaaban]
 	- Fixes wine binary installations (#286 #288) [N. Marti]
