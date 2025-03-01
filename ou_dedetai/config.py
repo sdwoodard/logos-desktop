@@ -1,12 +1,13 @@
 import copy
 import os
+import subprocess
 from typing import Optional
 from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine
+from ou_dedetai import network, utils, constants, wine, system
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -510,6 +511,7 @@ class Config:
     # Start Cache of values unlikely to change during operation.
     # i.e. filesystem traversals
     _wine_user: Optional[str] = None
+    _wine64_path: Optional[str] = None
     _download_dir: Optional[str] = None
     _user_download_dir: Optional[str] = None
     _wine_output_encoding: Optional[str] = None
@@ -821,6 +823,7 @@ class Config:
             # Reset dependents
             self._raw.wine_binary_code = None
             self._overrides.wine_appimage_path = None
+            self._wine64_path = None
             self._write()
 
     @property
@@ -850,7 +853,53 @@ class Config:
 
     @property
     def wine64_binary(self) -> str:
-        return str(Path(self.wine_binary).parent / 'wine64')
+        # Use cache if available
+        if self._wine64_path:
+            return self._wine64_path
+        # Some packaging uses wine64 for the 64bit binary (like wine 10 on debian),
+        # others use wine (like wine 10.2 on debian)
+        wine64_path = Path(self.wine_binary).parent / 'wine64'
+        wine_path = Path(self.wine_binary)
+        # Prefer wine64 if it exists
+        if wine64_path.exists():
+            self._wine64_path = str(wine64_path)
+            return str(wine64_path)
+        if not wine_path.exists():
+            logging.warning(f"Wine exe path doesn't exist: {wine_path}")
+            # Return it anyways, hopefully doesn't matter.
+            # Don't cache this just in case it changes to a 32bit binary while we're
+            # running
+            return str(wine_path)
+        # Use the file binary if found to check the architecture type
+        try:
+            file_output = subprocess.check_output(
+                ["file", "-bL", str(wine_path)],
+                env=system.fix_ld_library_path(None),
+                encoding="utf-8"
+            ).strip()
+            if file_output.startswith("ELF 64-bit LSB pie executable,"):
+                # Confirmed wine binary is 64 bit
+                self._wine64_path = str(wine_path)
+            elif file_output.startswith("ELF 32-bit LSB pie executable,"):
+                # Woah there, we only have a 32 bit binary.
+                self.app.exit("Could not find a 64 bit wine binary, please install a 64bit wine") # noqa: E501
+            else:
+                # We don't want to fail here since file might behave differently on
+                # different systems or maybe different on BSD
+                # better to just let it go this time. 
+                # If it really is a problem, the user will hit other errors later on
+                # And this will be in the log when we support.
+                logging.warning(
+                    "Could not parse architecture from wine binary "
+                    f"({wine_path})"
+                    f": {file_output}\n"
+                    "Assuming it is the right architecture"
+                )
+        except Exception as e:
+            logging.warning(f"Failed to check wine binary architecture: {e}")
+        # Update the cache and return
+        self._wine64_path = str(wine_path)
+        return str(wine_path)
     
     @property
     # This used to be called WINESERVER_EXE
