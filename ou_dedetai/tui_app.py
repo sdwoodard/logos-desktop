@@ -596,6 +596,9 @@ class TUI(App):
             self.status("Changing color scheme")
             self.conf.cycle_curses_color_scheme()
             self.go_to_main_menu()
+        elif choice == "Get Support":
+            control.get_support(self)
+            self.go_to_main_menu()
 
     def wineconfig_menu_select(self, choice):
         if choice == "Set Renderer":
@@ -773,7 +776,7 @@ class TUI(App):
             answer = self.ask_answer_queue.get()
 
         self.ask_answer_event.clear()
-        if answer in [PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE]:
+        if answer in constants.PROMPT_OPTION_SIGILS:
             self.stack_input(
                 2,
                 Queue(),
@@ -897,7 +900,7 @@ class TUI(App):
         labels_support = ["Utilities →", "Wine Config →"]
         labels.extend(labels_support)
 
-        labels_options = ["Change Color Scheme"]
+        labels_options = ["Change Color Scheme", "Get Support"]
         labels.extend(labels_options)
 
         labels.append("Exit")

@@ -186,6 +186,10 @@ def get_parser():
         help=argparse.SUPPRESS,
     )
     cmd.add_argument(
+        '--get-support', action='store_true',
+        help='Generates a support bundle and prints out where to go for support',
+    )
+    cmd.add_argument(
         '--wine', nargs="+",
         help=(
             'run wine command'
@@ -288,6 +292,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         'update_latest_appimage',
         'wine',
         'winetricks',
+        "get_support"
     ]
 
     run_action = None
