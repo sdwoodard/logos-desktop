@@ -13,7 +13,7 @@ import threading
 import time
 from tkinter import PhotoImage, messagebox
 from tkinter import Tk
-from tkinter import Toplevel
+from tkinter import Toplevel as TkToplevel
 from tkinter import filedialog as fd
 from tkinter.ttk import Style
 from typing import Callable, Optional
@@ -83,6 +83,10 @@ class GuiApp(App):
                 initialdir=Path().home(),
             )
         return answer
+
+    def _info(self, message):
+        """Display information to the user"""
+        InfoPopUp(message)
 
     def _status(self, message, percent = None):
         message = message.lstrip("\r")
@@ -172,47 +176,7 @@ class Root(Tk):
         super().__init__(**kwargs)
         self.classname = kwargs.get('classname')
         # Set the theme.
-        self.style = Style()
-        self.style.theme_use('alt')
-
-        # Update color scheme.
-        self.style.configure('TCheckbutton', bordercolor=constants.LOGOS_GRAY)
-        self.style.configure('TCombobox', bordercolor=constants.LOGOS_GRAY)
-        self.style.configure('TCheckbutton', indicatorcolor=constants.LOGOS_GRAY)
-        self.style.configure('TRadiobutton', indicatorcolor=constants.LOGOS_GRAY)
-        bg_widgets = [
-            'TCheckbutton', 'TCombobox', 'TFrame', 'TLabel', 'TRadiobutton'
-        ]
-        fg_widgets = ['TButton', 'TSeparator']
-        for w in bg_widgets:
-            self.style.configure(w, background=constants.LOGOS_WHITE)
-        for w in fg_widgets:
-            self.style.configure(w, background=constants.LOGOS_GRAY)
-        self.style.configure(
-            'Horizontal.TProgressbar',
-            thickness=10, background=constants.LOGOS_BLUE,
-            bordercolor=constants.LOGOS_GRAY,
-            troughcolor=constants.LOGOS_GRAY,
-        )
-
-        # Justify to the left [('Button.label', {'sticky': 'w'})]
-        self.style.layout(
-            "TButton", [(
-                'Button.border', {
-                    'sticky': 'nswe', 'children': [(
-                        'Button.focus', {
-                            'sticky': 'nswe', 'children': [(
-                                'Button.padding', {
-                                    'sticky': 'nswe', 'children': [(
-                                        'Button.label', {'sticky': 'w'}
-                                    )]
-                                }
-                            )]
-                        }
-                    )]
-                }
-            )]
-        )
+        set_style(self)
 
         # Make root widget's outer border expand with window.
         self.columnconfigure(0, weight=1)
@@ -224,14 +188,23 @@ class Root(Tk):
         self.iconphoto(False, self.pi)
 
 
+class Toplevel(TkToplevel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(**kwargs)
+        set_style(self)
+
+        # Make root widget's outer border expand with window.
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+
 class ChoicePopUp:
     """Creates a pop-up with a choice"""
     def __init__(self, question: str, options: list[str], answer_q: Queue[Optional[str]], answer_event: Event, **kwargs): #noqa: E501
         self.root = Toplevel()
         # Set root parameters.
         self.gui = gui.ChoiceGui(self.root, question, options)
-        self.root.title(f"Quesiton: {question.strip().strip(':')}")
-        self.root.resizable(False, False)
+        self.root.title("Question")
         # Set root widget event bindings.
         self.root.bind(
             "<Return>",
@@ -257,6 +230,28 @@ class ChoicePopUp:
     def on_cancel_released(self, evt=None):
         self.answer_q.put(None)
         self.answer_event.set()
+        self.root.destroy()
+
+
+class InfoPopUp:
+    """Creates a pop-up with info shared to the user"""
+    def __init__(self, message: str, **kwargs):
+        self.root = Toplevel()
+        # Set root parameters.
+        self.gui = gui.InfoGui(self.root, message)
+        self.root.title("Info")
+        # Set root widget event bindings.
+        self.root.bind(
+            "<Return>",
+            self.on_okay_released
+        )
+        self.root.bind(
+            "<Escape>",
+            self.on_okay_released
+        )
+        self.gui.okay_button.config(command=self.on_okay_released)
+
+    def on_okay_released(self, evt=None):
         self.root.destroy()
 
 
@@ -716,6 +711,51 @@ class ControlWindow(GuiApp):
             return 'ENABLED'
         else:
             return 'DISABLED'
+
+
+def set_style(tkapp):
+    # Set the theme.
+    tkapp.style = Style()
+    tkapp.style.theme_use('alt')
+
+    # Update color scheme.
+    tkapp.style.configure('TCheckbutton', bordercolor=constants.LOGOS_GRAY)
+    tkapp.style.configure('TCombobox', bordercolor=constants.LOGOS_GRAY)
+    tkapp.style.configure('TCheckbutton', indicatorcolor=constants.LOGOS_GRAY)
+    tkapp.style.configure('TRadiobutton', indicatorcolor=constants.LOGOS_GRAY)
+    bg_widgets = [
+        'TCheckbutton', 'TCombobox', 'TFrame', 'TLabel', 'TRadiobutton'
+    ]
+    fg_widgets = ['TButton', 'TSeparator']
+    for w in bg_widgets:
+        tkapp.style.configure(w, background=constants.LOGOS_WHITE)
+    for w in fg_widgets:
+        tkapp.style.configure(w, background=constants.LOGOS_GRAY)
+    tkapp.style.configure(
+        'Horizontal.TProgressbar',
+        thickness=10, background=constants.LOGOS_BLUE,
+        bordercolor=constants.LOGOS_GRAY,
+        troughcolor=constants.LOGOS_GRAY,
+    )
+
+    # Justify to the left [('Button.label', {'sticky': 'w'})]
+    tkapp.style.layout(
+        "TButton", [(
+            'Button.border', {
+                'sticky': 'nswe', 'children': [(
+                    'Button.focus', {
+                        'sticky': 'nswe', 'children': [(
+                            'Button.padding', {
+                                'sticky': 'nswe', 'children': [(
+                                    'Button.label', {'sticky': 'w'}
+                                )]
+                            }
+                        )]
+                    }
+                )]
+            }
+        )]
+    )
 
 
 def start_gui_app(

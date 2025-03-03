@@ -140,6 +140,11 @@ class App(abc.ABC):
         options = ["Yes", "No"]
         return self.ask(question, options) == "Yes"
 
+    def info(self, message: str, context: Optional[str] = None) -> None:
+        """Shares information with the user"""
+        message = (f"{context}\n" if context else "") + message
+        self._info(message)
+
     def _exit(self, reason: str, intended: bool = False) -> None:
         """Cleanup any lingering objects, per-implementation specific"""
 
@@ -174,7 +179,7 @@ class App(abc.ABC):
 
     @abc.abstractmethod
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
-        """Implementation for asking a question pre-front end
+        """Implementation for asking a question per-front end
 
         Options may include ability to prompt for an additional value.
         Such as asking for one of strings or a directory.
@@ -183,6 +188,12 @@ class App(abc.ABC):
 
         Options may be a single value,
         Implementations MUST handle this single option being a follow up prompt
+        """
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def _info(self, message: str) -> None:
+        """Implementation for displaying information to the user per-front end
         """
         raise NotImplementedError()
 
