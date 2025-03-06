@@ -23,7 +23,6 @@ import ou_dedetai.utils
 
 class FailureType(Enum):
     FailedUpgrade = auto()
-    InFirstRunState = auto()
 
 
 def detect_broken_install(
@@ -69,16 +68,7 @@ def detect_broken_install(
         pass
 
     if first_run:
-        # Perhaps in the future we can be a little less hash with this, however there
-        # are so many weird edge cases in this state, it's far more reliable to simply
-        # consider this an error.
-        #
-        # We can only tell we're in a first run state after the user has logged in
-        # which suggests that at some point in the past the user logged in, attempted
-        # to downloaded resources, then closed (probably a crash), then started OD back
-        # up, where this code path would trigger. In this scenario, still being in a
-        # first run state after what is now the second run is not desirable.
-        return FailureType.InFirstRunState
+        logging.warning(f"Detected a failed resource download.\n{ou_dedetai.constants.SUPPORT_MESSAGE}") #noqa: E501
 
     return None
 
@@ -140,69 +130,6 @@ def detect_and_recover(ephemeral_config: EphemeralConfiguration):
             time.sleep(1)
             ou_dedetai.installer.install(app)
             app.status(f"Recovery attempt of {app.conf.faithlife_product} complete")
-        run_under_app(ephemeral_config, _run)
-    elif detected_failure == FailureType.InFirstRunState:
-        def _run(app: App):
-            question=(
-                "Do you want to skip the first run dialog and go straight into "
-                f"{persistent_config.faithlife_product}?"
-            )
-            manual_recovery_steps = (
-                "Manual Recovery Steps (after this completes):\n"
-                "- Open the Library tool\n"
-                "- Use the filter 'Not on This Device'\n"
-                "- Press CTRL+A to select all resources\n"
-                "- On the right pane (hit the i if there is none), hit Download\n"
-                "- Wait until after indexing is complete before using the application—"
-                "some features may crash if they are opened prematurely."
-            )
-            context=(
-                "The following recovery method is not recommended unless "
-                "downloading resources is crashing "
-                "(i.e. the 'Continue' button causes a crash).\n\n"
-                + manual_recovery_steps
-            )
-
-            if not app.approve(question=question, context=context):
-                return
-            app.status(f"Bypassing first-run dialog for {persistent_config.faithlife_product}") #noqa: E501
-            logos_appdata_dir = app.conf._logos_appdata_dir
-            logos_user_id = app.conf._logos_user_id
-
-            if logos_appdata_dir is None:
-                # This shouldn't happen - we use this dir when detecting this failure
-                app.status(f"Failed to recover first time resource download: can't find {app.conf.faithlife_product} dir") #noqa: E501
-                time.sleep(5)
-                return
-            if logos_user_id is None:
-                # This shouldn't happen - we use this dir when detecting this failure
-                app.status(f"Failed to recover first time resource download: can't find {app.conf.faithlife_product} user Data dir. Are you logged in?") #noqa: E501
-                time.sleep(5)
-                return
-            
-            with ou_dedetai.database.LocalUserPreferencesManager(Path(logos_appdata_dir), logos_user_id) as db: #noqa: E501
-                app_local_preferences = db.app_local_preferences
-                if app_local_preferences is None:
-                    # This shouldn't happen - we use this parameter when detecting this failure #noqa: E501
-                    app.status("Failed to recover first time resource download: couldn't verify we were in first run") #noqa: E501
-                    time.sleep(5)
-                    return
-                # Add minimal selection SelectedResourceBundleId="minimal"
-                if 'SelectedResourceBundleId' not in app_local_preferences:
-                    app_local_preferences.replace('<data ', '<data SelectedResourceBundleId="minimal"') #noqa: E501
-                db.app_local_preferences = app_local_preferences.replace(
-                    'FirstRunDialogWizardState="ResourceBundleSelection"',
-                    'FirstRunDialogWizardState="Completed"'
-                )
-            # XXX: leave a note to future us to let us know the user skipped this during the installtion.
-            # Useful if this operation has side effects in the future, being able to tell that the user did this WAYYYY back when they first installed logos
-
-            app.status(
-                f"Recovery attempt of {app.conf.faithlife_product} complete. "
-                f"{app.conf.faithlife_product} should now launch directly, "
-                "bypassing first time resource download dialog.\n\n"
-                + manual_recovery_steps
-            )
         run_under_app(ephemeral_config, _run)
 
     # FIXME: Read the LogosCrash.log and suggest other recovery methods
