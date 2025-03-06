@@ -119,7 +119,7 @@ def install_dependencies(app: App):
         targetversion = int(app.conf.faithlife_product_version)
     else:
         targetversion = 10
-    app.status(f"Checking {app.conf.faithlife_product} {str(targetversion)} dependencies…")
+    app.status(f"Checking {app.conf.faithlife_product} {str(targetversion)} dependencies…") #noqa: E501
 
     if targetversion == 10:
         system.install_dependencies(app, target_version=10)  # noqa: E501
@@ -161,18 +161,6 @@ def get_current_logos_version(logos_appdata_dir: Optional[str]) -> Optional[str]
             logging.debug("Couldn't determine installed Logos version.")
             return None
     return None
-
-
-def check_logos_release_version(version, threshold, check_version_part):
-    if version is not None:
-        version_parts = list(map(int, version.split('.')))
-        return version_parts[check_version_part - 1] < threshold
-    else:
-        return False
-
-
-def filter_versions(versions, threshold, check_version_part):
-    return [version for version in versions if check_logos_release_version(version, threshold, check_version_part)]  # noqa: E501
 
 
 def get_winebin_code_and_desc(app: App, binary) -> Tuple[str, str | None]:
@@ -435,7 +423,7 @@ def check_appimage(filestr):
 
 
 def find_appimage_files(app: App) -> list[str]:
-    release_version = app.conf.installed_faithlife_product_release or app.conf.faithlife_product_version #noqa: E501
+    release_version = app.conf.installed_faithlife_product_release or app.conf.faithlife_product_release #noqa: E501
     appimages = []
     directories = [
         app.conf.installer_binary_dir,

@@ -596,7 +596,9 @@ def _get_faithlife_product_releases(
         #    break
 
     #Filtering not needed at the moment but left here in case we want it later.
-    #filtered_releases = utils.filter_versions(releases, 40, 1)
+    #Double check this works before releasing.
+    #from packaging.versions import Version
+    #filtered_releases = [version for version in releases if Version("40.0.0.0") > Version(version)] # noqa: E501
     #logging.debug(f"Available releases: {', '.join(releases)}")
     #logging.debug(f"Filtered releases: {', '.join(filtered_releases)}")
 
