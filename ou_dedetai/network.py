@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
+from math import ceil
 import os
 import time
 from typing import Callable, Optional
@@ -433,12 +434,22 @@ def _net_get(url: str, target: Optional[Path]=None, app: Optional[App] = None):
                 try:
                     r.raise_for_status()
                 except requests.exceptions.HTTPError as e:
-                    if domain == "github.com":
+                    if domain in ["github.com", "api.github.com"]:
                         if (
                             e.response.status_code == 403
                             or e.response.status_code == 429
                         ):
-                            logging.error("GitHub API rate limit exceeded. Please wait before trying again.")  # noqa: E501
+                            message = "GitHub API rate limit exceeded. Please wait "
+                            if "x-ratelimit-reset" in r.headers:
+                                epoch_to_reset: str = r.headers["x-ratelimit-reset"]
+                                seconds_until_reset = ceil(int(epoch_to_reset) - time.time()) #noqa: E501
+                                if seconds_until_reset < 120:
+                                    message += f"{seconds_until_reset} seconds "
+                                else:
+                                    # More human readable to display in minutes
+                                    message += f"{ceil(seconds_until_reset / 60)} minutes " #noqa: E501
+                            message += "before trying again."
+                            logging.error(message)
                     else:
                         logging.error(f"HTTP error occurred: {e.response.status_code}")  # noqa: E501
                     return None
