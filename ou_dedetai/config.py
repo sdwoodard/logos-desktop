@@ -810,7 +810,16 @@ class Config:
         # Return the full path so we the callee doesn't need to think about it
         if self._raw.wine_binary is not None and not Path(self._raw.wine_binary).exists() and (Path(self.install_dir) / self._raw.wine_binary).exists(): # noqa: E501
             return str(Path(self.install_dir) / self._raw.wine_binary)
-        if not Path(output).exists():
+        # Output a warning if the path doesn't exist and isn't relative to
+        # the install dir.
+        # In the case of appimage, this won't exist for part of the 
+        # installation, but still is valid. And the appimage uses a relative
+        # path or an absolute that's relative to the install dir
+        if (
+            not Path(output).exists()
+            and Path(output).is_absolute()
+            and not Path(output).is_relative_to(self.install_dir)
+        ):
             logging.warning(f"Wine binary {output} doesn't exist")
         return output
 
