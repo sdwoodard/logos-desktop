@@ -585,12 +585,14 @@ class TUI(App):
         self.choice_q.put("Return to Main Menu")
 
     def main_menu_select(self, choice):
+        original_assume_yes = self.conf._overrides.assume_yes
         def _install():
             try:
                 installer.install(app=self)
             except UserExitedFromAsk:
                 pass
             finally:
+                self.conf._overrides.assume_yes = original_assume_yes
                 self.go_to_main_menu()
 
         if choice is None or choice == "Exit":
@@ -696,63 +698,72 @@ class TUI(App):
             self.choice_q.put("0")
 
     def utilities_menu_select(self, choice):
-        if choice == "Remove Library Catalog":
-            self.reset_screen()
-            control.remove_library_catalog(self)
+        try:
+            if choice == "Remove Library Catalog":
+                self.reset_screen()
+                control.remove_library_catalog(self)
+                self.go_to_main_menu()
+            elif choice == "Remove All Index Files":
+                self.reset_screen()
+                control.remove_all_index_files(self)
+                self.go_to_main_menu()
+            elif choice == "Edit Config":
+                self.reset_screen()
+                control.edit_file(self.conf.config_file_path)
+                self.go_to_main_menu()
+            elif choice == "Reload Config":
+                self.conf.reload()
+                self.go_to_main_menu()
+            elif choice == "Change Logos Release Channel":
+                self.reset_screen()
+                self.conf.toggle_faithlife_product_release_channel()
+                self.go_to_main_menu()
+            elif choice == f"Change {constants.APP_NAME} Release Channel":
+                self.reset_screen()
+                self.conf.toggle_installer_release_channel()
+                self.go_to_main_menu()
+            elif choice == "Install Dependencies":
+                self.reset_screen()
+                utils.install_dependencies(self)
+                self.go_to_main_menu()
+            elif choice == "Back Up Data":
+                self.reset_screen()
+                self.start_thread(self.do_backup)
+            elif choice == "Restore Data":
+                self.reset_screen()
+                self.start_thread(self.do_backup)
+            elif choice == "Update to Latest AppImage":
+                self.reset_screen()
+                utils.update_to_latest_recommended_appimage(self)
+                self.go_to_main_menu()
+            # This isn't an option in set_utilities_menu_options
+            # This code path isn't reachable and isn't tested post-refactor
+            elif choice == "Set AppImage":
+                # TODO: Allow specifying the AppImage File
+                appimages = self.conf.wine_app_image_files
+                appimage_choices = appimages
+                appimage_choices.extend(
+                    ["Input Custom AppImage", "Return to Main Menu"]
+                )
+                self.menu_options = appimage_choices
+                question = "Which AppImage should be used?"
+                self.stack_menu(
+                    1, self.appimage_q, self.appimage_e, question, appimage_choices
+                )
+            elif choice == "Install ICU":
+                self.reset_screen()
+                wine.enforce_icu_data_files(self)
+                self.go_to_main_menu()
+            elif choice.endswith("Logging"):
+                self.reset_screen()
+                self.logos.switch_logging()
+                self.go_to_main_menu()
+            elif choice == "Uninstall":
+                control.uninstall(self)
+                self.go_to_main_menu()
+        except UserExitedFromAsk:
             self.go_to_main_menu()
-        elif choice == "Remove All Index Files":
-            self.reset_screen()
-            control.remove_all_index_files(self)
-            self.go_to_main_menu()
-        elif choice == "Edit Config":
-            self.reset_screen()
-            control.edit_file(self.conf.config_file_path)
-            self.go_to_main_menu()
-        elif choice == "Reload Config":
-            self.conf.reload()
-            self.go_to_main_menu()
-        elif choice == "Change Logos Release Channel":
-            self.reset_screen()
-            self.conf.toggle_faithlife_product_release_channel()
-            self.go_to_main_menu()
-        elif choice == f"Change {constants.APP_NAME} Release Channel":
-            self.reset_screen()
-            self.conf.toggle_installer_release_channel()
-            self.go_to_main_menu()
-        elif choice == "Install Dependencies":
-            self.reset_screen()
-            utils.install_dependencies(self)
-            self.go_to_main_menu()
-        elif choice == "Back Up Data":
-            self.reset_screen()
-            self.start_thread(self.do_backup)
-        elif choice == "Restore Data":
-            self.reset_screen()
-            self.start_thread(self.do_backup)
-        elif choice == "Update to Latest AppImage":
-            self.reset_screen()
-            utils.update_to_latest_recommended_appimage(self)
-            self.go_to_main_menu()
-        # This isn't an option in set_utilities_menu_options
-        # This code path isn't reachable and isn't tested post-refactor
-        elif choice == "Set AppImage":
-            # TODO: Allow specifying the AppImage File
-            appimages = self.conf.wine_app_image_files
-            appimage_choices = appimages
-            appimage_choices.extend(["Input Custom AppImage", "Return to Main Menu"])
-            self.menu_options = appimage_choices
-            question = "Which AppImage should be used?"
-            self.stack_menu(
-                1, self.appimage_q, self.appimage_e, question, appimage_choices
-            )
-        elif choice == "Install ICU":
-            self.reset_screen()
-            wine.enforce_icu_data_files(self)
-            self.go_to_main_menu()
-        elif choice.endswith("Logging"):
-            self.reset_screen()
-            self.logos.switch_logging()
-            self.go_to_main_menu()
+            pass
 
     def custom_appimage_select(self, choice: str):
         if choice == "Input Custom AppImage":
@@ -1034,6 +1045,15 @@ class TUI(App):
                 "Install ICU",
             ]
             labels.extend(labels_catalog)
+        
+        # FIXME: #367 rework uninstall to work without a successful install
+        if self.is_installed():
+            label_user_data_utilities = [
+                "Uninstall"
+                # "Back Up Data",
+                # "Restore Data"
+            ]
+            labels.extend(label_user_data_utilities)
 
         labels_utilities = ["Install Dependencies", "Edit Config", "Reload Config"]
         labels.extend(labels_utilities)
@@ -1042,8 +1062,6 @@ class TUI(App):
             labels_utils_installed = [
                 "Change Logos Release Channel",
                 f"Change {constants.APP_NAME} Release Channel",
-                # "Back Up Data",
-                # "Restore Data"
             ]
             labels.extend(labels_utils_installed)
 
