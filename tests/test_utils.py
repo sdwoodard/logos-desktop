@@ -149,10 +149,6 @@ class TestGeneralUtils(unittest.TestCase):
         # TODO: Need to add test for v1 appimage.
         self.assertTrue(utils.check_appimage(self.tiny_appimage))
 
-    @unittest.skip("Not testing simple shell command.")
-    def test_clean_all(self):
-        pass
-
     def test_delete_symlink_exists(self):
         new_symlink = Path('symlink')
         if new_symlink.is_symlink():

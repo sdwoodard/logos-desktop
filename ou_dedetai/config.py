@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine, system
+from ou_dedetai import network, utils, constants, wine, system, paths
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -427,13 +427,17 @@ class PersistentConfiguration:
             ):
                 del output[k]
         if self.install_dir is not None:
-            # Ensure all paths stored are relative to install_dir
+            path_fields = {
+                "wine_binary", "backup_dir", "WINE_EXE", "BACKUPDIR", "APPDIR_BINDIR",
+                "LOGOS_LOG", "wine_log", "WINEPREFIX", "WINESERVER_EXE", "CUSTOMBINPATH",
+                "SELECTED_APPIMAGE_FILENAME",
+            }
             for k, v in output.items():
                 if k in ["install_dir", "INSTALLDIR"]:
                     if v is not None:
                         output[k] = str(v)
                     continue
-                if (isinstance(v, str) and v.startswith(self.install_dir)): 
+                if k in path_fields and isinstance(v, str):
                     output[k] = utils.get_relative_path(v, self.install_dir)
         return output
 
@@ -612,19 +616,8 @@ class Config:
         self.app._config_updated_event.set()
 
     def _relative_from_install_dir(self, path: Path | str) -> str:
-        """Takes in a possibly absolute path under install dir and turns it into an
-        relative path if it is
-
-        Args:
-            path - can be absolute or relative to install dir
-        
-        Returns:
-            path - absolute
-        """
-        output = str(path)
-        if Path(path).is_absolute() and output.startswith(self.install_dir):
-            output = output[len(self.install_dir):].lstrip("/")
-        return output
+        """Store descendants relatively without changing external path identity."""
+        return paths.relative_to_install(path, self.install_dir)
 
     def _absolute_from_install_dir(self, path: Path | str) -> str:
         """Takes in a possibly relative path under install dir and turns it into an
@@ -636,9 +629,7 @@ class Config:
         Returns:
             path - absolute
         """
-        if not Path(path).is_absolute():
-            return str(Path(self.install_dir) / path)
-        return str(path)
+        return str(paths.absolute_from_install(path, self.install_dir))
 
     def reload(self):
         """Re-loads the configuration from disk"""
@@ -910,45 +901,27 @@ class Config:
 
             output = choice
             self.wine_binary = choice
-        # Return the full path so we the callee doesn't need to think about it
-        if (
-            self._raw.wine_binary is not None 
-            and not Path(self._raw.wine_binary).exists() 
-            and (Path(self.install_dir) / self._raw.wine_binary).exists()
-        ):
-            return str(Path(self.install_dir) / self._raw.wine_binary)
-        # Output a warning if the path doesn't exist and isn't relative to
-        # the install dir.
-        # In the case of appimage, this won't exist for part of the 
-        # installation, but still is valid. And the appimage uses a relative
-        # path or an absolute that's relative to the install dir
-        if (
-            not Path(output).exists()
-            and Path(output).is_absolute()
-            and not Path(output).is_relative_to(self.install_dir)
-        ):
-            logging.warning(f"Wine binary {output} doesn't exist")
-        return output
+            output = self._raw.wine_binary
+
+        if output in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
+            self.wine_binary = output
+            output = self._raw.wine_binary
+
+        return self._absolute_from_install_dir(output)
 
     @wine_binary.setter
     def wine_binary(self, value: str):
         """Takes in a path to the wine binary and stores it as relative for storage"""
-        # Make the path absolute for comparison
-        relative = self._relative_from_install_dir(value)
-        # FIXME: consider this, it doesn't work at present as the wine_binary may be an
-        # appimage that hasn't been downloaded yet
-        # aboslute = self._absolute_from_install_dir(value)
-        # if not Path(aboslute).is_file():
-        #     raise ValueError("Wine Binary path must be a valid file")
-
         if value == constants.WINE_RECOMMENDED_SIGIL:
-            value = self.wine_appimage_recommended_file_name
+            value = str(Path(self.installer_binary_dir) / self.wine_appimage_recommended_file_name)
         elif value == constants.WINE_BETA_SIGIL:
             if self.wine_appimage_beta_file_name:
-                value = self.wine_appimage_beta_file_name
+                value = str(Path(self.installer_binary_dir) / self.wine_appimage_beta_file_name)
             else:
                 logging.info("Failed to find any beta-specific appimage, falling back to latest release.")
-                value = self.wine_appimage_recommended_file_name
+                value = str(Path(self.installer_binary_dir) / self.wine_appimage_recommended_file_name)
+
+        relative = self._relative_from_install_dir(value)
 
         if self._raw.wine_binary != relative:
             self._raw.wine_binary = relative
@@ -985,23 +958,23 @@ class Config:
 
     @property
     def wine64_binary(self) -> str:
-        # Use cache if available
-        if self._wine64_path:
+        selected = self.wine_binary
+        wine_path = Path(selected)
+        if not wine_path.exists() or wine_path.name.lower().endswith(".appimage"):
+            return str(wine_path)
+
+        identity = (self.install_dir, selected, str(Path(selected).resolve()))
+        if self._wine64_path and getattr(self, "_wine64_identity", None) == identity:
             return self._wine64_path
+        self._wine64_path = None
+        self._wine64_identity = identity
         # Some packaging uses wine64 for the 64bit binary (like wine 10 on debian),
         # others use wine (like wine 10.2 on debian)
-        wine64_path = Path(self.wine_binary).parent / 'wine64'
-        wine_path = Path(self.wine_binary)
+        wine64_path = Path(selected).parent / 'wine64'
         # Prefer wine64 if it exists
         if wine64_path.exists():
             self._wine64_path = str(wine64_path)
             return str(wine64_path)
-        if not wine_path.exists():
-            logging.warning(f"Wine exe path doesn't exist: {wine_path}")
-            # Return it anyways, hopefully doesn't matter.
-            # Don't cache this just in case it changes to a 32bit binary while we're
-            # running
-            return str(wine_path)
         # Use the file binary if found to check the architecture type
         try:
             file_output = subprocess.check_output(
@@ -1278,6 +1251,7 @@ class Config:
     def download_dir(self) -> str:
         if self._download_dir is None:
             self._download_dir = constants.CACHE_DIR
+        paths.ensure_cache_directory(Path(self._download_dir), constants.CACHE_BASE)
         return self._download_dir
     
     @property

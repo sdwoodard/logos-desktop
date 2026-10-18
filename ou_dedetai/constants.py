@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+from ou_dedetai import paths
+
 
 def get_runmode() -> str:
     """Gets the executing envoirnment
@@ -60,12 +62,14 @@ CACHE_LIFETIME_HOURS = 12
 
 if RUNMODE == 'snap':
     _snap_user_common = os.getenv('SNAP_USER_COMMON')
-    if _snap_user_common is None:
-        raise ValueError("SNAP_USER_COMMON environment MUST exist when running a snap.")
-    CACHE_DIR = str(Path(_snap_user_common) / '.cache' / 'FaithLife-Community')
+    if not _snap_user_common or not Path(_snap_user_common).is_absolute():
+        raise ValueError("SNAP_USER_COMMON must be an absolute path when running a snap.")
+    CACHE_BASE = Path(_snap_user_common) / '.cache'
     del _snap_user_common
 else:
-    CACHE_DIR = str(Path(os.getenv('XDG_CACHE_HOME', Path.home() / '.cache' / 'FaithLife-Community'))) 
+    CACHE_BASE = paths.xdg_base(os.getenv('XDG_CACHE_HOME'), Path.home() / '.cache')
+
+CACHE_DIR = str(CACHE_BASE / 'logos-desktop')
 
 XDG_DATA_HOME = str(Path(os.getenv('XDG_DATA_HOME', str(Path.home() / '.local/share'))))
 DATA_HOME = str(Path(XDG_DATA_HOME)/ 'FaithLife-Community') 

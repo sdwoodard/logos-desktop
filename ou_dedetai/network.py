@@ -177,8 +177,13 @@ class CachedRequests:
     @classmethod
     def load(cls) -> "CachedRequests":
         """Load the cache from file if exists"""
+        from ou_dedetai import paths
+
+        paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
         path = Path(constants.NETWORK_CACHE_PATH)
         if path.exists():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"Invalid metadata cache file: {path}")
             with open(path, "r") as f:
                 try:
                     output: dict = json.load(f)
@@ -204,11 +209,23 @@ class CachedRequests:
 
     def _write(self) -> None:
         """Writes the cache to disk. Done internally when there are changes"""
+        from ou_dedetai import paths
+        import tempfile
+
         path = Path(constants.NETWORK_CACHE_PATH)
-        path.parent.mkdir(exist_ok=True, parents=True)
-        with open(path, "w") as f:
-            json.dump(self._as_dict(), f, indent=4, sort_keys=True, default=vars)
-            f.write("\n")
+        cache = paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
+        if path.parent != cache:
+            raise ValueError("Metadata cache must remain in the application cache")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=cache, delete=False) as f:
+                temporary = Path(f.name)
+                json.dump(self._as_dict(), f, indent=4, sort_keys=True, default=vars)
+                f.write("\n")
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         if self._update_hook:
             self._update_hook()
 

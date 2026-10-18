@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import logging
 import os
 import shutil
+import secrets
+import stat
 import subprocess
 from pathlib import Path
 from packaging.version import Version
@@ -14,6 +16,7 @@ from ou_dedetai.app import App
 from . import network
 from . import system
 from . import utils
+from . import paths
 
 def check_wineserver(app: App) -> bool:
     # FIXME: if the wine version changes, we may need to restart the wineserver
@@ -73,8 +76,8 @@ def get_devel_or_stable(version: str) -> str:
 
 # FIXME: consider raising exceptions on error
 def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
-    cmd = [binary, "--version"]
     try:
+        cmd = [paths.executable(binary), "--version"]
         version_string = subprocess.check_output(cmd, encoding='utf-8').strip()
         logging.debug(f"Version string: {str(version_string)}")
         branch: Optional[str]
@@ -515,7 +518,7 @@ def run_wine_completed_process(
     Useful when wanting to parse the output for wine commands
     """
     env = get_wine_env(app, additional_wine_dll_overrides)
-    command = [wine_binary]
+    command = [paths.executable(wine_binary)]
     if exe is not None:
         command.append(exe)
     if exe_args:
@@ -554,7 +557,7 @@ def run_wine_process(
     if isinstance(wine_binary, Path):
         wine_binary = str(wine_binary)
 
-    command = [wine_binary]
+    command = [paths.executable(wine_binary)]
     if exe is not None:
         command.append(exe)
     if exe_args:
@@ -686,16 +689,87 @@ def enforce_icu_data_files(app: App):
 
     app.status("Copying ICU files…")
 
-    drive_c = f"{app.conf.wine_prefix}/drive_c"
-    utils.untar_file(f"{app.conf.download_dir}/{icu_filename}", drive_c)
+    with tempfile.TemporaryDirectory(prefix="logos-desktop-icu-") as temporary:
+        staging = Path(temporary) / "extracted"
+        utils.untar_file(Path(app.conf.download_dir) / icu_filename, staging)
+        candidates = [path for path in (staging / "windows", staging / "icu-win/windows") if path.is_dir()]
+        if len(candidates) != 1:
+            raise ValueError("ICU archive must contain one supported Windows subtree")
+        copy_icu_files(candidates[0], Path(app.conf.wine_prefix))
 
-    # Ensure the target directory exists
-    icu_win_dir = f"{drive_c}/icu-win/windows"
-    if not os.path.exists(icu_win_dir):
-        os.makedirs(icu_win_dir)
-
-    shutil.copytree(icu_win_dir, f"{drive_c}/windows", dirs_exist_ok=True)
     app.status("ICU files copied.", 100)
+
+
+def _icu_parent(prefix_fd: int, parts: tuple[str, ...], *, create: bool) -> int | None:
+    """Open destination directories without following links, anchored at the prefix."""
+    current = os.dup(prefix_fd)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, dir_fd=current)
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            except FileNotFoundError:
+                os.close(current)
+                return None
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def copy_icu_files(source: Path, prefix: Path) -> None:
+    """Apply a validated ICU subtree without writing through destination links."""
+    if not source.is_dir() or source.is_symlink() or not paths.disjoint(source, prefix):
+        raise ValueError("ICU source must be a real directory disjoint from the prefix")
+    paths.validate_removal_path(prefix)
+    files = sorted(path for path in source.rglob("*") if path.is_file())
+    if not files:
+        raise ValueError("ICU archive has no files in its Windows subtree")
+    for path in source.rglob("*"):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError(f"Invalid staged ICU member: {path}")
+
+    prefix_fd = os.open(prefix, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # Inspect every existing parent before creating or replacing anything.
+        for file in files:
+            relative = file.relative_to(source)
+            parent_fd = _icu_parent(prefix_fd, ("drive_c", "windows", *relative.parts[:-1]), create=False)
+            if parent_fd is None:
+                continue
+            try:
+                try:
+                    info = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                    raise ValueError(f"Invalid ICU destination: {relative}")
+            finally:
+                os.close(parent_fd)
+
+        for file in files:
+            relative = file.relative_to(source)
+            parent_fd = _icu_parent(prefix_fd, ("drive_c", "windows", *relative.parts[:-1]), create=True)
+            temporary = f".logos-desktop-icu-{secrets.token_hex(12)}"
+            try:
+                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=parent_fd)
+                with os.fdopen(descriptor, "wb") as target, file.open("rb") as incoming:
+                    shutil.copyfileobj(incoming, target)
+                os.replace(temporary, relative.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                os.close(parent_fd)
+    finally:
+        os.close(prefix_fd)
 
 
 def get_registry_value(reg_path, name, app: App):

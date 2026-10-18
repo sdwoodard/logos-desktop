@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -206,43 +207,21 @@ def ensure_appimage_download(app: App):
         return
     app.status("Ensuring wine AppImage is downloaded…")
 
-    downloaded_file = None
-    appimage_path = app.conf.wine_appimage_recommended_file_name 
-    download_url = app.conf.wine_appimage_recommended_url
-
-    if (
-        app.conf.wine_binary == constants.WINE_BETA_SIGIL
-        or (
-            app.conf.wine_appimage_beta_file_name is not None 
-            # It was set to this manually.
-            and app.conf.wine_binary == f"{constants.RELATIVE_BINARY_DIR}/{app.conf.wine_appimage_beta_file_name}"
-        )
-    ):
-        if (
-            app.conf.wine_appimage_beta_file_name is not None
-            and app.conf.wine_appimage_beta_url is not None
-        ):
-            appimage_path = app.conf.wine_appimage_beta_file_name
-            download_url = app.conf.wine_appimage_beta_url
-    elif (
-        app.conf.wine_binary == constants.WINE_RECOMMENDED_SIGIL
-        or (
-            app.conf.wine_appimage_recommended_file_name is not None 
-            # It was set to this manually.
-            and app.conf.wine_binary ==
-              f"{constants.RELATIVE_BINARY_DIR}/{app.conf.wine_appimage_recommended_file_name}"
-        )
-    ):
-        appimage_path = app.conf.wine_appimage_recommended_file_name
-        download_url = app.conf.wine_appimage_recommended_url
-    else:
-        logging.warning("Could not find which appimage to download, returning early.")
+    filename = Path(app.conf.wine_binary).name
+    if Path(app.conf.wine_binary) != Path(app.conf.installer_binary_dir) / filename:
+        logging.debug("Preserving the explicitly selected external AppImage")
         return
+    if filename == app.conf.wine_appimage_recommended_file_name:
+        download_url = app.conf.wine_appimage_recommended_url
+    elif filename == app.conf.wine_appimage_beta_file_name:
+        download_url = app.conf.wine_appimage_beta_url
+    else:
+        logging.debug("The selected custom AppImage has no managed release URL")
+        return
+    if download_url is None:
+        raise ValueError("The selected AppImage release has no download URL")
 
-    filename = Path(appimage_path).name
-    downloaded_file = utils.get_downloaded_file_path(app.conf.download_dir, filename)
-    if not downloaded_file:
-        downloaded_file = f"{app.conf.download_dir}/{filename}"
+    downloaded_file = str(Path(app.conf.download_dir) / filename)
     network.logos_reuse_download(
         download_url,
         filename,
@@ -388,9 +367,6 @@ def ensure_product_installed(app: App):
     # Clear installed version cache
     app.conf._installed_faithlife_product_release = None
 
-    # Clean up temp files, etc.
-    utils.clean_all()
-
     logging.debug(f"> {app.conf.logos_exe=}")
 
 
@@ -505,18 +481,44 @@ def create_wine_appimage_symlinks(app: App):
         p.symlink_to(f"./{app.conf.wine_appimage_link_file_name}")
 
 
+def desktop_exec(arguments: list[str], *, accepts_url: bool = False) -> str:
+    """Serialize argv using both Desktop Entry string and Exec escaping rules."""
+    if not arguments or "=" in arguments[0]:
+        raise ValueError("Desktop executable is missing or contains an equal sign")
+
+    # GIO checks the first token before expanding literal percent field codes.
+    if "%" in arguments[0]:
+        arguments = ["/usr/bin/env", "--", *arguments]
+
+    quoted = []
+    for argument in arguments:
+        if any(ord(character) < 32 or ord(character) == 127 for character in argument):
+            raise ValueError("Desktop arguments cannot contain control characters")
+        escaped = argument.replace("%", "%%")
+        for character in ("\\", '"', "`", "$"):
+            escaped = escaped.replace(character, "\\" + character)
+        quoted.append('"' + escaped.replace("\\", "\\\\") + '"')
+    if accepts_url:
+        quoted.append("%u")
+    return " ".join(quoted)
+
+
 def create_desktop_file(
     filename: str,
     app_name: str,
-    exec_cmd: str,
+    exec_args: list[str],
     generic_name: str | None = None,
     comment: str | None = None,
     icon_path: str | Path | None = None,
     wm_class: str | None = None,
     additional_keywords: list[str] | None = None,
     mime_types: list[str] | None = None,
-    terminal: Optional[bool] = None
+    terminal: Optional[bool] = None,
+    accepts_url: bool = False,
 ):
+    if Path(filename).name != filename or not filename.endswith(".desktop"):
+        raise ValueError("Desktop filename must be a single desktop entry name")
+    exec_cmd = desktop_exec(exec_args, accepts_url=accepts_url)
     contents = f"""[Desktop Entry]
 Name={app_name}
 Type=Application
@@ -530,7 +532,8 @@ Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(addit
     if comment:
         contents += f"Comment={comment}\n"
     if icon_path:
-        contents += f"Icon={icon_path}\n"
+        escaped_icon = str(icon_path).replace("\\", "\\\\")
+        contents += f"Icon={escaped_icon}\n"
     if mime_types:
         contents += f"MimeType={";".join(mime_types)}\n"
 
@@ -540,53 +543,61 @@ Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(addit
         contents += "StartupNotify=false\n"
 
     xdg_data_home = Path(constants.XDG_DATA_HOME)
+    if not xdg_data_home.is_absolute():
+        raise ValueError("Desktop data directory must be absolute")
     launcher_path = xdg_data_home / 'applications' / filename
-    if launcher_path.is_file():
-        logging.info(f"Removing desktop launcher at {launcher_path}.")
-        launcher_path.unlink()
-    # Ensure the parent directory exists
+    if launcher_path.parent.is_symlink():
+        raise ValueError("Desktop applications directory cannot be a symlink")
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
 
     logging.info(f"Creating desktop launcher at {launcher_path}.")
-    with launcher_path.open('w') as f:
-        f.write(contents)
-    os.chmod(launcher_path, 0o755)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=launcher_path.parent, delete=False) as target:
+            temporary = Path(target.name)
+            target.write(contents)
+        temporary.chmod(0o755)
+        os.replace(temporary, launcher_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return launcher_path
 
 
 def create_launcher_shortcuts(app: App):
     # Set variables for use in launcher files.
     flproduct = app.conf.faithlife_product
+    if flproduct not in constants.FAITHLIFE_PRODUCTS:
+        raise ValueError("Unknown product for desktop shortcuts")
     installdir = Path(app.conf.install_dir)
     logos_icon_src = constants.APP_IMAGE_DIR / f"{flproduct}-128-icon.png"
     app_icon_src = constants.APP_IMAGE_DIR / 'icon.png'
 
-    if not installdir.is_dir():
-        app.exit("Can't create launchers because the installation folder does not exist.") 
+    if not installdir.is_absolute() or installdir.is_symlink() or not installdir.is_dir():
+        raise ValueError("Shortcuts require an absolute, unlinked installation directory")
     app_dir = Path(installdir) / 'data'
     logos_icon_path = app_dir / logos_icon_src.name
     app_icon_path = app_dir / app_icon_src.name
 
     if constants.RUNMODE == 'binary':
-        oudedetai_executable = f"{installdir}/{constants.BINARY_NAME}"
-    elif constants.RUNMODE == "source":
+        launcher_args = [str(installdir / constants.BINARY_NAME)]
+    elif constants.RUNMODE == "script":
         script = Path(sys.argv[0]).expanduser().resolve()
-        repo_dir = None
-        for p in script.parents:
-            for c in p.iterdir():
-                if c.name == '.git':
-                    repo_dir = p
-                    break
-        if repo_dir is None:
-            app.exit("Could not find .git directory from arg 0")
-        # Find python in virtual environment.
-        py_bin = next(repo_dir.glob('*/bin/python'))
-        if not py_bin.is_file():
-            app.exit("Could not locate python binary in virtual environment.")
-        oudedetai_executable = f"env DIALOG=tk {py_bin} {script}"
+        launcher_args = [sys.executable, str(script)]
     elif constants.RUNMODE in ["snap", "flatpak"]:
         logging.info(f"Not creating launcher shortcuts, {constants.RUNMODE} already handles this") 
         return
+    else:
+        raise ValueError(f"Unsupported desktop launcher mode: {constants.RUNMODE}")
+
+    windows_executable = app.conf.logos_exe_windows_path
+    desktop_exec(launcher_args)
+    desktop_exec([*launcher_args, "--run-installed-app"])
+    if windows_executable:
+        desktop_exec([*launcher_args, "--wine", windows_executable], accepts_url=True)
+
+    if app_dir.is_symlink() or logos_icon_path.is_symlink() or app_icon_path.is_symlink():
+        raise ValueError("Shortcut icons cannot be written through symlinks")
 
     for (src, path) in [(app_icon_src, app_icon_path), (logos_icon_src, logos_icon_path)]:
         if not path.is_file():
@@ -600,8 +611,8 @@ def create_launcher_shortcuts(app: App):
         filename=f"{flproduct}Bible.desktop",
         app_name=f"{flproduct}",
         generic_name="Bible",
-        comment="Runs Faithlife Bible Software via Wine (snap). Community supported.",
-        exec_cmd=f"{oudedetai_executable} --run-installed-app",
+        comment="Runs Faithlife Bible Software via Wine. Community supported.",
+        exec_args=[*launcher_args, "--run-installed-app"],
         icon_path=logos_icon_path,
         wm_class=f"{flproduct.lower()}.exe",
         additional_keywords=["Catholic"] if flproduct == "Verbum" else None
@@ -613,7 +624,7 @@ def create_launcher_shortcuts(app: App):
         app_name=constants.APP_NAME,
         generic_name="FaithLife App Installer",
         comment="Installs and manages either Logos or Verbum via wine. Community supported.",
-        exec_cmd=oudedetai_executable,
+        exec_args=launcher_args,
         icon_path=app_icon_path,
         wm_class=constants.BINARY_NAME,
     )
@@ -623,7 +634,7 @@ def create_launcher_shortcuts(app: App):
     # logos4 - to facilitate Logos 40.1+ login OAuth flow
     # libronixdls - allows opening of bible links from the browser
 
-    if not app.conf.logos_exe_windows_path:
+    if not windows_executable:
         logging.error("Failed to register MIME types with system due to missing wine exe path")
         return
 
@@ -633,16 +644,10 @@ def create_launcher_shortcuts(app: App):
         filename=url_handler_desktop_filename,
         app_name=f"{flproduct} URL Handler",
         comment="Handles logos4: and libronixdls: URL Schemes",
-        exec_cmd=(
-            f"/bin/sh -c \""
-            f"({oudedetai_executable} --wine '{app.conf.logos_exe_windows_path.replace('\\','\\\\')}' ''%u'') "
-            "|| (echo 'Failed to spawn logos. If you are logging in please hit the link for not being redirected "
-            "automatically then the link for still having trouble. If you contact support please attach this log'"
-            "; sleep 60; exit 1); wait\""
-        ),
+        exec_args=[*launcher_args, "--wine", windows_executable],
         icon_path=app_icon_path,
         mime_types=["x-scheme-handler/logos4","x-scheme-handler/libronixdls"],
-        terminal=True
+        accepts_url=True,
     )
     # For most users Logos will be "installed" at this point, if we fail here there is no easy
     # way in the current flow to re-apply these - and this isn't required for Logos to function,

@@ -7,7 +7,7 @@ import glob
 import json
 import logging
 import os
-import shutil
+import stat
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -15,6 +15,7 @@ import webbrowser
 from zipfile import ZipFile
 
 from ou_dedetai import constants
+from ou_dedetai import paths
 from ou_dedetai import system
 from ou_dedetai.app import App
 
@@ -61,43 +62,94 @@ def remove_library_catalog(app: App):
 
 
 def uninstall(app: App):
-    """Completely uninstalls both this app and the installed product"""
-    app.status("Uninstalling…")
-    delete_paths = [
-        app.conf.config_file_path,
-    ]
-    # Only add install_dir if we know what it is
-    if app.conf._raw.install_dir is not None:
-        delete_paths += [app.conf._raw.install_dir]
+    """Remove only preflighted installation data and explicitly selected cleanup."""
+    from ou_dedetai.config import PersistentConfiguration
 
-    question = "Are you sure you want to uninstall?"
-    context = (
-        "We're about to run:\n\n"
-        "rm -rf " + 
-        " ".join(delete_paths)
+    config_path = Path(app.conf._overrides.config_path)
+    install_value = app.conf._overrides.install_dir or app.conf._raw.install_dir
+    install = Path(install_value) if install_value else None
+    protected = (
+        constants.CACHE_BASE,
+        Path(constants.XDG_DATA_HOME),
+        Path(constants.CONFIG_DIR).expanduser().parent,
+        Path(constants.STATE_DIR).expanduser().parent,
+        Path(__file__).resolve().parents[1],
     )
-    if not app.approve(question, context):
-        logging.debug("User refused to uninstall")
-        return
+    targets: dict[Path, paths.RemovalTarget] = {}
+
+    def add_target(path: Path, *, directory: bool = False) -> None:
+        if not path.exists() and not path.is_symlink():
+            return
+        info = paths.validate_removal_path(path, protected)
+        if stat.S_ISDIR(info.st_mode) != directory:
+            raise ValueError(f"Unexpected uninstall target type: {path}")
+        targets[path] = paths.RemovalTarget(path, info, path.parent.stat())
+
+    add_target(config_path)
+    if install is not None and (install.exists() or install.is_symlink()):
+        add_target(install, directory=True)
+        portable = install / f"{constants.BINARY_NAME}.json"
+        paths.validate_removal_path(portable, protected)
+        with portable.open() as source:
+            portable_config = json.load(source)
+        recorded = portable_config.get("install_dir", portable_config.get("INSTALLDIR"))
+        if (
+            not isinstance(recorded, str)
+            or not Path(recorded).is_absolute()
+            or Path(recorded).resolve() != install.resolve()
+        ):
+            raise ValueError(f"Installation ownership is not established: {install}")
+        for child in ("data/bin", "data/wine64_bottle"):
+            managed = install / child
+            info = paths.validate_removal_path(managed, protected)
+            if not stat.S_ISDIR(info.st_mode) or not managed.resolve().is_relative_to(install.resolve()):
+                raise ValueError(f"Invalid installation layout: {managed}")
+
     if app.approve(
         "Do you also want to clear the cache and logs?",
-        "If you're debugging make sure you've already hit the \"Get Support\" button; "
-        "we wouldn't want to lose those logs."
+        "Save a support archive first if you need these logs for debugging.",
     ):
-        delete_paths += [constants.CACHE_DIR, constants.STATE_DIR]
+        cache = Path(constants.CACHE_DIR)
+        if cache.exists() or cache.is_symlink():
+            paths.validate_cache_directory(cache, constants.CACHE_BASE, require_marker=True)
+            add_target(cache, directory=True)
 
-    for del_path in delete_paths:
-        path = Path(del_path)
-        if not path.exists():
-            continue
-        if path.is_file():
-            os.remove(path)
-        elif path.is_dir():
-            shutil.rmtree(path)
+        state = Path(constants.STATE_DIR).expanduser()
+        if state.exists() or state.is_symlink():
+            paths.validate_removal_path(state, protected)
+            log_names = [f"{constants.BINARY_NAME}.log", "wine.log", "wine.1.log"]
+            log_names += [f"{constants.BINARY_NAME}.log.{index}.gz" for index in range(1, 6)]
+            for name in log_names:
+                add_target(state / name)
 
+    selected = list(targets)
+    for index, first in enumerate(selected):
+        for second in selected[index + 1:]:
+            if paths.disjoint(first, second):
+                continue
+            if install in (first, second) and config_path in (first, second):
+                if config_path.resolve().is_relative_to(install.resolve()):
+                    targets.pop(config_path, None)
+                    continue
+            raise ValueError(f"Overlapping uninstall targets: {first} and {second}")
+
+    context = "These paths will be removed:\n\n" + "\n".join(str(path) for path in targets)
+    if not app.approve("Are you sure you want to uninstall?", context):
+        return
+    app.status("Uninstalling…")
+    ordered = sorted(targets.values(), key=lambda target: not stat.S_ISDIR(target.info.st_mode))
+    paths.remove_targets(ordered, protected)
+
+    # Reloading would recreate a cache that the user just asked to remove.
+    app.conf._raw = PersistentConfiguration()
+    for attribute in (
+        "_wine64_path", "_wine64_identity", "_download_dir", "_wine_user", "_logos_exe",
+        "_installed_faithlife_product_release", "_wine_binary_files", "_wine_appimage_files",
+        "_user_download_dir", "_wine_output_encoding",
+    ):
+        setattr(app.conf, attribute, None)
+    app._config_updated_event.set()
     app.status("Uninstalled")
-
-    app.conf.reload()
 
 
 def get_support(app: App) -> str:
@@ -150,7 +202,10 @@ def get_support(app: App) -> str:
         ]
 
         if app.conf._raw.wine_binary:
-            run_commands += [[app.conf._raw.wine_binary, "--version"]]
+            try:
+                run_commands += [[paths.executable(app.conf.wine_binary), "--version"]]
+            except ValueError as error:
+                logging.warning("Skipping runtime diagnostic: %s", error)
 
         subprocess_env = copy.deepcopy(os.environ)
         # Set LANG to enable support

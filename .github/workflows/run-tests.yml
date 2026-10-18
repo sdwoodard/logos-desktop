@@ -21,7 +21,10 @@ jobs:
       - name: Install reviewed runtime dependencies
         run: python -m pip install .
       - name: Check private development boundaries
-        run: python -m unittest -v tests.test_constants tests.test_private_development
+        run: >-
+          python -m unittest -v
+          tests.test_constants tests.test_private_development
+          tests.test_filesystem_safety tests.test_runtime_paths tests.test_desktop_entries
       - name: Check retained version comparisons in a separate process
         run: >-
           python -m unittest -v

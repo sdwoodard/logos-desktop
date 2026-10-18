@@ -1,6 +1,7 @@
 import atexit
 from datetime import datetime
 import enum
+import gzip
 import inspect
 import json
 import logging
@@ -17,10 +18,11 @@ import tarfile
 import time
 from ou_dedetai.app import App
 from packaging.version import Version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Optional, Tuple
 
 from . import constants
+from . import paths
 from . import network
 from . import system
 from . import wine
@@ -75,12 +77,6 @@ def restart_lli():
         pidfile.unlink()
     os.execv(sys.executable, [sys.executable])
     sys.exit()
-
-
-def clean_all():
-    logging.info("Cleaning all temp files…")
-    os.system(f"rm -f {os.getcwd()}/wget-log*")
-    logging.info("done")
 
 
 def get_user_downloads_dir() -> str:
@@ -612,15 +608,38 @@ def grep(regexp, filepath):
 
 
 def untar_file(file_path, output_dir):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    """Extract regular data into a fresh private directory or raise on failure."""
+    output = Path(output_dir)
+    if not output.is_absolute() or not paths.disjoint(Path(file_path), output):
+        raise ValueError("Archive and extraction directory must be disjoint absolute paths")
+    if output.is_symlink() or (output.exists() and any(output.iterdir())):
+        raise ValueError("Extraction requires an empty, unlinked directory")
 
-    try:
-        with tarfile.open(file_path, 'r:gz') as tar:
-            tar.extractall(path=output_dir)
-            logging.debug(f"Successfully extracted '{file_path}' to '{output_dir}'")
-    except tarfile.TarError as e:
-        logging.error(f"Error extracting '{file_path}': {e}")
+    # Tar readers can stop before the gzip trailer, so verify the whole stream.
+    with gzip.open(file_path, "rb") as compressed:
+        while compressed.read(1024 * 1024):
+            pass
+
+    with tarfile.open(file_path, "r:gz") as archive:
+        members = archive.getmembers()
+        names: dict[PurePosixPath, bool] = {}
+        for member in members:
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts or "\\" in member.name:
+                raise ValueError(f"Unsafe archive path: {member.name}")
+            if not member.isfile() and not member.isdir():
+                raise ValueError(f"Unsupported archive member: {member.name}")
+            if name in names:
+                raise ValueError(f"Duplicate archive path: {member.name}")
+            names[name] = member.isdir()
+
+        for name in names:
+            if any(parent in names and not names[parent] for parent in name.parents):
+                raise ValueError(f"Archive file is used as a directory: {name}")
+
+        output.mkdir(mode=0o700, parents=True, exist_ok=True)
+        paths.validate_removal_path(output)
+        archive.extractall(path=output, filter="data")
 
 
 def is_relative_path(path: str | Path) -> bool:
@@ -630,16 +649,7 @@ def is_relative_path(path: str | Path) -> bool:
 
 
 def get_relative_path(path: Path | str, base_path: str) -> str | Path:
-    if is_relative_path(path):
-        return path
-    else:
-        if isinstance(path, Path):
-            path = str(path)
-        base_path = str(base_path)
-        if path.startswith(base_path):
-            return path[len(base_path):].lstrip(os.sep)
-        else:
-            return path
+    return paths.relative_to_install(path, base_path)
 
 
 def stopwatch(start_time=None, interval=10.0):
