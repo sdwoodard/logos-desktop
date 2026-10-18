@@ -1,4 +1,5 @@
 import importlib
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from zipfile import ZipFile
 
 from ou_dedetai import constants, control, network, tui_app, utils
 from ou_dedetai.config import Config
+from ou_dedetai.app import App, UserExitedFromAsk
 
 try:
     importlib.import_module("tkinter")
@@ -122,7 +124,21 @@ class TestPrivateSupport(unittest.TestCase):
                     _overrides=SimpleNamespace(),
                     _network=SimpleNamespace(_cache=SimpleNamespace(_as_dict=lambda: {})),
                 )
-                app.ask.side_effect = [str(archive_path), choice]
+                def answer(question, options):
+                    if "Where do you" in question:
+                        return str(archive_path)
+                    with ZipFile(archive_path) as completed:
+                        self.assertIsNone(completed.testzip())
+                        self.assertIn("context.json", completed.namelist())
+                    return choice
+
+                def status(message, percent=None):
+                    if message.startswith("Wrote support"):
+                        with ZipFile(archive_path) as completed:
+                            self.assertIsNone(completed.testzip())
+
+                app.ask.side_effect = answer
+                app.status.side_effect = status
 
                 with (
                     patch.object(control.os.path, "expanduser", return_value=str(root)),
@@ -131,6 +147,7 @@ class TestPrivateSupport(unittest.TestCase):
                     patch.object(control.webbrowser, "open") as browser,
                 ):
                     self.assertEqual(control.get_support(app), str(archive_path))
+                self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
 
                 question, options = app.ask.call_args.args
                 self.assertEqual(options, ["Keep archive local", "Open private project issue", "Show links"])
@@ -151,9 +168,69 @@ class TestPrivateSupport(unittest.TestCase):
                     self.assertIsNone(archive.testzip())
                     self.assertIn("context.json", archive.namelist())
 
+    def test_failed_archive_close_or_publication_preserves_previous_output(self):
+        class CloseFailure(ZipFile):
+            def close(self):
+                writing = self.fp is not None and self.mode == "w"
+                super().close()
+                if writing:
+                    raise OSError("injected ZIP finalization failure")
+
+        for failure in ("close", "replace"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "support.zip"
+                archive.write_bytes(b"previous archive sentinel")
+                absent = str(root / "absent")
+                app = Mock()
+                app.conf = SimpleNamespace(
+                    config_file_path=absent, app_log_path=absent, app_wine_log_path=absent,
+                    app_wine_log_previous_path=absent, _faithlife_crash_log=None,
+                    _raw=SimpleNamespace(wine_binary=None, _as_dict=lambda: {}),
+                    _overrides=SimpleNamespace(),
+                    _network=SimpleNamespace(_cache=SimpleNamespace(_as_dict=lambda: {})),
+                )
+                app.ask.return_value = str(archive)
+                boundary = (
+                    patch.object(control, "ZipFile", CloseFailure) if failure == "close"
+                    else patch.object(control.os, "replace", side_effect=OSError("injected replace failure"))
+                )
+                with (
+                    boundary,
+                    patch.object(control.subprocess, "check_output", return_value="fixture"),
+                    patch.object(control.system, "get_dialog", return_value="cli"),
+                    patch.object(control.webbrowser, "open") as browser,
+                    self.assertRaises(OSError),
+                ):
+                    control.get_support(app)
+                self.assertEqual(archive.read_bytes(), b"previous archive sentinel")
+                self.assertEqual(app.ask.call_count, 1)
+                self.assertFalse(any(call.args[0].startswith("Wrote support") for call in app.status.call_args_list))
+                browser.assert_not_called()
+
 
 @unittest.skipIf(gui_app is None, f"Native Tk import unavailable: {GUI_IMPORT_ERROR}")
 class TestPrivateGuiUpdates(unittest.TestCase):
+    def test_post_uninstall_empty_selection_still_offers_install_controls(self):
+        window = object.__new__(gui_app.ControlWindow)
+        window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None))
+        window.gui = Mock()
+        window.is_installed = Mock(return_value=False)
+        window.update_app_button()
+        window.gui.app_button.state.assert_called_with(["!disabled"])
+        window.gui.app_install_advanced.state.assert_called_with(["!disabled"])
+
+    def test_native_save_cancellation_and_prompt_retry_cancel(self):
+        window = object.__new__(gui_app.ControlWindow)
+        window.root = Mock()
+        window.conf = SimpleNamespace(_overrides=SimpleNamespace(assume_yes=False))
+        with patch.object(gui_app.fd, "asksaveasfilename", return_value=""):
+            self.assertIsNone(gui_app.GuiApp._ask(window, "Output", constants.PROMPT_OPTION_NEW_FILE))
+        window._ask = Mock(side_effect=["invalid", None])
+        with self.assertRaises(UserExitedFromAsk):
+            App.ask(window, "Choose", ["valid"])
+        self.assertEqual(window._ask.call_count, 2)
+
     def test_binary_window_initialization_does_not_start_release_discovery(self):
         def initialize_fixture(window, *args, **kwargs):
             window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None))

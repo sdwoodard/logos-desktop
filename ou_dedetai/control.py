@@ -3,11 +3,12 @@ They can be called from CLI, GUI, or TUI.
 """
 
 import copy
-import glob
+from contextlib import ExitStack
 import json
 import logging
 import os
 import stat
+import tempfile
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -15,6 +16,7 @@ import webbrowser
 from zipfile import ZipFile
 
 from ou_dedetai import constants
+from ou_dedetai import maintenance, backup_store
 from ou_dedetai import paths
 from ou_dedetai import system
 from ou_dedetai.app import App
@@ -24,43 +26,65 @@ def edit_file(config_file: str):
     system.run_command(["xdg-open", config_file])
 
 
+@maintenance.maintains_installation
 def remove_all_index_files(app: App):
-    if not app.conf.logos_exe:
-        app.exit("Cannot remove index files, Logos is not installed")
-    logos_dir = os.path.dirname(app.conf.logos_exe)
-    index_paths = [
-        os.path.join(logos_dir, "Data", "*", "BibleIndex"),
-        os.path.join(logos_dir, "Data", "*", "LibraryIndex"),
-        os.path.join(logos_dir, "Data", "*", "PersonalBookIndex"),
-        os.path.join(logos_dir, "Data", "*", "LibraryCatalog"),
-    ]
-    for index_path in index_paths:
-        pattern = os.path.join(index_path, "*")
-        files_to_remove = glob.glob(pattern)
-
-        for file_to_remove in files_to_remove:
-            try:
-                os.remove(file_to_remove)
-                logging.info(f"Removed: {file_to_remove}")
-            except OSError as e:
-                logging.error(f"Error removing {file_to_remove}: {e}")
-
-    app.status("Removed all LogosBible index files!", 100)
+    _remove_data_files(("BibleIndex", "LibraryIndex", "PersonalBookIndex", "LibraryCatalog"))
+    app.status("Removed index and catalog files", 100)
 
 
+@maintenance.maintains_installation
 def remove_library_catalog(app: App):
-    if not app.conf.logos_exe:
-        app.exit("Cannot remove library catalog, Logos is not installed")
-    logos_dir = os.path.dirname(app.conf.logos_exe)
-    files_to_remove = glob.glob(f"{logos_dir}/Data/*/LibraryCatalog/*")
-    for file_to_remove in files_to_remove:
-        try:
-            os.remove(file_to_remove)
-            logging.info(f"Removed: {file_to_remove}")
-        except OSError as e:
-            logging.error(f"Error removing {file_to_remove}: {e}")
+    _remove_data_files(("LibraryCatalog",))
+    app.status("Removed library catalog files", 100)
 
 
+def _remove_data_files(names):
+    from ou_dedetai.config import get_logos_appdata_dir, get_wine_user
+
+    context = maintenance.current_context()
+    user = get_wine_user(str(context.prefix))
+    if user is None or context.product not in ("Logos", "Verbum"):
+        raise maintenance.MaintenanceError("Cannot find installed product data")
+    live = Path(get_logos_appdata_dir(str(context.prefix), user, context.product))
+    if not live.resolve().is_relative_to(context.prefix):
+        raise maintenance.MaintenanceError("Product data escapes the selected prefix")
+    targets = []
+    directories = []
+    with ExitStack() as stack:
+        parent = stack.enter_context(backup_store.Directory(live))
+        if not parent.path.resolve().is_relative_to(context.prefix):
+            raise maintenance.MaintenanceError("Product data moved outside the selected prefix")
+        data = stack.enter_context(backup_store.Directory(parent.path / "Data"))
+        directories.extend([parent, data])
+        for user_name in os.listdir(data.fd):
+            user_directory = stack.enter_context(backup_store.Directory(data.path / user_name))
+            directories.append(user_directory)
+            for name in names:
+                candidate = user_directory.path / name
+                if not os.path.lexists(candidate):
+                    continue
+                directory = stack.enter_context(backup_store.Directory(candidate))
+                if directory.mount != parent.mount:
+                    raise maintenance.MaintenanceError("Index cleanup cannot cross a nested mount")
+                directories.append(directory)
+                for filename in os.listdir(directory.fd):
+                    info = os.stat(filename, dir_fd=directory.fd, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                        raise maintenance.MaintenanceError(f"Unsupported index cleanup entry: {filename}")
+                    targets.append((directory, filename, backup_store.identity(info)))
+        maintenance.assert_quiescent(context)
+        for directory in directories:
+            directory.validate()
+        for directory, name, expected in targets:
+            current = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            if backup_store.identity(current) != expected:
+                raise maintenance.MaintenanceError("Index cleanup entry changed after validation")
+        for directory, name, expected in targets:
+            directory.validate()
+            os.unlink(name, dir_fd=directory.fd)
+
+
+@maintenance.maintains_installation
 def uninstall(app: App):
     """Remove only preflighted installation data and explicitly selected cleanup."""
     from ou_dedetai.config import PersistentConfiguration
@@ -68,6 +92,9 @@ def uninstall(app: App):
     config_path = Path(app.conf._overrides.config_path)
     install_value = app.conf._overrides.install_dir or app.conf._raw.install_dir
     install = Path(install_value) if install_value else None
+    context = maintenance.current_context()
+    if install is not None and context.prefix != (install / "data/wine64_bottle").resolve():
+        raise maintenance.MaintenanceError("Selected prefix does not match the installation being uninstalled")
     protected = (
         constants.CACHE_BASE,
         Path(constants.XDG_DATA_HOME),
@@ -133,11 +160,12 @@ def uninstall(app: App):
                     continue
             raise ValueError(f"Overlapping uninstall targets: {first} and {second}")
 
-    context = "These paths will be removed:\n\n" + "\n".join(str(path) for path in targets)
-    if not app.approve("Are you sure you want to uninstall?", context):
+    confirmation = "These paths will be removed:\n\n" + "\n".join(str(path) for path in targets)
+    if not app.approve("Are you sure you want to uninstall?", confirmation):
         return
     app.status("Uninstalling…")
     ordered = sorted(targets.values(), key=lambda target: not stat.S_ISDIR(target.info.st_mode))
+    maintenance.assert_quiescent(context)
     paths.remove_targets(ordered, protected)
 
     # Reloading would recreate a cache that the user just asked to remove.
@@ -153,8 +181,7 @@ def uninstall(app: App):
 
 
 def get_support(app: App) -> str:
-    """Creates a zip file with all the information to enable support and opens support
-    """
+    """Publish a closed support archive before presenting follow-up choices."""
 
     # Save in ~/Downloads or ~/
     output_dir = Path(os.path.expanduser("~/Downloads"))
@@ -166,12 +193,56 @@ def get_support(app: App) -> str:
         constants.PROMPT_OPTION_NEW_FILE,
     ])
 
+    if not output_path or not str(output_path).strip():
+        from ou_dedetai.app import UserExitedFromAsk
+        raise UserExitedFromAsk
+    output = Path(output_path).expanduser().absolute()
+    sources = [
+        app.conf.config_file_path, app.conf.app_log_path, app.conf.app_wine_log_path,
+        app.conf.app_wine_log_previous_path, app.conf._faithlife_crash_log,
+    ]
+    for source in filter(None, sources):
+        source = Path(source)
+        if output.resolve() == source.resolve() or (output.exists() and source.exists() and output.samefile(source)):
+            raise maintenance.MaintenanceError("Support output cannot replace a configuration or log file")
+    if output.is_symlink() or output.is_dir():
+        raise maintenance.MaintenanceError("Support output must be an unlinked regular file")
+
     app.status(f"Writing support package to: {output_path}", percent=0)
 
-    if Path(output_path).exists():
-        os.remove(output_path)
+    with tempfile.TemporaryDirectory(prefix=".logos-support-", dir=output.parent) as temporary:
+        staged = Path(temporary) / "support.zip"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        _write_support(app, staged)
+        with staged.open("rb") as completed:
+            os.fsync(completed.fileno())
+        with ZipFile(staged) as archive:
+            if archive.testzip() is not None or "context.json" not in archive.namelist():
+                raise maintenance.MaintenanceError("Support archive validation failed")
+        os.replace(staged, output)
 
-    with ZipFile(output_path, "x") as zip:
+    app.status(f"Wrote support bundle to: {output_path}", percent=100)
+    answer = app.ask(
+        "How would you like to continue to get support?\n"
+        "Keep this archive private and review its contents before sharing.\n"
+        "The project repository and issues are private during development.\n"
+        "Describe what went wrong and which actions you took.",
+        ['Keep archive local', 'Open private project issue', 'Show links'],
+    )
+    if answer == "Open private project issue":
+        webbrowser.open(constants.REPOSITORY_NEW_ISSUE_LINK)
+    elif answer == "Show links":
+        app.info(
+            "Private project links:\n"
+            f"- Repository: {constants.REPOSITORY_LINK}\n"
+            f"- Issues: {constants.REPOSITORY_ISSUES_LINK}\n"
+        )
+    return output_path
+
+
+def _write_support(app, output_path):
+    with ZipFile(output_path, "w") as zip:
         if Path(app.conf.config_file_path).exists():
             zip.write(app.conf.config_file_path)
         if Path(app.conf.app_log_path).exists():
@@ -259,28 +330,3 @@ def get_support(app: App) -> str:
         context_to_write["persistent_config"] = app.conf._raw._as_dict()
 
         zip.writestr("context.json", json.dumps(context_to_write, indent=4))
-
-        app.status(f"Wrote support bundle to: {output_path}", percent=100)
-
-        answer = app.ask(
-            "How would you like to continue to get support?\n"
-            "Keep this archive private and review its contents before sharing.\n"
-            "The project repository and issues are private during development.\n"
-            "Describe what went wrong and which actions you took.",
-            [
-                'Keep archive local',
-                'Open private project issue',
-                "Show links"
-            ]
-        )
-
-        if answer == "Open private project issue":
-            webbrowser.open(constants.REPOSITORY_NEW_ISSUE_LINK)
-        elif answer == "Show links":
-            app.info(
-                "Private project links:\n"
-                f"- Repository: {constants.REPOSITORY_LINK}\n"
-                f"- Issues: {constants.REPOSITORY_ISSUES_LINK}\n"
-            )
-
-    return output_path

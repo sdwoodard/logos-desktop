@@ -1,8 +1,13 @@
 import abc
 import contextlib
 import logging
+import os
+import select
 import sqlite3
-import inotify.adapters # type: ignore
+import struct
+import threading
+import inotify.calls
+import inotify.constants
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +28,7 @@ class FaithlifeDatabase(contextlib.AbstractContextManager):
     ):
         self.logos_app_dir = logos_app_dir
         self.logos_user_id = logos_user_id
+        self._db = None
 
     @abc.abstractmethod
     def _database_path(self) -> Path:
@@ -60,15 +66,18 @@ class FaithlifeDatabase(contextlib.AbstractContextManager):
     def close(self):
         if self._db:
             self._db.close()
+            self._db = None
 
     def __enter__(self):
         self._db = self._connect()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self._db:
-            self._db.__exit__(exc_type, exc_value, traceback)
-            self._db = None
+        try:
+            if self._db:
+                self._db.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 class LocalUserPreferencesManager(FaithlifeDatabase):
@@ -95,58 +104,48 @@ class LocalUserPreferencesManager(FaithlifeDatabase):
 
 
 # FIXME: refactor into FaithlifeDatabase class
-def watch_db(path: str, sql_statements: list[str]):
-    """Runs SQL statements against a sqlite db once to start with, then again every time
-    The sqlite db is written to.
-    
-    Handles -wal/-shm as well
+def watch_db(path: str, sql_statements: list[str], stop: threading.Event):
+    """Apply preferences while owned, releasing every database and watch on stop."""
+    descriptor = inotify.calls.inotify_init()
+    os.set_blocking(descriptor, False)
+    connection = None
+    try:
+        if stop.is_set():
+            return
+        mask = inotify.constants.IN_MODIFY | inotify.constants.IN_CLOSE_WRITE
+        inotify.calls.inotify_add_watch(descriptor, os.fsencode(Path(path).parent), mask)
+        connection = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, autocommit=True, timeout=0.2)
 
-    This function may run infinitely, spawn it on it's own thread
-    """
-    # Silence inotify logs
-    logging.getLogger('inotify').setLevel(logging.CRITICAL)
-    i = inotify.adapters.Inotify()
-    i.add_watch(path)
+        def execute_sql():
+            for statement in sql_statements:
+                if stop.is_set():
+                    return
+                try:
+                    cursor = connection.execute(statement)
+                    cursor.close()
+                except sqlite3.OperationalError:
+                    logging.exception("Best-effort db update failed")
 
-    def execute_sql(cur):
-        # logging.debug(f"Executing SQL against {path}: {sql_statements}")
-        for statement in sql_statements:
-            try:
-                cur.execute(statement)
-            # Database may be locked, keep trying later.
-            except sqlite3.OperationalError:
-                logging.exception("Best-effort db update failed")
-                pass
-
-    with sqlite3.connect(path, autocommit=True) as con:
-        cur = con.cursor()
-
-        # Execute once before we start the loop
-        execute_sql(cur)
+        execute_sql()
         swallow_one = True
-
-        # Keep track of if we've added -wal and -shm are added yet
-        # They may not exist when we start
-        watching_wal_and_shm = False
-        for event in i.event_gen(yield_nones=False):
-            (_, type_names, _, _) = event
-            # These files may not exist when it's executes for the first time
-            if (
-                not watching_wal_and_shm
-                and Path(path + "-wal").exists()
-                and Path(path + "-shm").exists()
-            ):
-                i.add_watch(path + "-wal")
-                i.add_watch(path + "-shm")
-                watching_wal_and_shm = True
-
-            if 'IN_MODIFY' in type_names or 'IN_CLOSE_WRITE' in type_names:
-                # Check to make sure that we aren't responding to our own write
-                if swallow_one:
-                    swallow_one = False
-                    continue
-                execute_sql(cur)
-                swallow_one = True
-        # Shouldn't be possible to get here, but on the off-chance it happens, 
-        # we'd like to know and cleanup
-        logging.debug(f"Stopped watching {path}")
+        names = {Path(path).name, Path(path).name + "-wal", Path(path).name + "-shm"}
+        while not stop.is_set():
+            ready, _, _ = select.select([descriptor], [], [], 0.2)
+            if not ready:
+                continue
+            events = os.read(descriptor, 65536)
+            offset = 0
+            changed = False
+            while offset < len(events):
+                _, _, _, length = struct.unpack_from("iIII", events, offset)
+                name = os.fsdecode(events[offset + 16:offset + 16 + length].rstrip(b"\0"))
+                changed |= name in names
+                offset += 16 + length
+            if changed:
+                if not swallow_one:
+                    execute_sql()
+                swallow_one = not swallow_one
+    finally:
+        if connection is not None:
+            connection.close()
+        os.close(descriptor)

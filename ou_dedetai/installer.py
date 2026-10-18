@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from ou_dedetai.app import App, UserExitedFromAsk
+from ou_dedetai.app import App
 
 from . import constants
+from . import maintenance
 from . import network
 from . import system
 from . import utils
@@ -416,18 +417,20 @@ def ensure_launcher_shortcuts(app: App):
 
 
 def install(app: App):
+    if not app.conf._raw.faithlife_product:
+        app.conf.faithlife_product
+    if not getattr(app.conf._raw, "faithlife_product_version", None):
+        app.conf.faithlife_product_version
+    if not (getattr(app.conf._overrides, "install_dir", None) or app.conf._raw.install_dir):
+        app.conf.install_dir
+    with maintenance.configured(app) as context, maintenance.use(context):
+        return _install(app)
+
+
+def _install(app: App):
     """Entrypoint for installing"""
     app.status('Installing…')
-    try:
-        ensure_launcher_shortcuts(app)
-    except UserExitedFromAsk:
-        # Reset choices, it's possible that the user didn't mean to select
-        # one of the options they did - that is why they are exiting
-        app.conf.faithlife_product = None  # type: ignore[assignment]
-        app.conf.faithlife_product_version = None  # type: ignore[assignment]
-        app.conf.faithlife_product_release = None  # type: ignore[assignment]
-        app.conf.install_dir = None  # type: ignore[assignment]
-        raise
+    ensure_launcher_shortcuts(app)
     app.status("Install Complete!", 100)
     # Trigger a config update event to refresh the UIs
     app._config_updated_event.set()
@@ -437,6 +440,7 @@ def get_progress_pct(current, total):
     return round(current * 100 / total)
 
 
+@maintenance.uses_installation
 def create_wine_appimage_symlinks(app: App):
     app.status("Creating wine appimage symlinks…")
     appdir_bindir = Path(app.conf.installer_binary_dir)
@@ -564,6 +568,7 @@ Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(addit
     return launcher_path
 
 
+@maintenance.uses_installation
 def create_launcher_shortcuts(app: App):
     # Set variables for use in launcher files.
     flproduct = app.conf.faithlife_product

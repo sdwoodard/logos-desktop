@@ -8,12 +8,11 @@ import logging
 import psutil
 import threading
 
-from ou_dedetai import constants, database
+from ou_dedetai import constants, database, maintenance
 from ou_dedetai.app import App
 from ou_dedetai.config import get_logos_user_id
 
 from . import system
-from . import utils
 from . import wine
 
 
@@ -33,6 +32,29 @@ class LogosManager:
         """These are sub-processes we started"""
         self.existing_processes: dict[str, list[psutil.Process]] = {}
         """These are processes we discovered already running"""
+        self._watchers = {}
+        self._watcher_lock = threading.Lock()
+
+    def stop_watchers(self):
+        with self._watcher_lock:
+            handles = list(self._watchers.values())
+            for stop, thread in handles:
+                stop.set()
+            for stop, thread in handles:
+                thread.join(timeout=3)
+                if thread.is_alive():
+                    raise maintenance.MaintenanceBusy("A database watcher has not stopped")
+            self._watchers.clear()
+
+    @maintenance.uses_owner
+    def _watch_database(self, path, sql):
+        with self._watcher_lock:
+            old = self._watchers.get(path)
+            if old and old[1].is_alive():
+                return
+            stop = threading.Event()
+            thread = maintenance.spawn(self.app, database.watch_db, str(path), sql, stop)
+            self._watchers[path] = (stop, thread)
 
     def monitor_indexing(self):
         if self.app.conf.logos_indexer_exe_windows_path in self.existing_processes:
@@ -152,11 +174,19 @@ class LogosManager:
                         sent_trouble_signing_in_message = True
 
 
+    @maintenance.uses_owner
     def start(self):
         self.logos_state = State.STARTING
-        wine_release, _ = wine.get_wine_release(self.app.conf.wine_binary)
-
-        def run_logos():
+        try:
+            wine_release, _ = wine.get_wine_release(self.app.conf.wine_binary)
+            good_wine, reason = wine.check_wine_rules(
+                wine_release,
+                self.app.conf.installed_faithlife_product_release,
+                self.app.conf.faithlife_product_version,
+            )
+            if not good_wine:
+                raise maintenance.MaintenanceError(reason or "The selected Wine runtime is incompatible")
+            wine.wineserver_kill(self.app)
             self.prevent_logos_updates()
             self.set_auto_updates(False)
             if not self.app.conf.logos_exe:
@@ -166,43 +196,24 @@ class LogosManager:
                 self.app.conf.wine_binary,
                 exe=self.app.conf.logos_exe
             )
-            if process is not None:
-                self.processes[self.app.conf.logos_exe] = process
-            self.logos_state = State.RUNNING
+            if process is None:
+                raise maintenance.MaintenanceError("Wine did not start Logos")
+            self.processes[self.app.conf.logos_exe] = process
+        except BaseException:
+            self.logos_state = State.STOPPED
+            self.stop_watchers()
+            raise
+        self.logos_state = State.RUNNING
+        def finished(returncode):
+            self.logos_state = State.STOPPED
 
-        # Ensure wine version is compatible with Logos release version.
-        good_wine, reason = wine.check_wine_rules(
-            wine_release,
-            self.app.conf.installed_faithlife_product_release,
-            self.app.conf.faithlife_product_version
-        )
-        if not good_wine:
-            self.app.exit(reason)
-        else:
-            if reason is not None:
-                logging.debug(f"Warning: Wine Check: {reason}")
-            wine.wineserver_kill(self.app)
-            # Don't send "Running" message to GUI b/c it never clears.
-            logging.info(f"Running {self.app.conf.faithlife_product}…")
-            self.app.start_thread(self.monitor_for_potential_issues, daemon_bool=False)
-            self.app.start_thread(run_logos, daemon_bool=False)
-            # NOTE: The following code would keep the CLI open while running
-            # Logos, but since wine logging is sent directly to wine.log,
-            # there's no terminal output to see. A user can see that output by:
-            # tail -f ~/.local/state/FaithLife-Community/wine.log
-            # from ou_dedetai.cli import CLI
-            # if isinstance(self.app, CLI):
-            #     run_logos()
-            #     self.monitor()
-            #     while self.processes.get(app.conf.logos_exe) is None:
-            #         time.sleep(0.1)
-            #     while self.logos_state != State.STOPPED:
-            #         time.sleep(0.1)
-            #         self.monitor()
+        maintenance.hold_process(self.app, process, finished)
+        self.app.start_thread(self.monitor_for_potential_issues, daemon_bool=False)
 
     # For now enforce this all the time, ideally we wouldn't override the user's choice
     # But risks as they are, setting it to false is safer for now.
     # Feel free to revisit when there is less chances of it breaking an install
+    @maintenance.uses_owner
     def set_auto_updates(self, val: bool):
         """Edits Logos' internal db entry corresponding to the option in:
         Program Settings -> Internet -> Automatically Download New Resources
@@ -220,8 +231,9 @@ class LogosManager:
             """ StartDownloadHour="0" StopDownloadHour="0" MarkNewResourcesAsCloud="true" />' """
             """ WHERE Type='UpdateManagerPreferences'""" 
         )
-        self.app.start_thread(database.watch_db, str(db_path), [sql])
+        self._watch_database(db_path, [sql])
 
+    @maintenance.uses_owner
     def prevent_logos_updates(self):
         """Edits Logos' internal database to remove pending installers
         before it has a chance to apply them
@@ -254,7 +266,7 @@ class LogosManager:
             "UPDATE Resources SET Status=1, UpdateId=NULL WHERE UpdateId IS NOT NULL "+
                 "AND UpdateId NOT IN (SELECT UpdateId FROM Updates)"
         ]
-        self.app.start_thread(database.watch_db, str(db_path), sql)
+        self._watch_database(db_path, sql)
 
     # Also noticed if the database Data/*/CloudResourceManager/CloudResources.db 
     # table TransitionStates has a ResourceId that isn't registered in UpdateManager,
@@ -300,54 +312,35 @@ class LogosManager:
                     os.killpg(process.pid, signal.SIGTERM)
                     os.waitpid(-process.pid, 0)
 
+    @maintenance.uses_owner
     def index(self):
         self.indexing_state = State.STARTING
-        index_finished = threading.Event()
-
-        def run_indexing():
+        try:
             if not self.app.conf.logos_indexer_exe_windows_path:
                 raise ValueError("Cannot find installed indexer")
+            wine.wineserver_kill(self.app)
             process = wine.run_wine_application(
                 app=self.app,
                 wine_binary=self.app.conf.wine_binary,
                 exe=self.app.conf.logos_indexer_exe_windows_path
             )
-            if process is not None:
-                self.processes[self.app.conf.logos_indexer_exe_windows_path] = process
-
-        def check_if_indexing(process: threading.Thread):
-            start_time = time.time()
-            last_time = start_time
-            update_send = 0
-            while process.is_alive():
-                update, last_time = utils.stopwatch(last_time, 3)
-                if update:
-                    update_send = update_send + 1
-                if update_send == 10:
-                    total_elapsed_time = time.time() - start_time
-                    elapsed_min = int(total_elapsed_time // 60)
-                    elapsed_sec = int(total_elapsed_time % 60)
-                    formatted_time = f"{elapsed_min}m {elapsed_sec}s"
-                    self.app.status(f"Indexing is running… (Elapsed Time: {formatted_time})")
-                    update_send = 0
-            index_finished.set()
-
-        def wait_on_indexing():
-            index_finished.wait()
+            if process is None:
+                raise maintenance.MaintenanceError("Wine did not start the indexer")
+            self.processes[self.app.conf.logos_indexer_exe_windows_path] = process
+        except BaseException:
             self.indexing_state = State.STOPPED
-            self.app.status("Indexing has finished.", percent=100)
-            wine.wineserver_wait(app=self.app)
+            raise
 
-        wine.wineserver_kill(self.app)
-        self.app.status("Indexing has begun…", 0)
-        index_thread = self.app.start_thread(run_indexing, daemon_bool=False)
+        def wait_on_indexing(returncode):
+            self.indexing_state = State.STOPPED
+            if returncode == 0:
+                self.app.status("Indexing process has finished", 100)
+            else:
+                self.app.status(f"Indexing process failed with exit code {returncode}", 0)
+
         self.indexing_state = State.RUNNING
-        self.app.start_thread(
-            check_if_indexing,
-            index_thread,
-            daemon_bool=False
-        )
-        self.app.start_thread(wait_on_indexing, daemon_bool=False)
+        self.app.status("Indexing has begun", 0)
+        maintenance.hold_process(self.app, process, wait_on_indexing)
 
     def stop_indexing(self):
         self.indexing_state = State.STOPPING
@@ -374,6 +367,7 @@ class LogosManager:
                 self.indexing_state = State.STOPPED
         wine.wineserver_wait(app=self.app)
 
+    @maintenance.uses_owner
     def get_app_logging_state(self, init=False):
         state = 'DISABLED'
         try:
@@ -382,6 +376,8 @@ class LogosManager:
                 'Enabled',
                 self.app
             )
+        except maintenance.MaintenanceError:
+            raise
         except Exception as e:
             logging.warning(f"Failed to determine if logging was enabled, assuming no: {e}") 
             current_value = None
@@ -389,6 +385,7 @@ class LogosManager:
             state = 'ENABLED'
         return state
 
+    @maintenance.uses_owner
     def switch_logging(self, action=None):
         state_disabled = 'DISABLED'
         value_disabled = '0000'
@@ -421,7 +418,8 @@ class LogosManager:
             exe='reg',
             exe_args=exe_args
         )
-        if process:
-            process.wait()
+        if process is None:
+            raise maintenance.MaintenanceError("Logging was not changed because Wine did not start")
+        process.wait()
         wine.wineserver_wait(self.app)
         self.app.conf.faithlife_product_logging = state == state_enabled

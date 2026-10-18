@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 import tarfile
 import tempfile
+import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, control, installer, network, paths, utils, wine
+from ou_dedetai import constants, control, installer, maintenance, network, paths, utils, wine
 from ou_dedetai.config import PersistentConfiguration
 
 
@@ -60,6 +62,36 @@ class TestUninstallBoundaries(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), b"unrelated cache")
         self.assertEqual(unknown_log.read_bytes(), b"unrelated log")
         self.app.status.assert_called_with("Uninstalled")
+
+    def test_writer_started_during_confirmation_prevents_any_removal(self):
+        processes = []
+        prefix = self.install / "data/wine64_bottle"
+        original = self.config.read_bytes()
+
+        def approve(question, context):
+            if "Are you sure" not in question:
+                return False
+            program = "import time\nprint('ready',flush=True)\ntime.sleep(20)\n"
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", program, str(prefix)],
+                stdout=subprocess.PIPE, text=True, env=dict(os.environ, WINEPREFIX=str(prefix)),
+            )
+            processes.append(process)
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            return True
+
+        self.app.approve.side_effect = approve
+        try:
+            with self.assertRaises(maintenance.MaintenanceBusy):
+                control.uninstall(self.app)
+            self.assertEqual(self.config.read_bytes(), original)
+            self.assertTrue(self.install.exists())
+            self.assertFalse(list(self.root.glob(".logos-desktop-uninstall-*")))
+        finally:
+            for process in processes:
+                process.terminate()
+                process.wait(timeout=5)
+                process.stdout.close()
 
     def test_invalid_cache_and_installation_fail_before_any_removal(self):
         original = self.config.read_bytes()
@@ -317,6 +349,8 @@ class TestArchiveConfinement(unittest.TestCase):
         self.app = SimpleNamespace(
             conf=SimpleNamespace(
                 wine_prefix=str(self.prefix), download_dir=str(self.root),
+                _raw=PersistentConfiguration(install_dir=str(self.root), faithlife_product="Logos"),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=str(self.prefix)),
                 icu_latest_version_url="https://example.invalid/icu.tar.gz", icu_latest_version="v1",
             ), status=Mock(),
         )

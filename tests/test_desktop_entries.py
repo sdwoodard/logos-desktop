@@ -16,6 +16,8 @@ class TestDesktopEntries(unittest.TestCase):
             app = SimpleNamespace(conf=SimpleNamespace(
                 install_dir=str(install), faithlife_product="Logos",
                 logos_exe_windows_path=r"C:\Logos Space\Logos.exe",
+                _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
             ))
             with (
                 patch.multiple(constants, RUNMODE="binary", XDG_DATA_HOME=str(root / "share")),
@@ -43,6 +45,8 @@ class TestDesktopEntries(unittest.TestCase):
                 install.mkdir()
                 app = SimpleNamespace(conf=SimpleNamespace(
                     install_dir=str(install), faithlife_product="Logos", logos_exe_windows_path=r"C:\Logos.exe",
+                    _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
+                    _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
                 ))
                 with (
                     patch.multiple(constants, RUNMODE="binary", XDG_DATA_HOME=str(root / "share")),
@@ -62,6 +66,8 @@ class TestDesktopEntries(unittest.TestCase):
             install.mkdir()
             app = SimpleNamespace(conf=SimpleNamespace(
                 install_dir=str(install), faithlife_product="Verbum", logos_exe_windows_path=None,
+                _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Verbum"),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
             ))
             with (
                 patch.multiple(constants, RUNMODE="script", XDG_DATA_HOME=str(root / "share")),

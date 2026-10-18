@@ -19,6 +19,7 @@ from . import cli
 from . import constants
 from . import gui_app
 from . import msg
+from . import maintenance
 from . import system
 from . import tui_app
 from . import utils
@@ -456,6 +457,10 @@ def main():
 
     try:
         run(ephemeral_config, action)
+    except maintenance.MaintenanceError as error:
+        logging.error("Operation failed: %s", error)
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from error
     except UserExitedFromAsk:
         # This isn't a critical failure, the user doesn't need a traceback,
         # they are the ones who told us to exit.

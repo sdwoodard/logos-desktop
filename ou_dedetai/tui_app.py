@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -23,12 +24,26 @@ from . import control
 from . import constants
 from . import installer
 from . import logos
+from . import maintenance
 from . import system
 from . import utils
 from . import wine
 
 
-class MenuModal(ModalScreen[str]):
+class PromptModal(ModalScreen):
+    """Complete an owned waiter when a prompt is removed without dismissal."""
+
+    def dismiss(self, result=None):
+        self._delivered = True
+        return super().dismiss(result)
+
+    def on_unmount(self):
+        cancel = getattr(self, "cancel_waiter", None)
+        if not getattr(self, "_delivered", False) and cancel is not None:
+            cancel()
+
+
+class MenuModal(PromptModal):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
 
     def __init__(self, title: str, options: list[str]) -> None:
@@ -58,7 +73,7 @@ class MenuModal(ModalScreen[str]):
         self.dismiss("Return to Main Menu")
 
 
-class InfoModal(ModalScreen[None]):
+class InfoModal(PromptModal):
     def __init__(self, message: str, title: str = "Information") -> None:
         super().__init__()
         self.message = message
@@ -75,7 +90,7 @@ class InfoModal(ModalScreen[None]):
         self.dismiss()
 
 
-class InputModal(ModalScreen[str]):
+class InputModal(PromptModal):
     def __init__(self, question: str, default: str = "") -> None:
         super().__init__()
         self.question = question
@@ -285,7 +300,11 @@ class TextualUI(TextualApp[None]):
 
     def action_quit(self) -> None:
         self.domain.is_running = False
+        self.domain.cancel_pending_prompts()
         self.exit()
+
+    def on_unmount(self):
+        self.domain.cancel_pending_prompts()
 
     def write_status(self, message: str) -> None:
         try:
@@ -321,6 +340,9 @@ class TextualUI(TextualApp[None]):
 
 class TUI(App):
     def __init__(self, ephemeral_config: EphemeralConfiguration) -> None:
+        self._prompt_lock = threading.Lock()
+        self._pending_prompts = {}
+        self._closing = threading.Event()
         super().__init__(ephemeral_config)
         self.is_running = True
         self._installer_thread: Optional[threading.Thread] = None
@@ -330,37 +352,52 @@ class TUI(App):
         self.config_updated_hooks.append(self._config_update_hook)
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
-        result: list[Optional[str]] = [None]
-        event = threading.Event()
-
-        def _done(choice: str | None) -> None:
-            result[0] = choice
-            event.set()
-
         if isinstance(options, str):
-            self.ui.call_from_thread(self.ui.push_screen, InputModal(question, default=str(Path.home())), _done)
+            screen = InputModal(question, default=str(Path.home()))
         else:
-            self.ui.call_from_thread(self.ui.push_screen, MenuModal(question, list(options)
-                                                                    + ["Return to Main Menu"]), _done)
-
-        event.wait()
-
-        answer = result[0]
-        if answer == "Return to Main Menu":
-            self.ui.call_from_thread(self.ui.go_to_main_menu)
-            return None
-        return answer
+            screen = MenuModal(question, list(options) + ["Return to Main Menu"])
+        answer = self._wait_for_prompt(screen)
+        return None if answer == "Return to Main Menu" else answer or None
 
     def _info(self, message: str) -> None:
-        event = threading.Event()
+        self._wait_for_prompt(InfoModal(message))
 
-        def _done(_: None) -> None:
+    def _wait_for_prompt(self, screen):
+        event = threading.Event()
+        result = [None, False]
+        with self._prompt_lock:
+            if self._closing.is_set():
+                raise UserExitedFromAsk
+            self._pending_prompts[event] = result
+
+        def done(choice=None, *, accepted=True):
+            with self._prompt_lock:
+                if self._pending_prompts.pop(event, None) is None:
+                    return
+                result[:] = [choice, accepted]
             event.set()
 
-        self.ui.call_from_thread(self.ui.push_screen, InfoModal(message), _done)
+        screen.cancel_waiter = lambda: done(accepted=False)
+        try:
+            self.ui.call_from_thread(self.ui.push_screen, screen, done)
+        except RuntimeError:
+            done(accepted=False)
         event.wait()
+        if not result[1]:
+            raise UserExitedFromAsk
+        return result[0]
+
+    def cancel_pending_prompts(self):
+        with self._prompt_lock:
+            self._closing.set()
+            waiting = list(self._pending_prompts)
+            self._pending_prompts.clear()
+        for event in waiting:
+            event.set()
 
     def _ui_call(self, callback, *args) -> None:
+        if self._closing.is_set():
+            return
         if threading.get_ident() == self.ui._thread_id:
             callback(*args)
         else:
@@ -454,6 +491,19 @@ class TUI(App):
         finally:
             self._ui_call(self.ui.go_to_main_menu)
 
+    def _run_operation(self, operation):
+        def run():
+            try:
+                operation(self)
+            except UserExitedFromAsk:
+                self.status("Operation cancelled")
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                self.status(f"Operation failed: {error}")
+                self._pop_up("Operation failed", str(error))
+            finally:
+                self._ui_call(self.ui.go_to_main_menu)
+        self.start_thread(run, daemon_bool=False)
+
     def main_menu_select(self, choice: str) -> None:
         original_assume_yes = getattr(self.conf._overrides, "assume_yes", False)
 
@@ -491,18 +541,17 @@ class TUI(App):
             threading.Thread(target=_update, daemon=True).start()
 
         elif self.conf._raw.faithlife_product and choice == f"Run {self.conf._raw.faithlife_product}":
-            self.logos.start()
-            self.ui._populate_main_menu()
+            self._run_operation(lambda app: app.logos.start())
 
         elif self.conf._raw.faithlife_product and choice == f"Stop {self.conf.faithlife_product}":
             self.logos.stop()
             self.ui._populate_main_menu()
 
         elif choice == "Run Indexing":
-            self.logos.index()
+            self._run_operation(lambda app: app.logos.index())
 
         elif choice == "Remove Library Catalog":
-            control.remove_library_catalog(self)
+            self._run_operation(control.remove_library_catalog)
 
         elif choice.startswith("Wine Config"):
             self.ui.push_screen(
@@ -541,12 +590,21 @@ class TUI(App):
         if not choice or choice == "Return to Main Menu":
             self.go_to_main_menu()
             return
+        operations = {
+            "Remove Library Catalog": control.remove_library_catalog,
+            "Remove All Index Files": control.remove_all_index_files,
+            "Uninstall": control.uninstall,
+            "Install ICU": wine.enforce_icu_data_files,
+            "Update to Latest AppImage": utils.update_to_latest_recommended_appimage,
+        }
+        if choice in operations:
+            self._run_operation(operations[choice])
+            return
+        if choice.endswith("Logging"):
+            self._run_operation(lambda app: app.logos.switch_logging())
+            return
         try:
-            if choice == "Remove Library Catalog":
-                control.remove_library_catalog(self)
-            elif choice == "Remove All Index Files":
-                control.remove_all_index_files(self)
-            elif choice == "Edit Config":
+            if choice == "Edit Config":
                 control.edit_file(self.conf.config_file_path)
             elif choice == "Reload Config":
                 self.conf.reload()
@@ -556,41 +614,31 @@ class TUI(App):
                 self.conf.toggle_installer_release_channel()
             elif choice == "Install Dependencies":
                 utils.install_dependencies(self)
-            elif choice == "Install ICU":
-                wine.enforce_icu_data_files(self)
-            elif choice.endswith("Logging"):
-                self.logos.switch_logging()
             elif choice == "Check OpenGL":
                 _, reason = system.check_opengl_version(self)
                 self.status(reason)
-            elif choice == "Uninstall":
-                control.uninstall(self)
-            elif choice == "Update to Latest AppImage":
-                utils.update_to_latest_recommended_appimage(self)
         except UserExitedFromAsk:
             pass
+        except maintenance.MaintenanceError as error:
+            self.status(f"Operation failed: {error}")
+            self._pop_up("Operation failed", str(error))
         self.go_to_main_menu()
 
     def renderer_select(self, choice: str | None) -> None:
         if choice in ("gdi", "gl", "dxvk", "vulkan"):
-            self.status(f"Changing renderer to {choice}…")
-            wine.set_renderer(self, self.conf.wine64_binary, choice)
-            self.status(f"Renderer set to {choice}")
-        self.go_to_main_menu()
+            @maintenance.uses_installation
+            def configure(app):
+                wine.set_renderer(app, app.conf.wine64_binary, choice)
+                app.status(f"Renderer set to {choice}")
+            self._run_operation(configure)
 
     def win_ver_logos_select(self, choice: str | None) -> None:
         if choice in ("vista", "win7", "win8", "win10", "win11"):
-            self.status(f"Setting Logos Windows version to {choice}…")
-            wine.set_win_version(self, "logos", choice)
-            self.status(f"Logos Windows version set to {choice}")
-        self.go_to_main_menu()
+            self._run_operation(lambda app: wine.set_win_version(app, "logos", choice))
 
     def win_ver_index_select(self, choice: str | None) -> None:
         if choice in ("vista", "win7", "win8", "win10", "win11"):
-            self.status(f"Setting Indexer Windows version to {choice}…")
-            wine.set_win_version(self, "indexer", choice)
-            self.status(f"Indexer Windows version set to {choice}")
-        self.go_to_main_menu()
+            self._run_operation(lambda app: wine.set_win_version(app, "indexer", choice))
 
     def set_wineconfig_menu_options(self) -> list[str]:
         return [
@@ -630,4 +678,8 @@ def control_panel_app(ephemeral_config: EphemeralConfiguration) -> None:
     try:
         tui.ui.run()
     finally:
+        tui.cancel_pending_prompts()
+        for thread in tui._threads:
+            if not thread.daemon:
+                thread.join(timeout=5)
         print()

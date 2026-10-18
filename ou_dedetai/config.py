@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine, system, paths
+from ou_dedetai import network, utils, constants, wine, system, paths, maintenance
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -441,14 +441,14 @@ class PersistentConfiguration:
                     output[k] = utils.get_relative_path(v, self.install_dir)
         return output
 
-    def write_config(self) -> None:
-        config_file_path = LegacyConfiguration.config_file_path()
+    def write_config(self, *, checked=False, config_file_path=None) -> None:
+        config_file_path = config_file_path or LegacyConfiguration.config_file_path()
         output = self._as_dict()
 
         def write_json_file(config_file_path: str) -> None:
             logging.info(f"Writing config to {config_file_path}")
-            os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
             try:
+                os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
                 with open(config_file_path, 'w') as config_file:
                     # Write this into a string first to avoid partial writes
                     # if encoding fails (which it shouldn't)
@@ -457,6 +457,8 @@ class PersistentConfiguration:
                     config_file.write('\n')
             except IOError as e:
                 logging.error(f"Error writing to file {config_file_path}: {e}")
+                if checked:
+                    raise maintenance.MaintenanceError(f"Configuration could not be saved: {config_file_path}") from e
                 # Continue, the installer can still operate even if it fails to write.
 
         if self.install_dir is not None:
@@ -610,9 +612,12 @@ class Config:
         # parameter given should be a string
         return str(getattr(self._raw, parameter))
 
-    def _write(self) -> None:
+    def _write(self, *, checked=False) -> None:
         """Writes configuration to file and lets the app know something changed"""
-        self._raw.write_config()
+        if checked:
+            self._raw.write_config(checked=True, config_file_path=self._overrides.config_path)
+        else:
+            self._raw.write_config()
         self.app._config_updated_event.set()
 
     def _relative_from_install_dir(self, path: Path | str) -> str:
@@ -633,15 +638,15 @@ class Config:
 
     def reload(self):
         """Re-loads the configuration from disk"""
-        self._raw = PersistentConfiguration.load_from_path(self._overrides.config_path)
-        self._network = self._create_network_requests_with_hook()
-        # Also clear out our cached values
-        self._logos_exe = self._download_dir = self._wine_output_encoding = None
-        self._installed_faithlife_product_release = self._wine_binary_files = None
-        self._wine_appimage_files = self._wine_user = None
-        self._wine64_path = self._user_download_dir = None
-
-        self.app._config_updated_event.set()
+        loaded = PersistentConfiguration.load_from_path(self._overrides.config_path)
+        with maintenance.change_selection(self, loaded.install_dir):
+            self._raw = loaded
+            self._network = self._create_network_requests_with_hook()
+            self._logos_exe = self._download_dir = self._wine_output_encoding = None
+            self._installed_faithlife_product_release = self._wine_binary_files = None
+            self._wine_appimage_files = self._wine_user = None
+            self._wine64_path = self._user_download_dir = None
+            self.app._config_updated_event.set()
 
     @property
     def config_file_path(self) -> str:
@@ -664,11 +669,10 @@ class Config:
     @faithlife_product.setter
     def faithlife_product(self, value: Optional[str]):
         if self._raw.faithlife_product != value:
-            self._raw.faithlife_product = value
-            # Reset dependent variables
-            self.faithlife_product_version = None # type: ignore[assignment]
-
-            self._write()
+            with maintenance.change_selection(self):
+                self._raw.faithlife_product = value
+                self.faithlife_product_version = None
+                self._write()
 
     @property
     def faithlife_product_version(self) -> str:
@@ -687,18 +691,12 @@ class Config:
     @faithlife_product_version.setter
     def faithlife_product_version(self, value: Optional[str]):
         if self._raw.faithlife_product_version != value:
-            self._raw.faithlife_product_version = value
-            # Set dependents
-            self._raw.faithlife_product_release = None
-            # Install Dir has the name of the product and it's version. Reset it too
-            if self._overrides.install_dir is None:
-                self._raw.install_dir = None
-            # While different versions have different wine version requirements,
-            # In order to support WINE_EXE we shouldn't clobber here.
-            # self._raw.wine_binary = None
-            # self._raw.wine_binary_code = None
-
-            self._write()
+            with maintenance.change_selection(self):
+                self._raw.faithlife_product_version = value
+                self._raw.faithlife_product_release = None
+                if self._overrides.install_dir is None:
+                    self._raw.install_dir = None
+                self._write()
 
     @property
     def faithlife_product_releases(self) -> list[str]:
@@ -757,8 +755,15 @@ class Config:
     @faithlife_product_logging.setter
     def faithlife_product_logging(self, value: bool):
         if self._raw.faithlife_product_logging != value:
+            previous = self._raw.faithlife_product_logging
             self._raw.faithlife_product_logging = value
-            self._write()
+            try:
+                self._write(checked=True)
+            except maintenance.MaintenanceError as error:
+                self._raw.faithlife_product_logging = previous
+                raise maintenance.MaintenanceError(
+                    f"Runtime logging changed, but its setting could not be saved: {error}"
+                ) from error
 
     @property
     def faithlife_installer_name(self) -> str:
@@ -782,6 +787,7 @@ class Config:
         return self._raw.app_release_channel
 
     @property
+    @maintenance.uses_owner
     def winetricks_binary(self) -> str:
         """Download winetricks if it doesn't exist"""
         from ou_dedetai import system
@@ -814,10 +820,10 @@ class Config:
         if value is not None:
             value = str(Path(value).absolute())
         if self._raw.install_dir != value:
-            self._raw.install_dir = value
-            # Reset cache that depends on install_dir
-            self._wine_appimage_files = None
-            self._write()
+            with maintenance.change_selection(self, value):
+                self._raw.install_dir = value
+                self._wine_appimage_files = None
+                self._write()
 
     @property
     # This used to be called APPDIR_BINDIR
@@ -887,6 +893,7 @@ class Config:
         return get_wine_prefix_path(self.install_dir)
 
     @property
+    @maintenance.uses_owner
     def wine_binary(self) -> str:
         """Returns absolute path to the wine binary"""
         output = self._raw.wine_binary
@@ -910,6 +917,7 @@ class Config:
         return self._absolute_from_install_dir(output)
 
     @wine_binary.setter
+    @maintenance.uses_owner
     def wine_binary(self, value: str):
         """Takes in a path to the wine binary and stores it as relative for storage"""
         if value == constants.WINE_RECOMMENDED_SIGIL:
@@ -947,6 +955,7 @@ class Config:
         return self._wine_appimage_files
 
     @property
+    @maintenance.uses_owner
     def wine_binary_code(self) -> str:
         """Wine binary code.
         
@@ -1026,6 +1035,7 @@ class Config:
         return None
     
     @wine_appimage_path.setter
+    @maintenance.uses_owner
     def wine_appimage_path(self, value: Optional[str | Path]) -> None:
         if isinstance(value, Path):
             value = str(value)

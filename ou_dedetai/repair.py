@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import time
 from typing import Callable, Optional
+from ou_dedetai import backup, maintenance
 
 import ou_dedetai
 from ou_dedetai.app import App
@@ -15,7 +16,6 @@ from ou_dedetai.config import EphemeralConfiguration, PersistentConfiguration
 import ou_dedetai.config
 import ou_dedetai.constants
 import ou_dedetai.database
-import ou_dedetai.gui_app
 import ou_dedetai.installer
 import ou_dedetai.msg
 import ou_dedetai.system
@@ -85,56 +85,55 @@ def detect_broken_install(
 def run_under_app(ephemeral_config: EphemeralConfiguration, func: Callable[[App], None]): 
     dialog = ephemeral_config.dialog or ou_dedetai.system.get_dialog()
     if dialog == 'tk':
-        return ou_dedetai.gui_app.start_gui_app(ephemeral_config, func)
+        from ou_dedetai import gui_app
+        return gui_app.start_gui_app(ephemeral_config, func)
     else:
         app = ou_dedetai.cli.CLI(ephemeral_config)
         func(app)
 
 def detect_and_recover(ephemeral_config: EphemeralConfiguration):
-    persistent_config = PersistentConfiguration.load_from_path(ephemeral_config.config_path) 
+    persistent_config = PersistentConfiguration.load_from_path(ephemeral_config.config_path)
     if (
         persistent_config.install_dir is None
         or persistent_config.faithlife_product is None
     ):
         # Couldn't find enough information to install
         return
-    wine_prefix = ou_dedetai.config.get_wine_prefix_path(persistent_config.install_dir)
-    wine_user = ou_dedetai.config.get_wine_user(wine_prefix)
-    if wine_user is None:
-        return
-    logos_appdata_dir = ou_dedetai.config.get_logos_appdata_dir(
-        wine_prefix,
-        wine_user,
-        persistent_config.faithlife_product
+    wine_prefix = ephemeral_config.wine_prefix or ou_dedetai.config.get_wine_prefix_path(persistent_config.install_dir)
+    context = maintenance.Context(
+        Path(wine_prefix).resolve(), Path(persistent_config.install_dir).resolve(), persistent_config.faithlife_product,
     )
-    # Recovery detection is best-effort.
-    # Since it runs very early in the app and may be complex, we don't want a
-    # bug here to interfere with normal operations.
-    try:
-        detected_failure = detect_broken_install(
-            logos_appdata_dir,
+    backup.recover_pending_restore(context)
+    with maintenance.use(context):
+        wine_user = ou_dedetai.config.get_wine_user(wine_prefix)
+        if wine_user is None:
+            return
+        logos_appdata_dir = ou_dedetai.config.get_logos_appdata_dir(
+            wine_prefix,
+            wine_user,
             persistent_config.faithlife_product
         )
-    except Exception:
-        logging.exception("Failed to check to see if installation is broken.")
-        return
+        try:
+            detected_failure = detect_broken_install(logos_appdata_dir, persistent_config.faithlife_product)
+        except maintenance.MaintenanceError:
+            raise
+        except Exception:
+            logging.exception("Failed to inspect installation recovery state")
+            return
     if not detected_failure:
         return
 
     if detected_failure == FailureType.FailedUpgrade:
-        logging.info(f"{persistent_config.faithlife_product_release=}") 
-        # Ensure that the target release is unset before installing
-        # This will force the user to install the latest version
-        # rather than the version they initially installed at (which may be very old)
-        persistent_config.faithlife_product_release = None
-        persistent_config.write_config()
-
         def _run(app: App):
-            app.status(f"Recovering {persistent_config.faithlife_product} after failed upgrade") 
-            # Wait for a second so user can see this message
-            time.sleep(1)
-            ou_dedetai.installer.install(app)
-            app.status(f"Recovery attempt of {app.conf.faithlife_product} complete")
+            with maintenance.configured(app) as selected, maintenance.use(context):
+                if selected != context:
+                    raise maintenance.MaintenanceError("Recovery selection changed before installation")
+                app.conf._raw.faithlife_product_release = None
+                app.conf._write(checked=True)
+                app.status(f"Recovering {persistent_config.faithlife_product} after failed upgrade")
+                time.sleep(1)
+                ou_dedetai.installer.install(app)
+                app.status(f"Recovery attempt of {app.conf.faithlife_product} complete")
         run_under_app(ephemeral_config, _run)
 
     # FIXME: Read the LogosCrash.log and suggest other recovery methods

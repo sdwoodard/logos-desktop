@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple
 
 from . import constants
 from . import paths
+from . import maintenance
 from . import network
 from . import system
 from . import wine
@@ -495,6 +496,7 @@ def find_wine_binary_files(app: App, release_version: Optional[str]) -> list[str
     return binaries
 
 
+@maintenance.uses_installation
 def set_appimage_symlink(app: App):
     # This function assumes make_skel() has been run once.
     if app.conf.wine_binary_code not in ["AppImage", "Recommended"]:
@@ -547,6 +549,7 @@ def update_to_latest_lli_release(app: App):
         logging.debug(f"{constants.APP_NAME} is at a newer version than the latest.") # noqa: 501
 
 
+@maintenance.uses_installation
 def update_faithlife_product(app: App):
     from ou_dedetai import installer  # local import to avoid circular dependency
     releases = app.conf.faithlife_product_releases
@@ -560,6 +563,7 @@ def update_faithlife_product(app: App):
 
 
 # FIXME: consider moving this to control
+@maintenance.uses_installation
 def update_to_latest_recommended_appimage(app: App):
     if app.conf.wine_binary_code not in ["AppImage", "Recommended"]:
         logging.debug("AppImage commands disabled since we're not using an appimage")

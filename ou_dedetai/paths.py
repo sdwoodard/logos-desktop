@@ -40,6 +40,20 @@ def disjoint(first: Path, second: Path) -> bool:
     return not first.is_relative_to(second) and not second.is_relative_to(first)
 
 
+def rename_no_replace(source: Path, destination: Path) -> None:
+    """Preserve an unexpected destination entry during publication or recovery."""
+    import ctypes
+
+    rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if rename is None:
+        raise RuntimeError("No-replace rename is unavailable")
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(destination))
+
+
 def validate_removal_path(path: Path, protected: tuple[Path, ...] = ()) -> os.stat_result:
     if not path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Refusing an ambiguous removal path: {path}")

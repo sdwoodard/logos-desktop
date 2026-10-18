@@ -125,6 +125,8 @@ class App(abc.ABC):
             invalid_response = "That response is not valid, please try again."
             new_question = f"{invalid_response}\n{question}"
             answer = self._ask(new_question, passed_options)
+            if answer is None or answer == self._exit_option:
+                raise UserExitedFromAsk
 
         if answer is not None:
             answer = validate_result(answer, options)

@@ -14,6 +14,7 @@ from ou_dedetai.system import SuperuserCommandNotFound
 from ou_dedetai.logos import State as LogosRunningState
 
 from . import backup
+from . import maintenance
 from . import control
 from . import installer
 from . import wine
@@ -82,6 +83,7 @@ class CLI(App):
     def stop_installed_app(self):
         self.logos.stop()
 
+    @maintenance.uses_installation
     def winetricks(self):
         process = wine.run_wine_process(
             self,
@@ -95,6 +97,7 @@ class CLI(App):
             process.wait()
             sys.exit(process.returncode)
 
+    @maintenance.uses_installation
     def wine(self):
         process = wine.run_wine_process(
             self,

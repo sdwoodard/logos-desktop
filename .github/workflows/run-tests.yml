@@ -25,6 +25,8 @@ jobs:
           python -m unittest -v
           tests.test_constants tests.test_private_development
           tests.test_filesystem_safety tests.test_runtime_paths tests.test_desktop_entries
+          tests.test_backup tests.test_maintenance
+          tests.test_tui_maintenance
       - name: Check retained version comparisons in a separate process
         run: >-
           python -m unittest -v

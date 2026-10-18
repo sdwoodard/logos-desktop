@@ -18,7 +18,7 @@ from packaging.version import Version
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ou_dedetai import constants, network, wine
+from ou_dedetai import constants, maintenance, network, wine
 from ou_dedetai.app import App
 
 
@@ -974,6 +974,7 @@ def install_dependencies(app: App, target_version=10):
             sys.exit(1)
 
 
+@maintenance.uses_installation
 def ensure_winetricks(
     app: App,
     version=constants.WINETRICKS_VERSION,

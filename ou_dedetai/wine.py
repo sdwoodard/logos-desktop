@@ -10,7 +10,7 @@ from packaging.version import Version
 import tempfile
 from typing import IO, Optional
 
-from ou_dedetai import constants
+from ou_dedetai import constants, maintenance
 from ou_dedetai.app import App
 
 from . import network
@@ -256,6 +256,7 @@ def initializeWineBottle(wine64_binary: str, app: App):
     )
 
 
+@maintenance.uses_installation
 def set_win_version(app: App, exe: str, windows_version: str):
     if exe == "logos":
         # This operation is equivilent to f"winetricks -q settings {windows_version}"
@@ -366,6 +367,7 @@ def disable_winemenubuilder(app: App, wine64_binary: str):
     wine_reg_install(app, name, reg_text, wine64_binary)
 
 
+@maintenance.uses_installation
 def set_renderer(app: App, wine64_binary: str, value: str):
     name=f'set-renderer-to-{value}.reg'
     reg_text = rf'''REGEDIT4
@@ -505,6 +507,7 @@ def get_winecmd_encoding(app: App) -> Optional[str]:
         return None
 
 
+@maintenance.uses_installation
 def run_wine_completed_process(
     app: App,
     wine_binary: str,
@@ -531,6 +534,7 @@ def run_wine_completed_process(
     )
 
 
+@maintenance.uses_installation
 def run_wine_process(
     app: App,
     wine_binary: str | Path,
@@ -585,6 +589,7 @@ def run_wine_process(
     return None
 
 
+@maintenance.uses_installation
 def run_wine_application(
     app: App,
     wine_binary: str | Path,
@@ -612,6 +617,7 @@ def run_wine_application(
         )
 
 
+@maintenance.uses_installation
 def run_wine_during_install(
     app: App,
     wine_binary: str | Path,
@@ -620,16 +626,7 @@ def run_wine_during_install(
     init=False,
     additional_wine_dll_overrides: Optional[str] = None,
 ) -> Optional[subprocess.Popen[bytes]]:
-    """Runs a wine process as part of the install process.
-    Waits for wine to complete before returning.
-    Checks exit code to ensure it is 0
-    
-    Logs are dumped in the python logger (subject to their rotation).
-    This function also waits on the process to finish.
-    
-    Raises:
-    - subprocess.CalledProcessError if returncode != 0
-    """
+    """Wait for Wine and raise a domain error if spawn or execution fails."""
     with tempfile.NamedTemporaryFile(mode="w+") as temp_file:
         process = run_wine_process(
             app=app,
@@ -640,6 +637,8 @@ def run_wine_during_install(
             exe_args=exe_args,
             additional_wine_dll_overrides=additional_wine_dll_overrides
         )
+        if process is None:
+            raise maintenance.MaintenanceError("Wine command could not be started")
         if process:
             if exe:
                 full_command_string = f"{wine_binary} {exe} {" ".join(exe_args)}"
@@ -656,10 +655,7 @@ def run_wine_during_install(
                     logging.debug(f"> {line.rstrip()}")
             logging.debug(f"Finished dumping log {full_command_string}")
             if process.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    process.returncode,
-                    cmd=full_command_string,
-                )
+                raise maintenance.MaintenanceError(f"Wine command failed with exit code {process.returncode}")
     return process
 
 
@@ -672,6 +668,7 @@ def run_wine_during_install(
 # Seems like we want to have a more holistic mechanism for ensuring
 # all users use the latest and greatest.
 # Sort of like an update, but for wine and all of the bits underneath "Logos" itself
+@maintenance.uses_installation
 def enforce_icu_data_files(app: App):
     app.status("Downloading ICU files…")
     icu_url = app.conf.icu_latest_version_url
@@ -723,6 +720,7 @@ def _icu_parent(prefix_fd: int, parts: tuple[str, ...], *, create: bool) -> int 
         raise
 
 
+@maintenance.uses_prefix
 def copy_icu_files(source: Path, prefix: Path) -> None:
     """Apply a validated ICU subtree without writing through destination links."""
     if not source.is_dir() or source.is_symlink() or not paths.disjoint(source, prefix):
@@ -773,6 +771,11 @@ def copy_icu_files(source: Path, prefix: Path) -> None:
 
 
 def get_registry_value(reg_path, name, app: App):
+    with maintenance.use(maintenance.Context.from_app(app)):
+        return _get_registry_value(reg_path, name, app)
+
+
+def _get_registry_value(reg_path, name, app: App):
     logging.debug(f"Get value for: {reg_path=}; {name=}")
     # FIXME: consider breaking run_wine_proc into a helper function before decoding is attempted
     # NOTE: Can't use run_wine_proc here because of infinite recursion while

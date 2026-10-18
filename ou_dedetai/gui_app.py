@@ -9,11 +9,12 @@ from pathlib import Path
 from queue import Queue
 
 import shutil
+import subprocess
 from threading import Event
 import threading
 import time
 from tkinter import PhotoImage, messagebox
-from tkinter import Tk
+from tkinter import Tk, TclError
 from tkinter import Toplevel as TkToplevel
 from tkinter import filedialog as fd
 from tkinter.ttk import Style
@@ -33,6 +34,7 @@ from . import constants
 from . import control
 from . import gui
 from . import installer
+from . import maintenance
 from . import system
 from . import utils
 from . import wine
@@ -86,7 +88,7 @@ class GuiApp(App):
                 title=question,
                 initialdir=Path().home(),
             )
-        return answer
+        return answer or None
 
     def _info(self, message):
         """Display information to the user"""
@@ -188,6 +190,12 @@ class GuiApp(App):
                 self.conf.wine_binary = wine_choices[0]
 
 class Root(Tk):
+    def destroy(self):
+        closed = getattr(self, "_operation_closed", None)
+        if closed is not None:
+            closed.set()
+        super().destroy()
+
     def __init__(self, *args, **kwargs):
         super().__init__(**kwargs)
         self.classname = kwargs.get('classname')
@@ -241,19 +249,31 @@ class ChoicePopUp:
         self.gui.okay_button.config(command=self.on_confirm_choice)
         self.answer_q = answer_q
         self.answer_event = answer_event
+        self._completed = False
+        self.root.protocol("WM_DELETE_WINDOW", self.on_cancel_released)
+        self.root.bind("<Destroy>", self._on_destroy, add="+")
 
     def on_confirm_choice(self, evt=None):
         if self.gui.answer_dropdown.get() == gui.ChoiceGui._default_prompt:
             return
         answer = self.gui.answer_dropdown.get()
-        self.answer_q.put(answer)
-        self.answer_event.set()
-        self.root.destroy()
+        self._complete(answer)
 
     def on_cancel_released(self, evt=None):
-        self.answer_q.put(None)
+        self._complete(None)
+
+    def _on_destroy(self, event):
+        if event.widget == self.root:
+            self._complete(None, destroy=False)
+
+    def _complete(self, answer, *, destroy=True):
+        if self._completed:
+            return
+        self._completed = True
+        self.answer_q.put(answer)
         self.answer_event.set()
-        self.root.destroy()
+        if destroy:
+            self.root.destroy()
 
 
 class InfoPopUp:
@@ -548,7 +568,49 @@ class ControlWindow(GuiApp):
         self.start_thread(self.logos.stop)
 
     def run_logos(self, evt=None):
-        self.start_thread(self.logos.start)
+        self._run_operation(lambda app: app.logos.start())
+
+    def _run_operation(self, operation):
+        if getattr(self, "_operation_running", False):
+            self.status("Another operation is still running", 0)
+            return
+        self._operation_running = True
+        closed = getattr(self.root, "_operation_closed", None)
+        if closed is None:
+            closed = Event()
+            self.root._operation_closed = closed
+            self.root.bind(
+                "<Destroy>", lambda event: closed.set() if event.widget == self.root else None, add="+",
+            )
+        controls = [self.gui.app_button, self.gui.actions_button, self.gui.backup_button, self.gui.restore_button]
+        for widget in controls:
+            widget.state(["disabled"])
+
+        def finished():
+            self._operation_running = False
+            for widget in controls:
+                widget.state(["!disabled"])
+            self.update_app_button()
+
+        def run():
+            try:
+                operation(self)
+            except UserExitedFromAsk:
+                if not closed.is_set():
+                    self.status("Operation cancelled", 0)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                message = str(error)
+                if not closed.is_set():
+                    self.status(f"Operation failed: {message}", 0)
+                    self.root.after(0, lambda: self.pop_up("Operation failed", message))
+            finally:
+                if not closed.is_set():
+                    try:
+                        self.root.after(0, finished)
+                    except (TclError, RuntimeError):
+                        pass
+
+        self.start_thread(run, daemon_bool=False)
 
     def run_action_cmd(self, evt=None):
         if self.actioncmd:
@@ -570,38 +632,25 @@ class ControlWindow(GuiApp):
                 self.actioncmd = self.uninstall
 
     def run_indexing(self):
-        self.start_thread(self.logos.index)
+        self._run_operation(lambda app: app.logos.index())
 
     def remove_library_catalog(self):
-        control.remove_library_catalog(self)
+        self._run_operation(control.remove_library_catalog)
 
     def remove_indexes(self):
-        self.gui.statusvar.set("Removing indexes…")
-        self.start_thread(control.remove_all_index_files, app=self)
+        self._run_operation(control.remove_all_index_files)
 
     def install_icu(self):
-        self.gui.statusvar.set("Installing ICU files…")
-        self.start_thread(wine.enforce_icu_data_files, app=self)
+        self._run_operation(wine.enforce_icu_data_files)
 
     def uninstall(self):
-        def _run():
-            control.uninstall(self)
-            self.clear_status()
-            self.populate_defaults()
-        self.start_thread(_run)
+        self._run_operation(control.uninstall)
 
     def run_backup(self, evt=None):
-        # Prepare progress bar.
-        self.gui.progress.state(['!disabled'])
-        self.gui.progress.config(mode='determinate')
-        self.gui.progressvar.set(0)
-        # Start backup thread.
-        self.start_thread(backup.backup, app=self)
+        self._run_operation(backup.backup)
 
     def run_restore(self, evt=None):
-        # FIXME: Allow user to choose restore source?
-        # Start restore thread.
-        self.start_thread(backup.restore, app=self)
+        self._run_operation(backup.restore)
 
     def install_deps(self, evt=None):
         self.start_thread(utils.install_dependencies, self)
@@ -617,8 +666,7 @@ class ControlWindow(GuiApp):
         return file_path
 
     def update_faithlife_product(self, evt=None):
-        self.status(f"Updating {self.conf.faithlife_product} to latest release…")
-        self.start_thread(utils.update_faithlife_product, app=self)
+        self._run_operation(utils.update_faithlife_product)
 
     def update_to_latest_lli_release(self, evt=None):
         self.status(f"Updating to latest {constants.APP_NAME} version…")
@@ -629,11 +677,7 @@ class ControlWindow(GuiApp):
         self.update_latest_appimage_button()
 
     def start_appimage_update(self):
-        self.status("Updating to latest AppImage…")
-        self.gui.latest_appimage_button.state(['disabled'])
-        evt = '<<AppImageUpdateDone>>'
-        self.root.bind(evt, self.update_latest_appimage_button)
-        self.start_thread(self.update_to_latest_appimage, evt=evt)
+        self._run_operation(utils.update_to_latest_recommended_appimage)
 
     def update_to_latest_appimage(self, evt=None):
         utils.update_to_latest_recommended_appimage(self)
@@ -644,22 +688,20 @@ class ControlWindow(GuiApp):
         appimage_filename = self.open_file_dialog("AppImage", "AppImage")
         if not appimage_filename:
             return
-        self.conf.wine_appimage_path = appimage_filename
-        self.start_thread(self.set_appimage_symlink)
+
+        @maintenance.uses_installation
+        def change_runtime(app):
+            app.conf.wine_appimage_path = appimage_filename
+            utils.set_appimage_symlink(app)
+
+        self._run_operation(change_runtime)
 
     def switch_logging(self, evt=None):
         desired_state = self.gui.loggingstatevar.get()
-        self._status(f"Switching app logging to '{desired_state}d'…")
-        self.gui.logging_button.state(['disabled'])
-        self.start_thread(
-            self.logos.switch_logging,
-            action=desired_state.lower()
-        )
+        self._run_operation(lambda app: app.logos.switch_logging(action=desired_state.lower()))
 
     def get_support(self):
-        def _run():
-            control.get_support(self)
-        self.start_thread(_run)
+        self._run_operation(control.get_support)
 
     def update_logging_button(self, evt=None):
         state = self.reverse_logging_state_value(self.current_logging_state_value())
@@ -667,6 +709,8 @@ class ControlWindow(GuiApp):
         self.gui.logging_button.state(['!disabled'])
 
     def update_app_button(self, evt=None):
+        if getattr(self, "_operation_running", False):
+            return
         self.gui.app_button.state(['!disabled'])
         if self.is_installed():
             if self.logos.logos_state == ou_dedetai.logos.State.RUNNING:
@@ -684,20 +728,8 @@ class ControlWindow(GuiApp):
             self.gui.app_install_advanced.config(command=self.run_installer)
             self.gui.show_advanced_install_button()
             self.gui.actions_button.state(['disabled'])
-            # Make sure the product/version/channel/release is non-None
-            if None not in [
-                self.conf._raw.faithlife_product,
-                self.conf._raw.faithlife_product_version,
-                self.conf._raw.faithlife_product_release_channel,
-                self.conf._raw.faithlife_product_release
-            ]:
-                # Everything is ready, we can install
-                self.gui.app_button.state(['!disabled'])
-                self.gui.app_install_advanced.state(['!disabled'])
-            else:
-                # Disable Both install buttons
-                self.gui.app_button.state(['disabled'])
-                self.gui.app_install_advanced.state(['disabled'])
+            self.gui.app_button.state(['!disabled'])
+            self.gui.app_install_advanced.state(['!disabled'])
 
     def update_product_button(self, evt=None):
         msg = None
