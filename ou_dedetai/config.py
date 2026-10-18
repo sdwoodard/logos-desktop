@@ -1295,12 +1295,14 @@ class Config:
         return self._installed_faithlife_product_release
 
     @property
-    def app_latest_version_url(self) -> str:
-        return self._network.app_latest_version(self.app_release_channel).download_url
+    def app_latest_version_url(self) -> Optional[str]:
+        release = self._network.app_latest_version(self.app_release_channel)
+        return release.download_url if release is not None else None
 
     @property
-    def app_latest_version(self) -> str:
-        return self._network.app_latest_version(self.app_release_channel).version
+    def app_latest_version(self) -> Optional[str]:
+        release = self._network.app_latest_version(self.app_release_channel)
+        return release.version if release is not None else None
 
     @property
     def icu_latest_version(self) -> str:

@@ -310,8 +310,12 @@ class VersionComparison(enum.Enum):
 
 
 def compare_logos_linux_installer_version(app: App) -> Optional[VersionComparison]:
+    latest_version = app.conf.app_latest_version
+    if latest_version is None:
+        return None
+
     current = Version(constants.LLI_CURRENT_VERSION)
-    latest = Version(app.conf.app_latest_version)
+    latest = Version(latest_version)
 
     if current < latest:
         # Current release is older than recommended.
@@ -531,6 +535,10 @@ def set_appimage_symlink(app: App):
 
 
 def update_to_latest_lli_release(app: App):
+    if not constants.APP_SELF_UPDATES_ENABLED:
+        app.status(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
+        return
+
     result = compare_logos_linux_installer_version(app)
 
     if constants.RUNMODE != 'binary':
@@ -654,4 +662,3 @@ def get_timestamp():
 
 def parse_bool(string: str) -> bool:
     return string.lower() in ['true', '1', 'y', 'yes']
-

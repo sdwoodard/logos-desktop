@@ -1,30 +1,19 @@
 name: oudedetai
 base: core24
 adopt-info: oudedetai
-summary: Install and maintain FaithLife's proprietary Logos Bible (Verbum) Software.
+summary: Unvalidated development recipe for LogosDesktop.
 description: |
-  A Python program for installing and maintaining FaithLife's Logos Bible (Verbum) Software on Linux.
-
-  NOTE: The way this app manages multiple executables is currently incompatible with snap confinement policy. Until a solution is found the snap needs to be installed with the `--devmode` flag to work properly. So, for the _beta_ release:
-
-    sudo snap install oudedetai --devmode --beta
-
-  Similarly, updates can only be done manually, by this command:
-
-    sudo snap refresh oudedetai --devmode --beta
-
-  This program is created and maintained by the FaithLife Community and is licensed under the MIT License.
+  This inherited recipe is unvalidated and is not a supported installation channel.
+  No LogosDesktop Snap is published. The legacy package identifiers remain pending packaging review.
+  LogosDesktop derives from OuDedetai and retains its MIT license and attribution.
 
 grade: stable
 confinement: strict
 icon: ou_dedetai/img/icon.svg # or post-build: snap/img/icon.svg
 license: MIT
-source-code: https://github.com/FaithLife-Community/OuDedetai
-issues: https://github.com/FaithLife-Community/OuDedetai/issues
-contact:
-  - https://t.me/linux_logos
-  - https://matrix.to/#/#logosbible:matrix.org
-website: https://github.com/FaithLife-Community/OuDedetai/wiki
+source-code: https://github.com/sdwoodard/logos-desktop
+issues: https://github.com/sdwoodard/logos-desktop/issues
+website: https://github.com/sdwoodard/logos-desktop
 
 
 platforms:
@@ -114,7 +103,7 @@ parts:
       - wget
 
   oudedetai:
-    source: https://github.com/FaithLife-Community/OuDedetai.git
+    source: https://github.com/sdwoodard/logos-desktop.git
     plugin: python
     override-pull: |
       craftctl default
@@ -127,7 +116,7 @@ parts:
       - python3-tk
 
   oudedetai-dump:
-    source: https://github.com/FaithLife-Community/OuDedetai.git
+    source: https://github.com/sdwoodard/logos-desktop.git
     plugin: dump
     organize:
       snap/bin/run.sh: bin/run.sh

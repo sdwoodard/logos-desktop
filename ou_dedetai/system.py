@@ -1028,8 +1028,7 @@ def check_incompatibilities(app: App):
         secondary = (
             "Your system currently has AppImageLauncher installed.\n"
             f"{constants.APP_NAME} is not compatible with AppImageLauncher.\n"
-            f"For more information, see: {constants.REPOSITORY_LINK}/issues/114"
+            "For upstream background, see: https://github.com/FaithLife-Community/OuDedetai/issues/114"
         )
         app.approve_or_exit(question_text, secondary)
         remove_appimagelauncher(app)
-

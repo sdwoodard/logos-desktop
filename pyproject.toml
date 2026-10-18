@@ -18,7 +18,8 @@ dependencies = [
 #    "urllib3",
 	"textual",
 ]
-name = "ou_dedetai"
+name = "logos-desktop"
+description = "Independent community installer and manager for Logos and Verbum on Linux through Wine"
 dynamic = ["readme", "version"]
 requires-python = ">=3.12"
 
@@ -27,7 +28,12 @@ build = ["pyinstaller"]
 dev = ["mypy", "ruff"]
 
 [project.scripts]
+logos-desktop = "ou_dedetai.main:main"
 oudedetai = "ou_dedetai.main:main"
+
+[project.urls]
+Source = "https://github.com/sdwoodard/logos-desktop"
+Issues = "https://github.com/sdwoodard/logos-desktop/issues"
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"], content-type = "text/plain"}

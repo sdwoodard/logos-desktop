@@ -362,12 +362,11 @@ class NetworkRequests:
             download_url=self._cache.repository_latest_url[repository]
         )
 
-    def app_latest_version(self, channel: str) -> SoftwareReleaseInfo:
-        if channel == "stable":
-            repo = "FaithLife-Community/OuDedetai"
-        else:
-            repo = "FaithLife-Community/test-builds"
-        return self._repo_latest_version(repo)
+    def app_latest_version(self, channel: str) -> Optional[SoftwareReleaseInfo]:
+        if not constants.APP_SELF_UPDATES_ENABLED:
+            return None
+
+        return self._repo_latest_version(constants.REPOSITORY_SLUG)
     
     def icu_latest_version(self) -> SoftwareReleaseInfo:
         return self._repo_latest_version("FaithLife-Community/icu")
@@ -710,6 +709,10 @@ def _get_faithlife_product_releases(
 
 
 def update_lli_binary(app: App):
+    if not constants.APP_SELF_UPDATES_ENABLED:
+        app.status(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
+        return
+
     lli_file_path = os.path.realpath(sys.argv[0])
     lli_download_path = Path(app.conf.download_dir) / constants.BINARY_NAME
     temp_path = Path(app.conf.download_dir) / f"{constants.BINARY_NAME}.tmp"

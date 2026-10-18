@@ -209,33 +209,23 @@ def get_support(app: App) -> str:
 
         answer = app.ask(
             "How would you like to continue to get support?\n"
-            "Make sure to:\n"
-            f"- Check the pinned issues {constants.REPOSITORY_ISSUES_LINK} to see if your problem is already known.\n"
-            f"- Upload {output_path.replace(str(Path().home()), "~")}\n"
-            "- Describe what went wrong\n"
-            "- Describe actions you took",
+            "Keep this archive private and review its contents before sharing.\n"
+            "The project repository and issues are private during development.\n"
+            "Describe what went wrong and which actions you took.",
             [
-                'Launch Telegram',
-                'Launch Matrix',
-                'Open Github Issues',
+                'Keep archive local',
+                'Open private project issue',
                 "Show links"
             ]
         )
 
-        if answer == "Launch Telegram":
-            webbrowser.open(constants.TELEGRAM_LINK)
-        elif answer == "Launch Matrix":
-            webbrowser.open(constants.MATRIX_LINK)
-        elif answer == "Open Github Issues":
+        if answer == "Open private project issue":
             webbrowser.open(constants.REPOSITORY_NEW_ISSUE_LINK)
         elif answer == "Show links":
-            # Use app.info to show a dialog-friendly pop-up
             app.info(
-                "Here are the links:\n"
-                f"- Telegram: {constants.TELEGRAM_LINK}\n"
-                f"- Matrix: {constants.MATRIX_LINK}\n"
-                f"- Github Repository: {constants.REPOSITORY_LINK}\n"
-                f"- Github Issues: {constants.REPOSITORY_NEW_ISSUE_LINK}\n"
+                "Private project links:\n"
+                f"- Repository: {constants.REPOSITORY_LINK}\n"
+                f"- Issues: {constants.REPOSITORY_ISSUES_LINK}\n"
             )
 
     return output_path

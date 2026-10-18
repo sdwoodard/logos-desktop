@@ -1,22 +1,31 @@
-name: Run app tests on PR creation or modification
+name: Private development checks
 on:
-  pull_request:
-  workflow_call:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  execute:
-    runs-on: ubuntu-latest
+  focused-tests:
+    if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-        cache: pip
-    - name: install app
-      run: |
-        pip install  --upgrade pip
-        pip install .
-    - name: run-tests
-      run: |
-        python3 -m unittest discover -v
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install reviewed runtime dependencies
+        run: python -m pip install .
+      - name: Check private development boundaries
+        run: python -m unittest -v tests.test_constants tests.test_private_development
+      - name: Check retained version comparisons in a separate process
+        run: >-
+          python -m unittest -v
+          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_custom
+          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_notset
+          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_uptodate
+          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_yes

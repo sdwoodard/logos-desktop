@@ -230,7 +230,7 @@ class TextualUI(TextualApp[None]):
             yield OptionList(id="main-menu")
         yield Log(id="console-area", max_lines=300, highlight=True)
         yield Footer()
-        yield Static("FaithLife Community", id="status-bar")
+        yield Static(constants.APP_NAME, id="status-bar")
 
     def on_mount(self) -> None:
         self.title = constants.APP_NAME
@@ -418,7 +418,7 @@ class TUI(App):
     def set_tui_menu_options(self) -> list[str]:
         labels: list[str] = []
 
-        if getattr(constants, "RUNMODE", "") == "binary":
+        if constants.APP_SELF_UPDATES_ENABLED and getattr(constants, "RUNMODE", "") == "binary":
             try:
                 status = utils.compare_logos_linux_installer_version(self)
                 if status == utils.VersionComparison.OUT_OF_DATE:

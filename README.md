@@ -1,49 +1,43 @@
-[![GitHub All Releases](https://img.shields.io/github/downloads/FaithLife-Community/OuDedetai/total.svg)]()
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/f730f74748c348cb9b3ff2fa1654c84b)](https://app.codacy.com/manual/FaithLife-Community/OuDedetai?utm_source=github.com&utm_medium=referral&utm_content=FaithLife-Community/OuDedetai&utm_campaign=Badge_Grade_Dashboard)
-[![Automation testing](https://img.shields.io/badge/Automation-testing-sucess)](https://github.com/FaithLife-Community/LogosLinuxInstallTests) [![Installer LogosBible](https://img.shields.io/badge/Installer-LogosBible-blue)](https://www.logos.com) [![LastRelease](https://img.shields.io/github/v/release/FaithLife-Community/OuDedetai)](https://github.com/FaithLife-Community/OuDedetai/releases)
+# LogosDesktop
 
-# Ou Dedetai
+LogosDesktop is an independent community installer and manager for Logos and
+Verbum on Linux through Wine. It is not affiliated with or endorsed by Logos.
+A valid Logos license is still required.
 
->Remember Jesus Christ, risen from the dead, the offspring of David, as preached in my gospel, for which I am suffering, bound with chains as a criminal. But **the word** of God **is not bound!**
->
->ἀλλʼ **ὁ λόγος** τοῦ θεοῦ **οὐ δέδεται**  
+## Development status
 
-—Second Timothy 2:8–9 [ESV](https://biblia.com/bible/esv/2-timothy/2/8-9), [NA<sup>28</sup>](https://biblia.com/bible/ubs5/2-timothy/2/9)
+This repository is private development source. There is no supported LogosDesktop
+release or installation package yet. Inherited distribution recipes remain
+unvalidated and do not establish platform support.
 
-## Manages Logos Bible Software via Wine
+Controller self-update discovery and replacement are disabled during private
+development. Updates to Logos and the selected Wine runtime are separate operations.
+The inherited controller still has known data-safety and lifecycle defects. Use
+disposable configurations and prefixes for development.
 
-This repository contains a Python program for installing and maintaining [FaithLife](https://faithlife.com/)'s [Logos Bible (Verbum) Software](https://www.logos.com/) via [Wine](https://www.winehq.org/).
+The current source retains the `ou_dedetai` import namespace and legacy runtime
+paths while migration is prepared. Both `logos-desktop` and the transitional
+`oudedetai` console command call the same entry point. The graphical frontend is
+still Tkinter. Native Qt work is planned.
 
-This program is created and maintained by the FaithLife Community and is licensed under the MIT License.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for source setup and focused checks.
 
-## oudedetai binary
+## Support
 
-The main program is a distributable executable binary and contains Python itself and all necessary Python packages.
+Use this private repository's [issues](https://github.com/sdwoodard/logos-desktop/issues)
+for development feedback. The Get Support operation creates a local archive.
+Keep it private and review its contents before sharing. It can contain configuration,
+paths and logs. Nothing is uploaded automatically.
 
-When running the program, it will attempt to determine your operating system and package manager.
-It will then attempt to install all needed system dependencies during the installation of Logos.
-When the installation is finished, it will place two shortcuts on your computer: one will launch Logos directly; the other will launch the Control Panel.
+## Attribution and license
 
-To access the GUI version of the program, double-click the executable in your file browser or on your desktop, and then follow the prompts.
+LogosDesktop derives from [OuDedetai](https://github.com/FaithLife-Community/OuDedetai)
+and preserves its Git history and contributor credit. The imported baseline is
+`e72fd5f9a236aed009c8e444a954774da5750f8d`.
 
-The program can also be run from source and should be run from a Python virtual environment.
-See below.
+Upstream credits include Ferion11, John Goodman, T. H. Wright, N. Marti and
+N. Shaaban. The [MIT license](LICENSE), including DanielDevBR's copyright notice,
+is retained. Logos and Verbum are third-party products.
 
-## Install Guide (for users)
-
-For an installation guide with pictures and video, see the wiki's [Install Guide](https://github.com/FaithLife-Community/OuDedetai/wiki/Install-Guide).
-
-In Summary:
-```bash
-wget https://github.com/FaithLife-Community/OuDedetai/releases/latest/download/oudedetai
-chmod +x ./oudedetai
-DIALOG=tk ./oudedetai
-```
-
-NOTE: You can run **Ou Dedetai** using the Steam Proton Experimental binary, which often has the latest and greatest updates to make Logos run even smoother. The script should be able to find the binary automatically, unless your Steam install is located outside of your HOME directory.
-
-If you want to install your distro's dependencies outside of the script, please see the [System Dependencies wiki page](https://github.com/FaithLife-Community/OuDedetai/wiki/System-Dependencies).
-
----
-
-Soli Deo Gloria
+Development of this baseline used AI assistance through OpenCode, with the scoped
+validation and independent review recorded privately by the maintainer.

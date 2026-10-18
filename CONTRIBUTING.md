@@ -1,101 +1,70 @@
-# Contributor Documentation
+# Contributing to LogosDesktop
 
-## Installing/running from Source (for developers)
+This is private development source. Repository access is required. Use disposable
+configuration, cache and Wine-prefix paths. Do not run install, repair, restore or
+uninstall against a personal library during development.
 
-You can clone the repo and install the app from source. To do so, you will need to ensure a few prerequisites:
-1. Install build dependencies
-2. Clone this repository
-3. Build/install Python 3.12 and Tcl/Tk
-4. Set up a virtual environment
+## Source setup
 
-### Install build dependencies
-
-e.g. for debian-based systems:
-```
-sudo apt-get install git build-essential gdb lcov pkg-config \
-    libbz2-dev libffi-dev libgdbm-dev libgdbm-compat-dev liblzma-dev \
-    libncurses5-dev libreadline6-dev libsqlite3-dev libssl-dev \
-    lzma lzma-dev python3-tk tk-dev uuid-dev zlib1g-dev
-```
-*See Python's [Build dependencies](https://devguide.python.org/getting-started/setup-building/index.html#build-dependencies) section for further info.*
-
-### Clone this repository
-```
-git clone 'https://github.com/FaithLife-Community/OuDedetai.git'
-```
-
-### Install Python 3.12 and Tcl/Tk
-Your system might already include Python 3.12 built with Tcl/Tk. This will verify
-the installation:
-```
-$ python3 --version
-Python 3.12.5
-$ python3 -m tkinter # should open a basic Tk window
-```
-If your Python version is < 3.12, then you might want to install 3.12 and tcl/tk
-using your system's package manager or compile it from source using the
-following guide or the script provided in `scripts/ensure-python.sh`. This is
-because the app is built using 3.12 and might have errors if run with other
-versions.
-
-**Install & build python 3.12 using the script:**
-```
-./OuDedetai/scripts/ensure-python.sh
-```
-
-**Install & build python 3.12 manually:**
-```
-$ ver=$(wget -qO- https://www.python.org/ftp/python/ | grep -oE '3\.12\.[0-9]+' | sort -u | tail -n1)
-$ wget "https://www.python.org/ftp/python/${ver}/Python-${ver}.tar.xz"
-$ tar xf Python-${ver}.tar.xz
-$ cd Python-${ver}
-Python-3.12$ ./configure --prefix=/opt --enable-shared
-Python-3.12$ make
-Python-3.12$ sudo make install
-Python-3.12$ LD_LIBRARY_PATH=/opt/lib /opt/bin/python3.12 --version
-Python 3.12.5
-$ cd ~
-```
-Both methods install python into `/opt` to avoid interfering with system python installations.
-
-### Enter the repository folder
-```
-$ cd OuDedetai
-OuDedetai$
-```
-
-### Set up and use a virtual environment
-Use the following guide or the provided script at `scripts/ensure-venv.sh` to set
-up a virtual environment for running and/or building locally.
-
-**Using the script:**
-```
-./scripts/ensure-venv.sh
-```
-
-**Manual setup:**
-
-```
-OuDedetai$ LD_LIBRARY_PATH=/opt/lib /opt/bin/python3.12 -m venv env # create a virtual env folder called "env" using python3.12's path
-OuDedetai$ echo "LD_LIBRARY_PATH=/opt/lib" >> env/bin/activate # tell python where to find libs
-OuDedetai$ echo "export LD_LIBRARY_PATH" >> env/bin/activate
-OuDedetai$ source env/bin/activate # activate the env
-(env) OuDedetai$ python --version # verify python version
-Python 3.12.5
-(env) OuDedetai$ python -m tkinter # verify that tkinter test window opens
-(env) OuDedetai$ pip install .[build] # install python packages
-(env) OuDedetai$ pip install .[dev] # optional: install mypy + ruff for linting/type-checking
-(env) OuDedetai$ python -m ou_dedetai.main --help # run the script
-```
-
-### Building using docker
+Use an installed Python 3.12 or newer and a virtual environment. The inherited
+graphical frontend needs Tcl/Tk supplied by your distribution. Do not replace the
+system Python to follow these instructions.
 
 ```bash
-$ git clone 'https://github.com/FaithLife-Community/OuDedetai.git'
-$ cd OuDedetai
-# docker build -t logosinstaller .
-# docker run --rm -v $(pwd):/usr/src/app logosinstaller
+git clone https://github.com/sdwoodard/logos-desktop.git
+cd logos-desktop
+python3 -m venv .venv
+.venv/bin/python -m pip install '.[dev]'
 ```
 
-The built binary will now be in `./dist/oudedetai`.
+The inherited ensure-python.sh and ensure-venv.sh scripts are not the supported
+setup route. The venv script currently rejects the checkout directory. Snap,
+Flatpak, Nix and binary recipes remain unvalidated for LogosDesktop.
 
+The Python namespace remains `ou_dedetai`. The `logos-desktop` and transitional
+`oudedetai` console commands share an entry point. Existing runtime filenames and
+configuration paths have not migrated yet. Controller self-updates are disabled.
+
+## Focused checks
+
+The product uses stdlib unittest. The private manual workflow runs these focused
+checks, not the full inherited suite:
+
+```bash
+.venv/bin/python -m unittest -v tests.test_constants tests.test_private_development
+.venv/bin/python -m unittest -v \
+  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_custom \
+  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_notset \
+  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_uptodate \
+  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_yes
+.venv/bin/ruff check
+```
+
+Keep the comparison cases in a separate process because they mutate constants.
+Tk availability is required for the GUI-specific fixture checks. A skipped GUI
+check is not a native GUI pass.
+
+Full inherited discovery still has known network, checkout-name and host-filesystem
+assumptions. Record those failures rather than presenting the baseline as passing.
+`tests/integration.py` can install and remove software. It is not a routine test
+command. Build scripts and package recipes require separate review before use.
+
+## Changes and review
+
+Keep useful regression tests around data safety, downloads, updates, configuration
+and process ownership. Prefer deterministic offline fixtures. Add tests for
+important behavior rather than every touched line or UI label.
+
+Use clear names, logical whitespace and direct control flow. Explain consequential
+constraints in comments. New abstractions need a concrete clarity, reuse or lifetime
+benefit. Authored comments, docstrings and human-facing Markdown must not contain
+em dashes, semicolons or generic AI phrasing. Preserve required license text and
+literal source evidence.
+
+Use the private repository for feedback and changes. Include the triggering
+condition and validation limits. Keep credentials and support archives out of
+commits. Disclose AI assistance when relevant and preserve upstream attribution.
+Retain [LICENSE](LICENSE) and the provenance described in [README.md](README.md).
+
+The [architecture map](ARCHITECTURE.md) describes the inherited backend boundaries.
+Domain operations use the shared App interface rather than hard-coding a frontend.

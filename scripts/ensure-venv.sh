@@ -11,7 +11,7 @@ python_exec_path="${prefix}/bin/python${python_exec_ver}"
 # Check parent dir.
 if [[ ! $(basename "$PWD") == 'LogosLinuxInstaller' ]] || [[ ! $(basename "$PWD") == 'OuDedetai' ]]; then
     echo "Error: PWD needs to be './OuDedetai'"
-    echo "OuDedetai can be cloned from https://github.com/FaithLife-Community/OuDedetai.git"
+    echo "LogosDesktop source: https://github.com/sdwoodard/logos-desktop.git"
     exit 1
 fi
 

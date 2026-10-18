@@ -40,17 +40,20 @@ APP_IMAGE_DIR = BUNDLE_DIR / 'img'
 APP_ASSETS_DIR = BUNDLE_DIR / 'assets'
 
 # Define app name variables.
-APP_NAME = 'Ou Dedetai'
+APP_NAME = 'LogosDesktop'
 BINARY_NAME = 'oudedetai'
 PACKAGE_NAME = 'ou_dedetai'
-REPO_NAME = 'OuDedetai'
+REPO_NAME = 'logos-desktop'
+REPOSITORY_SLUG = f'sdwoodard/{REPO_NAME}'
 
-REPOSITORY_LINK = f"https://github.com/FaithLife-Community/{REPO_NAME}"
-WIKI_LINK = f"{REPOSITORY_LINK}/wiki"
+REPOSITORY_LINK = f"https://github.com/{REPOSITORY_SLUG}"
+SUPPORT_LINK = f"{REPOSITORY_LINK}#support"
 REPOSITORY_ISSUES_LINK = f"{REPOSITORY_LINK}/issues"
 REPOSITORY_NEW_ISSUE_LINK = f"{REPOSITORY_LINK}/issues/new"
-TELEGRAM_LINK = "https://t.me/linux_logos"
-MATRIX_LINK = "https://matrix.to/#/#logosbible:matrix.org"
+
+# Private development has no supported controller release feed or replacement path.
+APP_SELF_UPDATES_ENABLED = False
+APP_SELF_UPDATE_DISABLED_MESSAGE = "Controller self-updates are disabled during private development."
 
 CACHE_LIFETIME_HOURS = 12
 """How long to wait before considering our version cache invalid"""
@@ -101,12 +104,12 @@ WINE_BETA_SIGIL = "Experimental (AKA Beta)"
 FAITHLIFE_PRODUCTS = ["Logos", "Verbum"]
 FAITHLIFE_PRODUCT_VERSIONS = ["10"] # This used to include 9
 
-SUPPORT_MESSAGE = f"""If you need help, please consult:
-{WIKI_LINK}
-If the install failed, use the \"Get Support\" operation
+SUPPORT_MESSAGE = f"""LogosDesktop is in private development. For support, see:
+{SUPPORT_LINK}
+Keep support archives private and review them before sharing.
 """
 
-DEFAULT_SUPPORT_FILE_NAME = "FaithlifeCommunitySupport.zip"
+DEFAULT_SUPPORT_FILE_NAME = "LogosDesktopSupport.zip"
 
 # Strings for choosing a follow up file or directory
 PROMPT_OPTION_DIRECTORY = "Choose Directory"

@@ -448,14 +448,12 @@ class ControlWindow(GuiApp):
         self.actioncmd: Optional[Callable[[], None]] = None
 
         ver = constants.LLI_CURRENT_VERSION
-        text = f"Update {constants.APP_NAME}\ncurrent: v{ver}\nlatest: ..." 
-        # Spawn a thread to update the label with the current version
-        def _update_lli_version():
-            text = f"Update {constants.APP_NAME}\ncurrent: v{ver}\nlatest: v{self.conf.app_latest_version}" 
-            self.gui.update_lli_label.config(text=text)
-            self.update_latest_lli_release_button()
+        self.gui.update_lli_label.config(text=f"Update {constants.APP_NAME}\ncurrent: v{ver}\nlatest: ...")
         self.gui.update_lli_button.state(['disabled'])
-        self.start_thread(_update_lli_version)
+        if constants.APP_SELF_UPDATES_ENABLED:
+            self.start_thread(self.update_controller_version)
+        else:
+            self.update_controller_version()
 
         if self.conf._raw.faithlife_product:
             control_gui.update_product_labelvar.set(f"Update {self.conf._raw.faithlife_product}")
@@ -475,7 +473,6 @@ class ControlWindow(GuiApp):
                     self.update_app_button()
                 last_state = copy.copy(self.logos.logos_state)
         self.start_thread(_monitor_faithlife_product_pids)
-        self.gui.update_lli_label.config(text=text)
         self.gui.run_indexing_radio.config(
             command=self.on_action_radio_clicked
         )
@@ -717,20 +714,35 @@ class ControlWindow(GuiApp):
         self.clear_status()
         self.gui.update_product_button.state([state])
 
+    def update_controller_version(self):
+        current = constants.LLI_CURRENT_VERSION
+        if not constants.APP_SELF_UPDATES_ENABLED:
+            latest_text = constants.APP_SELF_UPDATE_DISABLED_MESSAGE
+        else:
+            latest = self.conf.app_latest_version
+            latest_text = f"latest: v{latest}" if latest is not None else "latest: unavailable"
+
+        self.gui.update_lli_label.config(text=f"Update {constants.APP_NAME}\ncurrent: v{current}\n{latest_text}")
+        self.update_latest_lli_release_button()
+
     def update_latest_lli_release_button(self, evt=None):
+        state = 'disabled'
         msg = None
-        result = utils.compare_logos_linux_installer_version(self)
-        if constants.RUNMODE != 'binary':
-            state = 'disabled'
+        if not constants.APP_SELF_UPDATES_ENABLED:
+            msg = constants.APP_SELF_UPDATE_DISABLED_MESSAGE
+        elif constants.RUNMODE != 'binary':
             msg = f"This button is disabled. Can't run self-update from {constants.RUNMODE}."
-        elif result == utils.VersionComparison.OUT_OF_DATE:
-            state = '!disabled'
-        elif result == utils.VersionComparison.UP_TO_DATE:
-            state = 'disabled'
-            msg = f"This button is disabled. {constants.APP_NAME} is up-to-date."
-        elif result == utils.VersionComparison.DEVELOPMENT:
-            state = 'disabled'
-            msg = f"This button is disabled. {constants.APP_NAME} is newer than the latest release."
+        else:
+            result = utils.compare_logos_linux_installer_version(self)
+            if result == utils.VersionComparison.OUT_OF_DATE:
+                state = '!disabled'
+            elif result == utils.VersionComparison.UP_TO_DATE:
+                msg = f"This button is disabled. {constants.APP_NAME} is up-to-date."
+            elif result == utils.VersionComparison.DEVELOPMENT:
+                msg = f"This button is disabled. {constants.APP_NAME} is newer than the latest release."
+            else:
+                msg = "This button is disabled. No controller release information is available."
+
         if msg:
             gui.ToolTip(self.gui.update_lli_button, msg)
         self.clear_status()
