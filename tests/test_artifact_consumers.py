@@ -1,0 +1,460 @@
+import json
+import multiprocessing
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from threading import Event, Thread
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+from ou_dedetai import artifacts, constants, control, installer, maintenance, network, runtime, system, utils, wine
+from ou_dedetai.config import Config, PersistentConfiguration
+from tests.artifact_fixtures import appimage, msi, winetricks_zip
+from tests.test_artifacts import response
+
+
+def fixture_app(root):
+    install = root / "install 文"
+    bindir = install / "data/bin"
+    bindir.mkdir(parents=True)
+    cache = root / "cache"
+    cache.mkdir()
+    raw = PersistentConfiguration(
+        install_dir=str(install), faithlife_product="Logos", faithlife_product_version="10",
+        faithlife_product_release="38.0.0.0", wine_binary="data/bin/old.AppImage", wine_binary_code="AppImage",
+    )
+    overrides = SimpleNamespace(
+        install_dir=None, wine_prefix=None, wine_appimage_path=None, config_path=str(root / "selected.json"),
+        agreed_to_faithlife_terms=True,
+    )
+    conf = SimpleNamespace(
+        _raw=raw, _overrides=overrides, install_dir=str(install), installer_binary_dir=str(bindir),
+        wine_prefix=str(install / "data/wine64_bottle"), wine_appimage_link_file_name="selected_wine.AppImage",
+        wine_binary=str(bindir / "old.AppImage"), wine_binary_code="System", wine_appimage_path=None,
+        wine64_binary="/fixture/wine", download_dir=str(cache), user_download_dir=None,
+        faithlife_installer_name="Logos.msi", faithlife_installer_download_url="https://example.invalid/Logos.msi",
+        faithlife_product="Logos", faithlife_product_release="38.0.0.0", faithlife_product_version="10",
+        installed_faithlife_product_release="38.0.0.0", wine_appimage_recommended_file_name="wine.AppImage",
+        logos_exe=None,
+        wine_appimage_recommended_url="https://example.invalid/wine.AppImage",
+        _network=Mock(), icu_latest_version_url="https://example.invalid/icu.tar.gz", icu_latest_version="1",
+    )
+    conf._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
+        network.SoftwareReleaseInfo("1", conf.wine_appimage_recommended_url), None,
+    )
+    conf._network.icu_latest_version.return_value = network.SoftwareReleaseInfo("1", conf.icu_latest_version_url)
+    app = SimpleNamespace(
+        conf=conf, status=Mock(), installer_step=0, installer_step_count=0, _config_updated_event=Event(),
+        is_installed=Mock(return_value=False), approve_or_exit=Mock(side_effect=AssertionError("No real terms")),
+    )
+    for path in (Path(overrides.config_path), install / f"{constants.BINARY_NAME}.json"):
+        path.write_text(json.dumps(raw._as_dict()))
+    (bindir / "old.AppImage").write_bytes(appimage(b"old"))
+    return app
+
+
+class TestArtifactConsumers(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        state = patch.object(constants, "STATE_DIR", str(self.root / "state/app"))
+        state.start()
+        self.addCleanup(state.stop)
+        self.app = fixture_app(self.root)
+
+    def accepted(self, kind, content, name):
+        source = self.root / ("source-" + name)
+        source.write_bytes(content)
+        return artifacts.import_local(
+            source, Path(self.app.conf.installer_binary_dir),
+            artifacts.ArtifactSpec("local:" + str(source), name, kind),
+        )
+
+    def state(self):
+        links, configs = runtime._targets(self.app)
+        return [runtime._snapshot(path) for path in (*links, *configs)]
+
+    def test_actual_msi_chain_and_argv_ignore_stale_installer_paths(self):
+        conf = self.app.conf
+        target = Path(conf.install_dir) / "data/Logos.msi"
+        target.write_bytes(b"stale installed MSI")
+        home = self.root / "HOME"
+        home.mkdir()
+        (home / "Logos.msi").write_bytes(b"stale HOME MSI")
+        prefix = Path(conf.wine_prefix)
+        prefix.mkdir()
+        (prefix / "system.reg").write_bytes(b"fixture initialized prefix")
+        process = Mock(returncode=0)
+        with (
+            patch.object(installer, "ensure_winetricks_executable"),
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(msi())),
+            patch.object(Path, "home", return_value=home),
+            patch.object(wine, "disable_winemenubuilder"), patch.object(wine, "set_renderer"),
+            patch.object(wine, "set_fontsmoothing_to_rgb"), patch.object(wine, "install_fonts"),
+            patch.object(wine, "enforce_icu_data_files"),
+            patch.object(wine, "run_wine_during_install", return_value=process) as run,
+        ):
+            installer.ensure_product_installed(self.app)
+        args = run.call_args.kwargs["exe_args"]
+        consumed = Path(args[1])
+        self.assertEqual(consumed.read_bytes(), msi())
+        self.assertNotEqual(consumed, target)
+        self.assertEqual(target.read_bytes(), b"stale installed MSI")
+        self.assertEqual((home / "Logos.msi").read_bytes(), b"stale HOME MSI")
+
+    def test_rejected_msi_never_reaches_wine(self):
+        with (
+            patch.object(installer, "ensure_winetricks_executable"),
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(b"HTML")),
+            patch.object(wine, "install_msi") as install,
+        ):
+            with self.assertRaises(artifacts.ArtifactError):
+                installer.ensure_product_installed(self.app)
+        install.assert_not_called()
+
+    def test_every_activation_boundary_preserves_prior_selection(self):
+        accepted = self.accepted("appimage", appimage(b"new"), "old.AppImage")
+        before = self.state()
+        raw = self.app.conf._raw.wine_binary
+        original = runtime.os.replace
+        for failure in range(1, 8):
+            calls = []
+
+            def replace(source, target):
+                if Path(target).name != "runtime.json":
+                    calls.append(target)
+                    if len(calls) == failure:
+                        raise OSError("intended activation publication failure")
+                return original(source, target)
+
+            with self.subTest(boundary=failure), patch.object(runtime.os, "replace", side_effect=replace):
+                with self.assertRaises(artifacts.ArtifactError):
+                    runtime.activate(self.app, accepted)
+            self.assertEqual(self.state(), before)
+            self.assertEqual(self.app.conf._raw.wine_binary, raw)
+            self.assertEqual((Path(self.app.conf.installer_binary_dir) / "old.AppImage").read_bytes(), appimage(b"old"))
+            self.assertEqual(accepted.check().read_bytes(), appimage(b"new"))
+
+    def test_rollback_failure_blocks_use_then_recovery_is_repeatable(self):
+        accepted = self.accepted("appimage", appimage(b"new"), "wine.AppImage")
+        before = self.state()
+        original = runtime._replace_bytes
+
+        def failure(path, content, mode=0o600):
+            if path.name != "runtime.json":
+                raise OSError("config and rollback failed")
+            return original(path, content, mode)
+
+        with patch.object(runtime, "_replace_bytes", side_effect=failure):
+            with self.assertRaises(maintenance.RecoveryRequired):
+                runtime.activate(self.app, accepted)
+        with self.assertRaises(maintenance.RecoveryRequired):
+            runtime.executable(accepted.path, self.app)
+        runtime.recover(self.app)
+        runtime.recover(self.app)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(runtime.executable(accepted.path, self.app), str(accepted.path))
+
+    def test_activation_uses_accepted_generation_and_matching_companions(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        runtime.activate(self.app, accepted)
+        conf = self.app.conf
+        self.assertEqual(Path(conf._raw.wine_binary), accepted.path.relative_to(conf.install_dir))
+        for name in artifacts.COMPANIONS:
+            link = Path(conf.installer_binary_dir) / name
+            self.assertEqual(runtime.executable(link, self.app), str(accepted.path.parent / name))
+        for config in runtime._targets(self.app)[1]:
+            self.assertEqual(json.loads(config.read_bytes())["wine_binary"], conf._raw.wine_binary)
+
+    def test_external_same_basename_selection_is_not_replaced_by_recommended(self):
+        source = self.root / "wine.AppImage"
+        source.write_bytes(appimage(b"explicit external"))
+        with patch.object(network, "download_recommended_appimage", side_effect=AssertionError("wrong source")):
+            utils.set_appimage_symlink(self.app, source=source)
+        selected = Path(self.app.conf.install_dir) / self.app.conf._raw.wine_binary
+        self.assertEqual(selected.read_bytes(), source.read_bytes())
+
+    def test_winetricks_ignores_stale_executable_and_consumes_accepted_archive(self):
+        target = Path(self.app.conf.installer_binary_dir) / "winetricks"
+        target.write_bytes(b"unaccepted legacy script")
+        script = b"#!/bin/sh\n# offline fixture\nexit 0\n"
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(winetricks_zip(script))),
+        ):
+            executable = system.ensure_winetricks(self.app)
+        self.assertEqual(Path(executable).read_bytes(), script)
+        self.assertEqual(target.resolve(), Path(executable))
+
+    def test_rejected_icu_never_reaches_extraction_or_prefix_copy(self):
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(b"not gzip")),
+            patch.object(utils, "untar_file") as extract,
+            patch.object(wine, "copy_icu_files") as copy,
+        ):
+            with self.assertRaises(artifacts.ArtifactError):
+                wine.enforce_icu_data_files(self.app)
+        extract.assert_not_called()
+        copy.assert_not_called()
+
+    def test_invalid_runtime_never_spawns_even_a_version_probe(self):
+        source = self.root / "broken.AppImage"
+        source.write_bytes(b"bad")
+        with patch.object(wine.subprocess, "check_output") as probe:
+            self.assertIsNone(wine.get_wine_release(str(source))[0])
+        probe.assert_not_called()
+
+    def test_legacy_companions_preserve_argv0_and_environment_without_download(self):
+        conf = self.app.conf
+        source = Path(conf.wine_binary)
+        source.chmod(0o500)
+        link = source.parent / "wineserver"
+        link.symlink_to(source.name)
+        with (
+            patch.object(artifacts.requests, "get", side_effect=AssertionError("No launch download")),
+            patch.object(wine, "get_wine_env", return_value={}),
+        ):
+            command, env = wine._wine_invocation(self.app, str(link), None)
+        self.assertEqual(Path(command[0]).name, "wineserver")
+        self.assertIn(".artifacts", Path(command[0]).parts)
+        self.assertEqual(env["WINESERVER"], command[0])
+        self.assertEqual(Path(env["WINELOADER"]), Path(command[0]).resolve())
+        self.assertEqual(source.read_bytes(), appimage(b"old"))
+
+    def test_registry_diagnostics_refuse_recovery_and_changed_managed_bytes(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        self.app.conf.wine64_binary = str(accepted.path)
+        self.app.conf._wine_output_encoding = None
+        journal = runtime.selection_state(Path(self.app.conf.install_dir)) / "runtime.json"
+        journal.write_bytes(b"{}")
+        with patch.object(wine.system, "run_command") as run:
+            with self.assertRaises(maintenance.RecoveryRequired):
+                wine.get_registry_value("fixture", "value", self.app)
+            run.assert_not_called()
+        journal.unlink()
+        accepted.path.chmod(0o700)
+        accepted.path.write_bytes(b"invalid changed AppImage")
+        with patch.object(wine.system, "run_command") as run:
+            with self.assertRaises(artifacts.ArtifactError):
+                wine.get_registry_value("fixture", "value", self.app)
+            run.assert_not_called()
+
+    def test_activation_excludes_peer_between_recovery_and_new_journal(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        context = multiprocessing.get_context("fork")
+        ready = context.Event()
+        results = context.Queue()
+
+        def peer():
+            ready.wait(5)
+            try:
+                with runtime.activation_guard(self.app, exclusive=True):
+                    results.put("entered")
+            except maintenance.MaintenanceBusy:
+                results.put("excluded")
+
+        process = context.Process(target=peer)
+        process.start()
+        original = runtime._recover_locked
+
+        def recover(app, selected):
+            original(app, selected)
+            ready.set()
+            self.assertEqual(results.get(timeout=5), "excluded")
+
+        try:
+            with patch.object(runtime, "_recover_locked", side_effect=recover):
+                runtime.activate(self.app, accepted)
+        finally:
+            ready.set()
+            process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+
+    def test_fresh_config_recovers_each_interrupted_config_publication(self):
+        accepted = self.accepted("appimage", appimage(b"new"), "wine.AppImage")
+        before = self.state()
+        conf = self.app.conf
+        configs = runtime._targets(self.app)[1]
+        context = multiprocessing.get_context("fork")
+        for boundary in configs:
+            def interrupted():
+                original = runtime._replace_bytes
+
+                def write(path, content, mode=0o600):
+                    original(path, content, mode)
+                    if path == boundary:
+                        os._exit(32)
+
+                with patch.object(runtime, "_replace_bytes", side_effect=write):
+                    runtime.activate(self.app, accepted)
+
+            process = context.Process(target=interrupted)
+            process.start()
+            process.join(5)
+            self.assertEqual(process.exitcode, 32)
+            loaded = PersistentConfiguration.load_from_path(conf._overrides.config_path)
+            with self.assertRaises(maintenance.RecoveryRequired):
+                loaded.write_config(checked=True, config_file_path=conf._overrides.config_path)
+            configuration = object.__new__(Config)
+            with patch.object(Config, "_create_network_requests_with_hook", return_value=Mock()):
+                Config.__init__(configuration, conf._overrides, self.app)
+            self.assertEqual(configuration._raw.wine_binary, conf._raw.wine_binary)
+            self.assertEqual(self.state(), before)
+
+    def test_checked_lock_failure_restores_logging_cache_and_retry_writes(self):
+        conf = object.__new__(Config)
+        conf._raw = self.app.conf._raw
+        conf._raw.faithlife_product_logging = False
+        conf._overrides = self.app.conf._overrides
+        conf.app = self.app
+        original = runtime.os.open
+
+        def denied(path, *args, **kwargs):
+            if isinstance(path, Path) and path.name == "configuration.lock":
+                raise PermissionError("intended configuration lock failure")
+            return original(path, *args, **kwargs)
+
+        with patch.object(runtime.os, "open", side_effect=denied):
+            with self.assertRaises(maintenance.MaintenanceError):
+                conf.faithlife_product_logging = True
+        self.assertFalse(conf._raw.faithlife_product_logging)
+        conf.faithlife_product_logging = True
+        saved = json.loads(Path(conf._overrides.config_path).read_bytes())
+        self.assertTrue(saved["faithlife_product_logging"])
+
+    def test_real_msi_reader_and_competing_publisher_keep_consumption_identity(self):
+        accepted = self.accepted("msi", msi(), "Logos.msi")
+        gate, captured = self.root / "read-now", self.root / "read-hash"
+        started = Event()
+        errors = []
+        reader_code = (
+            "from pathlib import Path\nimport hashlib,sys,time\n"
+            "source,gate,capture=map(Path,sys.argv[1:])\n"
+            "deadline=time.monotonic()+10\n"
+            "while not gate.exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+            "assert gate.exists()\n"
+            "capture.write_text(hashlib.sha256(source.read_bytes()).hexdigest())\n"
+        )
+
+        def spawn(*args, **kwargs):
+            self.assertEqual(kwargs["exe_args"][1], str(accepted.path))
+            process = subprocess.Popen([sys.executable, "-B", "-c", reader_code,
+                                        str(accepted.path), str(gate), str(captured)])
+            started.set()
+            return process
+
+        def consume():
+            try:
+                wine.install_msi(self.app, accepted)
+            except BaseException as error:
+                errors.append(error)
+
+        with patch.object(wine, "run_wine_during_install", side_effect=spawn):
+            thread = Thread(target=consume)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(5))
+                source = self.root / "peer.msi"
+                source.write_bytes(msi().replace(b"M04 fixture", b"M05 fixture"))
+                publisher = (
+                    "import sys\nfrom pathlib import Path\n"
+                    f"sys.path.insert(0,{str(Path(__file__).resolve().parents[1])!r})\n"
+                    "from ou_dedetai import artifacts,constants\n"
+                    f"constants.STATE_DIR={constants.STATE_DIR!r}\n"
+                    f"source=Path({str(source)!r})\n"
+                    f"root=Path({self.app.conf.installer_binary_dir!r})\n"
+                    "accepted=artifacts.import_local(source,root,artifacts.ArtifactSpec('local:peer','Logos.msi','msi'))\n"
+                    "print(accepted.path)\n"
+                )
+                other = subprocess.check_output([sys.executable, "-B", "-c", publisher], text=True, timeout=5).strip()
+                self.assertNotEqual(Path(other), accepted.path)
+                with self.assertRaises(maintenance.MaintenanceBusy), maintenance.artifact_use(exclusive=True):
+                    self.fail("Removal entered during actual consumer wait")
+            finally:
+                gate.write_bytes(b"read accepted path")
+                thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(captured.read_text(), accepted.sha256)
+        with maintenance.artifact_use(exclusive=True):
+            pass
+
+    def test_appimage_to_system_winetricks_transition_preserves_alias_on_failure(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        runtime.activate(self.app, accepted)
+        target = Path(self.app.conf.installer_binary_dir) / "winetricks"
+        before = os.readlink(target)
+        self.app.conf.wine_binary_code = "System"
+        self.app.conf.wine_appimage_path = None
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(b"error", 500)),
+        ):
+            with self.assertRaises(artifacts.ArtifactError):
+                system.ensure_winetricks(self.app)
+        self.assertEqual(os.readlink(target), before)
+        self.assertEqual(target.resolve(), accepted.path)
+        script = b"#!/bin/sh\nexit 0\n"
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(winetricks_zip(script))),
+        ):
+            selected = Path(system.ensure_winetricks(self.app))
+        self.assertEqual(selected.read_bytes(), script)
+        self.assertEqual(target.resolve(), selected)
+        self.assertEqual(accepted.check().read_bytes(), appimage())
+
+    def test_explicit_local_selection_never_reads_recommended_release_properties(self):
+        conf = object.__new__(Config)
+        conf._raw = self.app.conf._raw
+        conf._overrides = self.app.conf._overrides
+        conf._overrides.installer_binary_dir = None
+        conf._overrides.wine_appimage_link_file_name = None
+        conf._network = Mock()
+        conf._network.wine_appimage_versions.side_effect = AssertionError("Local selection must stay offline")
+        conf.app = self.app
+        self.app.conf = conf
+        source = self.root / "wine.AppImage"
+        source.write_bytes(appimage(b"offline choice"))
+        utils.set_appimage_symlink(self.app, source=source)
+        self.assertEqual(Path(conf.wine_binary).read_bytes(), source.read_bytes())
+        conf._network.wine_appimage_versions.assert_not_called()
+
+    def test_pending_runtime_refuses_uninstall_then_recovered_location_can_reinstall(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        original = runtime._replace_bytes
+
+        def denied(path, content, mode=0o600):
+            if path.name != "runtime.json":
+                raise PermissionError("activation and rollback persistence refused")
+            return original(path, content, mode)
+
+        with patch.object(runtime, "_replace_bytes", side_effect=denied):
+            with self.assertRaises(maintenance.RecoveryRequired):
+                runtime.activate(self.app, accepted)
+        before = self.state()
+        self.app.approve = Mock()
+        with self.assertRaisesRegex(maintenance.RecoveryRequired, "Restart LogosDesktop"):
+            control.uninstall(self.app)
+        self.app.approve.assert_not_called()
+        self.assertEqual(self.state(), before)
+        runtime.recover(self.app)
+        install = Path(self.app.conf.install_dir)
+        Path(self.app.conf.wine_prefix).mkdir(parents=True)
+        self.app.approve.side_effect = [False, True]
+        control.uninstall(self.app)
+        self.assertFalse(install.exists())
+        replacement = PersistentConfiguration(install_dir=str(install), faithlife_product="Logos")
+        replacement.write_config(checked=True, config_file_path=self.app.conf._overrides.config_path)
+        saved = json.loads(Path(self.app.conf._overrides.config_path).read_bytes())
+        self.assertEqual(saved["install_dir"], str(install))
+        self.assertFalse((runtime.selection_state(install) / "runtime.json").exists())

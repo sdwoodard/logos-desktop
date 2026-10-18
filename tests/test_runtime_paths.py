@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, control, installer, network, paths, utils, wine
+from ou_dedetai import artifacts, constants, control, installer, network, paths, utils, wine
 from ou_dedetai.config import Config, PersistentConfiguration
+from tests.artifact_fixtures import appimage
 
 
 def fixture_config(install):
@@ -19,6 +20,7 @@ def fixture_config(install):
     )
     config._overrides = SimpleNamespace(
         install_dir=None, installer_binary_dir=None, wine_appimage_path=None, faithlife_product_version=None,
+        config_path=str(install.parent / "selected.json"), wine_appimage_link_file_name=None,
     )
     config._write = Mock()
     config.app = SimpleNamespace(conf=config, ask=Mock())
@@ -56,7 +58,7 @@ class TestRuntimePaths(unittest.TestCase):
             work = root / "work"
             capture = root / "capture.json"
             for base in (install, work):
-                executable = base / "data/bin/runtime.AppImage"
+                executable = base / "data/bin/runtime"
                 executable.parent.mkdir(parents=True)
                 executable.write_text(
                     f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n"
@@ -65,6 +67,7 @@ class TestRuntimePaths(unittest.TestCase):
                 )
                 executable.chmod(0o755)
             config = fixture_config(install)
+            config._raw.wine_binary = "data/bin/runtime"
             previous = Path.cwd()
             try:
                 os.chdir(work)
@@ -132,18 +135,30 @@ class TestRuntimePaths(unittest.TestCase):
                 config._raw.wine_binary = choice
                 self.assertEqual(config.wine_binary, str(root / "install/data/bin" / filename))
                 config.app.ask.assert_not_called()
-                app = SimpleNamespace(conf=config, installer_step=0, installer_step_count=0, status=Mock())
+                app = SimpleNamespace(
+                    conf=config, installer_step=0, installer_step_count=0, status=Mock(), _config_updated_event=Mock(),
+                )
+
+                def transfer(url, name, directory, **kwargs):
+                    source = root / "selected.AppImage"
+                    source.write_bytes(appimage())
+                    return artifacts.import_local(
+                        source, Path(directory), artifacts.ArtifactSpec(url, name, "appimage"),
+                    )
+
                 with (
                     patch.object(installer, "ensure_sys_deps"),
                     patch.object(installer, "check_system_compatibility"),
-                    patch.object(installer.network, "logos_reuse_download") as transfer,
+                    patch.object(installer.network, "logos_reuse_download", side_effect=transfer) as download,
                     patch.multiple(constants, CACHE_BASE=cache_base, CACHE_DIR=str(cache)),
                 ):
                     installer.ensure_appimage_download(app)
-                transfer.assert_called_once_with(
-                    f"https://example.invalid/{filename}", filename, str(cache), app=app,
+                download.assert_called_once_with(
+                    f"https://example.invalid/{filename}", filename, config.installer_binary_dir,
+                    app=app, kind="appimage", digest=None,
                 )
-                self.assertEqual(config.wine_binary, str(cache / filename))
+                self.assertEqual(Path(config.wine_binary).name, filename)
+                self.assertEqual(artifacts.installed(config.wine_binary, "appimage").path.read_bytes(), appimage())
 
     def test_external_appimage_with_release_basename_remains_an_explicit_selection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -169,7 +184,9 @@ class TestRuntimePaths(unittest.TestCase):
             runtime.chmod(0o755)
             absent = str(root / "absent")
             conf = SimpleNamespace(
-                _raw=SimpleNamespace(wine_binary="runtime", _as_dict=lambda: {}), wine_binary=str(runtime),
+                _raw=SimpleNamespace(wine_binary="runtime", install_dir=str(root), faithlife_product="Logos",
+                                     _as_dict=lambda: {}), wine_binary=str(runtime),
+                installer_binary_dir=str(root / "data/bin"),
                 config_file_path=absent, app_log_path=absent, app_wine_log_path=absent,
                 app_wine_log_previous_path=absent, _faithlife_crash_log=None,
                 _network=SimpleNamespace(_cache=SimpleNamespace(_as_dict=lambda: {})), _overrides=SimpleNamespace(),
@@ -182,7 +199,7 @@ class TestRuntimePaths(unittest.TestCase):
                 patch.object(control.system, "get_dialog", return_value="cli"),
             ):
                 control.get_support(app)
-            expected = unittest.mock.call([str(runtime), "--version"], text=True, env=unittest.mock.ANY)
+            expected = unittest.mock.call([str(runtime), "--version"], text=True, env=unittest.mock.ANY, timeout=15)
             self.assertIn(expected, commands.call_args_list)
 
     def test_configured_symlink_is_preserved_and_invalid_types_are_not_executable(self):

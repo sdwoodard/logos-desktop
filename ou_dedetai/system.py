@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 
@@ -980,46 +981,57 @@ def ensure_winetricks(
     version=constants.WINETRICKS_VERSION,
     status_messages: bool = True
 ):
-    winetricks_path = Path(app.conf.installer_binary_dir) / "winetricks"
+    from . import artifacts, runtime
 
-    if winetricks_path.exists():
-        # No need to do anything
-        return
-
-    # Symlink if using an appimage
     if (
         app.conf.wine_binary_code in ["Recommended", "AppImage"]
         and app.conf.wine_appimage_path is not None
         and app.conf.wine_appimage_path.exists()
     ):
-        winetricks_path.symlink_to(app.conf.wine_appimage_path)
-        logging.debug("Winetricks symlinked to appimage.")
-        return
+        binary = runtime.executable(app.conf.wine_appimage_path, app)
+        concrete = Path(binary).resolve()
+        if concrete.parent.parent.parent.name != ".artifacts":
+            accepted = artifacts.import_local(
+                concrete, Path(app.conf.installer_binary_dir),
+                artifacts.ArtifactSpec("local:" + str(concrete), concrete.name, "appimage"),
+            )
+            concrete = accepted.path
+        return str(concrete.parent / "winetricks")
+
+    winetricks_path = Path(app.conf.installer_binary_dir) / "winetricks"
+    script_spec = artifacts.ArtifactSpec(
+        f"https://github.com/Winetricks/winetricks/{version}", "winetricks", "winetricks",
+    )
+    if winetricks_path.is_symlink():
+        concrete = winetricks_path.resolve()
+        if concrete.name == "winetricks" and concrete.parent.parent.name == script_spec.key:
+            try:
+                return str(artifacts.installed(concrete, "winetricks").path)
+            except (OSError, artifacts.ArtifactError):
+                pass
 
     # Otherwise download
     if status_messages:
         app.status(f"Installing winetricks v{version}…")
     base_url = "https://codeload.github.com/Winetricks/winetricks/zip/refs/tags"
     zip_name = f"{version}.zip"
-    network.logos_reuse_download(
+    accepted = network.logos_reuse_download(
         f"{base_url}/{version}",
         zip_name,
         app.conf.download_dir,
         app=app,
-        status_messages=status_messages
+        status_messages=status_messages,
+        kind="winetricks-zip",
     )
-    wtzip = f"{app.conf.download_dir}/{zip_name}"
-    logging.debug(f"Extracting winetricks script to {winetricks_path}…")
-    with zipfile.ZipFile(wtzip) as z:
-        for zi in z.infolist():
-            if zi.is_dir():
-                continue
-            zi.filename = Path(zi.filename).name
-            if zi.filename == 'winetricks':
-                z.extract(zi, path=str(winetricks_path.parent))
-                break
-    os.chmod(winetricks_path, 0o755)
-    logging.debug("Winetricks installed.")
+    with tempfile.TemporaryDirectory(prefix="winetricks-", dir=app.conf.download_dir) as directory:
+        source = Path(directory) / "winetricks"
+        with zipfile.ZipFile(accepted.check()) as archive:
+            source.write_bytes(archive.read(artifacts.winetricks_member(archive)))
+        script = artifacts.import_local(
+            source, Path(app.conf.installer_binary_dir), script_spec,
+        )
+    runtime._replace_link(winetricks_path, str(script.path))
+    return str(script.path)
 
 
 def check_incompatibilities(app: App):

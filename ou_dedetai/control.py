@@ -17,7 +17,7 @@ from zipfile import ZipFile
 
 from ou_dedetai import constants
 from ou_dedetai import maintenance, backup_store
-from ou_dedetai import paths
+from ou_dedetai import paths, artifacts, runtime
 from ou_dedetai import system
 from ou_dedetai.app import App
 
@@ -93,6 +93,11 @@ def uninstall(app: App):
     install_value = app.conf._overrides.install_dir or app.conf._raw.install_dir
     install = Path(install_value) if install_value else None
     context = maintenance.current_context()
+    pending_runtime = runtime.selection_state(context.install) / "runtime.json"
+    if os.path.lexists(pending_runtime):
+        raise maintenance.RecoveryRequired(
+            "Restart LogosDesktop to recover the pending runtime selection, then retry uninstall"
+        )
     if install is not None and context.prefix != (install / "data/wine64_bottle").resolve():
         raise maintenance.MaintenanceError("Selected prefix does not match the installation being uninstalled")
     protected = (
@@ -166,7 +171,8 @@ def uninstall(app: App):
     app.status("Uninstalling…")
     ordered = sorted(targets.values(), key=lambda target: not stat.S_ISDIR(target.info.st_mode))
     maintenance.assert_quiescent(context)
-    paths.remove_targets(ordered, protected)
+    with maintenance.artifact_use(exclusive=True):
+        paths.remove_targets(ordered, protected)
 
     # Reloading would recreate a cache that the user just asked to remove.
     app.conf._raw = PersistentConfiguration()
@@ -214,7 +220,8 @@ def get_support(app: App) -> str:
         staged = Path(temporary) / "support.zip"
         descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(descriptor)
-        _write_support(app, staged)
+        with maintenance.artifact_use():
+            _write_support(app, staged)
         with staged.open("rb") as completed:
             os.fsync(completed.fileno())
         with ZipFile(staged) as archive:
@@ -274,8 +281,8 @@ def _write_support(app, output_path):
 
         if app.conf._raw.wine_binary:
             try:
-                run_commands += [[paths.executable(app.conf.wine_binary), "--version"]]
-            except ValueError as error:
+                run_commands += [[runtime.executable(app.conf.wine_binary, app), "--version"]]
+            except (ValueError, OSError, artifacts.ArtifactError, maintenance.MaintenanceError) as error:
                 logging.warning("Skipping runtime diagnostic: %s", error)
 
         subprocess_env = copy.deepcopy(os.environ)
@@ -287,7 +294,8 @@ def _write_support(app, output_path):
                 output = subprocess.check_output(
                     command,
                     text=True,
-                    env=subprocess_env
+                    env=subprocess_env,
+                    timeout=15,
                 )
                 zip.writestr(f"/tmp/{" ".join(command).replace("/","_")}", output)
             except Exception as e:

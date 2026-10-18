@@ -512,6 +512,9 @@ class TUI(App):
                 installer.install(app=self)
             except UserExitedFromAsk:
                 pass
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                self.status(f"Install failed: {error}")
+                self._pop_up("Install failed", str(error))
             finally:
                 self.conf._overrides.assume_yes = original_assume_yes
                 self.go_to_main_menu()
@@ -535,10 +538,7 @@ class TUI(App):
             utils.update_to_latest_lli_release(self)
 
         elif self.conf._raw.faithlife_product and choice == f"Update {self.conf.faithlife_product}":
-            def _update() -> None:
-                utils.update_faithlife_product(self)
-                self.go_to_main_menu()
-            threading.Thread(target=_update, daemon=True).start()
+            self._run_operation(utils.update_faithlife_product)
 
         elif self.conf._raw.faithlife_product and choice == f"Run {self.conf._raw.faithlife_product}":
             self._run_operation(lambda app: app.logos.start())

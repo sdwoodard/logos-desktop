@@ -8,7 +8,7 @@ import logging
 import psutil
 import threading
 
-from ou_dedetai import constants, database, maintenance
+from ou_dedetai import constants, database, maintenance, runtime
 from ou_dedetai.app import App
 from ou_dedetai.config import get_logos_user_id
 
@@ -178,7 +178,8 @@ class LogosManager:
     def start(self):
         self.logos_state = State.STARTING
         try:
-            wine_release, _ = wine.get_wine_release(self.app.conf.wine_binary)
+            selected_runtime = runtime.executable(self.app.conf.wine_binary, self.app)
+            wine_release, _ = wine.get_wine_release(selected_runtime)
             good_wine, reason = wine.check_wine_rules(
                 wine_release,
                 self.app.conf.installed_faithlife_product_release,
@@ -193,7 +194,7 @@ class LogosManager:
                 raise ValueError("Could not find installed Logos EXE to run")
             process = wine.run_wine_application(
                 self.app,
-                self.app.conf.wine_binary,
+                selected_runtime,
                 exe=self.app.conf.logos_exe
             )
             if process is None:

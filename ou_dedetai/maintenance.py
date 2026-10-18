@@ -91,6 +91,24 @@ _configuration_users: dict[int, int] = {}
 
 
 @contextmanager
+def artifact_use(*, exclusive=False):
+    """Protect immutable stores from removal, including shared cross-prefix cache."""
+    root = private_directory(Path(constants.STATE_DIR).expanduser().parent / "logos-desktop/artifact-locks")
+    descriptor = os.open(root / "usage.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise MaintenanceError("Unsafe artifact usage lock")
+        try:
+            fcntl.flock(descriptor, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise MaintenanceBusy("Artifacts are in use by another operation") from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
 def configured(app):
     with _admission:
         context = Context.from_app(app)
@@ -144,6 +162,7 @@ class Lease:
         self.context = context
         self.exclusive = exclusive
         self.descriptor = None
+        self.artifacts = None
         with _admission:
             owner = _reservations.get(context.prefix)
             if owner is not None and owner != threading.get_ident():
@@ -165,8 +184,19 @@ class Lease:
                 os.close(descriptor)
                 raise
             self.descriptor = descriptor
+            if not exclusive:
+                self.artifacts = artifact_use()
+                try:
+                    self.artifacts.__enter__()
+                except BaseException:
+                    os.close(descriptor)
+                    self.descriptor = None
+                    raise
 
     def close(self):
+        if self.artifacts is not None:
+            self.artifacts.__exit__(None, None, None)
+            self.artifacts = None
         if self.descriptor is not None:
             os.close(self.descriptor)
             self.descriptor = None

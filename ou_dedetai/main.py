@@ -16,6 +16,7 @@ import sys
 from .repair import detect_and_recover
 
 from . import cli
+from . import artifacts
 from . import constants
 from . import gui_app
 from . import msg
@@ -457,7 +458,7 @@ def main():
 
     try:
         run(ephemeral_config, action)
-    except maintenance.MaintenanceError as error:
+    except (maintenance.MaintenanceError, artifacts.ArtifactError) as error:
         logging.error("Operation failed: %s", error)
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from error

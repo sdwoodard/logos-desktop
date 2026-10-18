@@ -27,6 +27,7 @@ class TestMaintenance(unittest.TestCase):
         patch.object(constants, "STATE_DIR", str(self.root / "state/FaithLife-Community")).start()
         self.app = fixture_app(self.root)
         self.context = maintenance.Context.from_app(self.app)
+        self.app.conf.installer_binary_dir = str(self.context.install / "data/bin")
 
     def child(self, program, *arguments, env=None):
         process = subprocess.Popen(
@@ -326,7 +327,10 @@ time.sleep(20)
             thread.join(5)
 
     def test_failed_launch_returns_error_resets_state_and_releases_admission(self):
-        self.app.conf.wine_binary = "fixture"
+        executable = self.root / "fixture-runtime"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+        self.app.conf.wine_binary = str(executable)
         self.app.conf.installed_faithlife_product_release = "1"
         self.app.conf.faithlife_product_version = "10"
         self.app.conf.logos_exe = "Logos.exe"

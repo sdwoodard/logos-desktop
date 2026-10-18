@@ -446,7 +446,11 @@ class InstallerWindow:
             """Function to handle the install"""
             # Close the options window and let the install run
             self.close()
-            installer.install(self.app)
+            try:
+                installer.install(self.app)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                self.app.status(f"Install failed: {error}", 0)
+                self.app.pop_up("Install failed", str(error))
             # Install complete, cleaning up...
             return 0
 
@@ -549,6 +553,9 @@ class ControlWindow(GuiApp):
             except UserExitedFromAsk:
                 # Ensure that the defaults are properly set back up
                 self.populate_defaults()
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                self.status(f"Install failed: {error}", 0)
+                self.pop_up("Install failed", str(error))
             finally:
                 # Enable the run button
                 self.gui.app_button.state(['!disabled'])
@@ -691,8 +698,7 @@ class ControlWindow(GuiApp):
 
         @maintenance.uses_installation
         def change_runtime(app):
-            app.conf.wine_appimage_path = appimage_filename
-            utils.set_appimage_symlink(app)
+            utils.set_appimage_symlink(app, source=appimage_filename)
 
         self._run_operation(change_runtime)
 
@@ -915,7 +921,12 @@ def start_gui_app(
             app = GuiApp(root, installer_gui, ephemeral_config)
             # This may take a minute to run, as it may need to reach out to the internet
             app.populate_defaults()
-            installer.install(app)
+            try:
+                installer.install(app)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                app.status(f"Install failed: {error}", 0)
+                app.pop_up("Install failed", str(error))
+                return
             # Wait for a couple seconds so user can understand they're done.
             time.sleep(3)
             root.destroy()

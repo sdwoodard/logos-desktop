@@ -104,6 +104,9 @@ def detect_and_recover(ephemeral_config: EphemeralConfiguration):
         Path(wine_prefix).resolve(), Path(persistent_config.install_dir).resolve(), persistent_config.faithlife_product,
     )
     backup.recover_pending_restore(context)
+    from . import runtime
+
+    persistent_config = runtime.recover_startup(ephemeral_config, persistent_config)
     with maintenance.use(context):
         wine_user = ou_dedetai.config.get_wine_user(wine_prefix)
         if wine_user is None:

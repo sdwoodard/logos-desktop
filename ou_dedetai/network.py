@@ -1,79 +1,63 @@
-import abc
+"""Release metadata and application-facing artifact acquisition."""
+
+from base64 import b64encode
 from dataclasses import dataclass, field
-import hashlib
+from datetime import datetime
 import json
 import logging
-from math import ceil
 import os
-import time
-from typing import Callable, Optional
-import requests
+from pathlib import Path
 import shutil
 import sys
-from base64 import b64encode
-from pathlib import Path
-from urllib.parse import urlparse
+import tempfile
+import time
+from typing import Callable, Optional
 from xml.etree import ElementTree as ET
-from datetime import datetime
 
-import requests.structures
+from . import artifacts, constants, paths, utils
 
-from ou_dedetai.app import App
 
-from . import constants
-from . import utils
-
-class Props(abc.ABC):
-    def __init__(self) -> None:
-        self._md5: Optional[str] = None
-        self._size: Optional[int] = None
+class FileProps:
+    def __init__(self, path):
+        self.path = Path(path) if path is not None else None
 
     @property
-    def size(self) -> Optional[int]:
-        if self._size is None:
-            self._size = self._get_size()
-        return self._size
+    def size(self):
+        return self.path.stat().st_size if self.path is not None and self.path.is_file() else None
+
+    def _get_md5(self):
+        return b64encode(bytes.fromhex(artifacts.regular_hash(self.path, "md5"))).decode()
 
     @property
-    def md5(self) -> Optional[str]:
-        if self._md5 is None:
-            self._md5 = self._get_md5()
-        return self._md5
+    def md5(self):
+        return self._get_md5() if self.path is not None else None
 
-    @abc.abstractmethod
-    def _get_size(self) -> Optional[int]:
-        """Get the size"""
-    
-    @abc.abstractmethod
-    def _get_md5(self) -> Optional[str]:
-        """Calculate the md5 sum"""
 
-class FileProps(Props):
-    def __init__(self, path: str | Path | None):
-        super(FileProps, self).__init__()
-        self.path = None
-        if path is not None:
-            self.path = Path(path)
+class UrlProps:
+    def __init__(self, url):
+        self.path = url
+        self._metadata = None
 
-    def _get_size(self):
-        if self.path is None:
-            return
-        if Path(self.path).is_file():
-            return self.path.stat().st_size
+    def metadata(self):
+        if self._metadata is None:
+            self._metadata = artifacts.head_metadata(self.path)
+        return self._metadata
 
-    def _get_md5(self) -> Optional[str]:
-        if self.path is None:
-            return None
-        md5 = hashlib.md5()
-        with self.path.open('rb') as f:
-            for chunk in iter(lambda: f.read(524288), b''):
-                md5.update(chunk)
-        return b64encode(md5.digest()).decode('utf-8')
+    @property
+    def size(self):
+        return self.metadata()[0]
+
+    @property
+    def md5(self):
+        digest = self.metadata()[1]
+        return b64encode(bytes.fromhex(digest.value)).decode() if digest is not None else None
+
 
 @dataclass
 class SoftwareReleaseInfo:
     version: str
     download_url: str
+    digest: artifacts.Digest | None = None
 
 
 @dataclass
@@ -82,146 +66,72 @@ class GithubSoftwareReleasesInfo:
     pre_release: Optional[SoftwareReleaseInfo]
 
 
-class UrlProps(Props):
-    def __init__(self, url: str):
-        super(UrlProps, self).__init__()
-        self.path = url
-        self._headers: Optional[requests.structures.CaseInsensitiveDict] = None
-
-    @property
-    def headers(self) -> requests.structures.CaseInsensitiveDict:
-        if self._headers is None:
-            self._headers = self._get_headers()
-        return self._headers
-
-    def _get_headers(self) -> requests.structures.CaseInsensitiveDict:
-        logging.debug(f"Getting headers from {self.path}.")
-        try:
-            h = {'Accept-Encoding': 'identity'}  # force non-compressed txfr
-            r = requests.head(self.path, allow_redirects=True, headers=h)
-        except requests.exceptions.ConnectionError:
-            logging.critical("Failed to connect to the server.")
-            return requests.structures.CaseInsensitiveDict()
-        except Exception as e:
-            logging.error(e)
-            raise
-        return r.headers
-
-    def _get_size(self):
-        content_length = self.headers.get('Content-Length')
-        content_encoding = self.headers.get('Content-Encoding')
-        if content_encoding is not None:
-            logging.critical(f"The server requires receiving the file compressed as '{content_encoding}'.")
-        logging.debug(f"{content_length=}")
-        if content_length is not None:
-            self._size = int(content_length)
-        return self._size
-
-    def _get_md5(self):
-        if self.headers.get('server') == 'AmazonS3':
-            content_md5 = self.headers.get('etag')
-            if content_md5 is not None:
-                # Convert from hex to base64
-                content_md5_hex = content_md5.strip('"').strip("'")
-                content_md5 = b64encode(bytes.fromhex(content_md5_hex)).decode()
-        else:
-            content_md5 = self.headers.get('Content-MD5')
-        if content_md5 is not None:
-            content_md5 = content_md5.strip('"').strip("'")
-        logging.debug(f"{content_md5=}")
-        if content_md5 is not None:
-            self._md5 = content_md5
-        return self._md5
-
-
 @dataclass
 class CachedRequests:
-    """This struct all network requests and saves to a cache"""
-    # Some of these values are cached to avoid github api rate-limits
-
-    faithlife_product_releases: dict[str, dict[str, dict[str, list[str]]]] = field(default_factory=dict)
-    """Cache of faithlife releases.
-    
-    Since this depends on the user's selection we need to scope the cache based on that
-    The cache key is the product, version, and release channel
-    """
-    repository_latest_version: dict[str, str] = field(default_factory=dict)
-    """Cache of the latest versions keyed by repository slug
-    
-    Keyed by repository slug Owner/Repo
-    """
-    repository_latest_url: dict[str, str] = field(default_factory=dict)
-    """Cache of the latest download url keyed by repository slug
-    
-    Keyed by repository slug Owner/Repo
-    """
-    repository_latest_pre_release_version: dict[str, str] = field(default_factory=dict)
-    """Cache of the latest version (that may be a pre release) keyed by repository slug
-    
-    Keyed by repository slug Owner/Repo
-    """
-    repository_latest_pre_release_url: dict[str, str] = field(default_factory=dict)
-    """Cache of the latest download url (that may be a pre release) keyed by repository slug
-    
-    Keyed by repository slug Owner/Repo
-    """
-
-
-    url_size_and_hash: dict[str, tuple[Optional[int], Optional[str]]] = field(default_factory=dict)
-
+    faithlife_product_releases: dict = field(default_factory=dict)
+    repository_latest_version: dict = field(default_factory=dict)
+    repository_latest_url: dict = field(default_factory=dict)
+    repository_latest_pre_release_version: dict = field(default_factory=dict)
+    repository_latest_pre_release_url: dict = field(default_factory=dict)
+    repository_digest: dict = field(default_factory=dict)
     last_updated: Optional[float] = None
-
     _update_hook: Optional[Callable[[], None]] = None
 
-
     @classmethod
-    def load(cls) -> "CachedRequests":
-        """Load the cache from file if exists"""
-        from ou_dedetai import paths
-
+    def load(cls):
         paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
         path = Path(constants.NETWORK_CACHE_PATH)
         if path.exists():
             if path.is_symlink() or not path.is_file():
                 raise ValueError(f"Invalid metadata cache file: {path}")
-            with open(path, "r") as f:
-                try:
-                    output: dict = json.load(f)
-                    # Drop any unknown keys
-                    known_keys = CachedRequests().__dict__.keys()
-                    cache_keys = list(output.keys())
-                    for k in cache_keys:
-                        if k not in known_keys:
-                            del output[k]
-                    return CachedRequests(**output)
-                except json.JSONDecodeError:
-                    logging.warning("Failed to read cache JSON. Clearing…")
-        return CachedRequests(
-            last_updated=time.time()
-        )
-    
-    def _as_dict(self) -> dict[str, str]:
-        output = self.__dict__.copy()
-        for output_key in self.__dict__.keys():
-            if output_key.startswith("_"):
-                del output[output_key]
-        return output
+            try:
+                with path.open() as source:
+                    output = json.load(source)
+            except json.JSONDecodeError:
+                logging.warning("Invalid metadata cache JSON")
+            else:
+                if isinstance(output, dict):
+                    known = cls().__dict__
+                    values = {key: value for key, value in output.items() if key in known and not key.startswith("_")}
+                    for key in known:
+                        if key not in ("last_updated", "_update_hook") and not isinstance(values.get(key, {}), dict):
+                            values.pop(key, None)
+                    if type(values.get("last_updated")) not in (int, float):
+                        values.pop("last_updated", None)
+                    for key in values.keys() - {"last_updated", "faithlife_product_releases"}:
+                        values[key] = {name: value for name, value in values[key].items()
+                                       if isinstance(name, str) and isinstance(value, str) and value}
+                    release_cache = {}
+                    for product, versions in values.get("faithlife_product_releases", {}).items():
+                        if not isinstance(product, str) or not isinstance(versions, dict):
+                            continue
+                        release_cache[product] = {}
+                        for version, channels in versions.items():
+                            if not isinstance(version, str) or not isinstance(channels, dict):
+                                continue
+                            release_cache[product][version] = {
+                                channel: release_list for channel, release_list in channels.items()
+                                if isinstance(channel, str) and isinstance(release_list, list)
+                                and all(isinstance(release, str) for release in release_list)
+                            }
+                    values["faithlife_product_releases"] = release_cache
+                    return cls(**values)
+        return cls(last_updated=time.time())
 
-    def _write(self) -> None:
-        """Writes the cache to disk. Done internally when there are changes"""
-        from ou_dedetai import paths
-        import tempfile
+    def _as_dict(self):
+        return {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
 
+    def _write(self):
         path = Path(constants.NETWORK_CACHE_PATH)
         cache = paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
         if path.parent != cache:
             raise ValueError("Metadata cache must remain in the application cache")
         temporary = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=cache, delete=False) as f:
-                temporary = Path(f.name)
-                json.dump(self._as_dict(), f, indent=4, sort_keys=True, default=vars)
-                f.write("\n")
+            with tempfile.NamedTemporaryFile(mode="w", dir=cache, delete=False) as output:
+                temporary = Path(output.name)
+                json.dump(self._as_dict(), output, indent=4, sort_keys=True)
+                output.write("\n")
             os.replace(temporary, path)
         finally:
             if temporary is not None:
@@ -229,535 +139,172 @@ class CachedRequests:
         if self._update_hook:
             self._update_hook()
 
+    def _is_fresh(self):
+        return self.last_updated is not None and (
+            self.last_updated + constants.CACHE_LIFETIME_HOURS * 3600 > time.time()
+        )
 
-    def _is_fresh(self) -> bool:
-        """Returns whether or not this cache is valid"""
-        if self.last_updated is None:
-            return False
-        valid_until = self.last_updated + constants.CACHE_LIFETIME_HOURS * 60 * 60
-        if valid_until <= time.time():
-            return False
-        return True
-
-    def ensure_fresh(self, force: bool = False) -> "CachedRequests":
-        """Returns a CachedRequests that is fresh 
-        
-        - Either an empty new one
-        - Or the existing one
-        """
+    def ensure_fresh(self, force=False):
         if force or not self._is_fresh():
-            logging.debug("Cleaning out cache…")
             self = CachedRequests(last_updated=time.time())
             self._write()
-        else:
-            logging.debug("Cache is valid")
         return self
 
 
 class NetworkRequests:
-    """Uses the cache if found, otherwise retrieves the value from the network."""
-
-    # This struct uses functions to call due to some of the values requiring parameters
-
-    def __init__(
-        self,
-        force_clean: Optional[bool] = None,
-        hook: Callable[[], None] | None = None
-    ) -> None:
+    def __init__(self, force_clean=None, hook=None):
         self._cache = CachedRequests.load().ensure_fresh(force=force_clean or False)
         self._cache._update_hook = hook
 
-    def _faithlife_product_releases(
-        self,
-        product: Optional[str],
-        version: Optional[str],
-        channel: Optional[str]
-    ) -> Optional[list[str]]:
-        if product is None or version is None or channel is None:
-            return None
-        releases = self._cache.faithlife_product_releases
-        if product not in releases:
-            releases[product] = {}
-        if version not in releases[product]:
-            releases[product][version] = {}
-        if (
-            channel 
-            not in releases[product][version]
-        ):
-            return None
-        return releases[product][version][channel]
-
-    def faithlife_product_releases(
-        self,
-        product: str,
-        version: str,
-        channel: str
-    ) -> list[str]:
-        output = self._faithlife_product_releases(product, version, channel)
-        if output is not None and len(output) > 0:
-            return output
-        output = _get_faithlife_product_releases(
-            faithlife_product=product,
-            faithlife_product_version=version,
-            faithlife_product_release_channel=channel
-        )
-        self._cache.faithlife_product_releases[product][version][channel] = output
-        self._cache._write()
-        return output
-    
-    def wine_appimage_versions(self) -> GithubSoftwareReleasesInfo:
-        repo = "FaithLife-Community/wine-appimages"
-        return self._repo_version(repo)
-
-    def _url_size_and_hash(self, url: str) -> tuple[Optional[int], Optional[str]]:
-        """Attempts to get the size and hash from a URL.
-        Uses cache if it exists
-        
-        Returns:
-            bytes - from the Content-Length leader
-            md5_hash - from the Content-MD5 header or S3's etag
-        """
-        if url not in self._cache.url_size_and_hash:
-            props = UrlProps(url)
-            self._cache.url_size_and_hash[url] = props.size, props.md5
+    def faithlife_product_releases(self, product, version, channel):
+        channels = self._cache.faithlife_product_releases.setdefault(product, {}).setdefault(version, {})
+        if not channels.get(channel):
+            channels[channel] = _get_faithlife_product_releases(product, version, channel)
             self._cache._write()
-        return self._cache.url_size_and_hash[url]
+        return channels[channel]
 
-    def url_size(self, url: str) -> Optional[int]:
-        return self._url_size_and_hash(url)[0]
-    
-    def url_md5(self, url: str) -> Optional[str]:
-        return self._url_size_and_hash(url)[1]
+    def wine_appimage_versions(self):
+        return self._repo_version("FaithLife-Community/wine-appimages")
 
-    def _repo_version(self, repository: str) -> GithubSoftwareReleasesInfo:
-        output = GithubSoftwareReleasesInfo(latest=None, pre_release=None)
-        if (
-            repository in self._cache.repository_latest_version
-            and repository  in self._cache.repository_latest_url
-        ):
-            output.latest = SoftwareReleaseInfo(
-                version=self._cache.repository_latest_version[repository],
-                download_url=self._cache.repository_latest_url[repository]
-            )
-        if (
-            repository in self._cache.repository_latest_pre_release_version
-            and repository  in self._cache.repository_latest_pre_release_url
-        ):
-            output.pre_release = SoftwareReleaseInfo(
-                version=self._cache.repository_latest_pre_release_version[repository],
-                download_url=self._cache.repository_latest_pre_release_url[repository]
-            )
-        if (
-            output.pre_release is None and output.latest is None
-        ):
+    def _repo_version(self, repository):
+        cache = self._cache
+
+        def cached(version, url):
+            if repository not in version or repository not in url:
+                return None
+            digest = cache.repository_digest.get(url[repository])
+            parsed = _release_digest(digest)
+            return SoftwareReleaseInfo(version[repository], url[repository], parsed)
+
+        output = GithubSoftwareReleasesInfo(
+            cached(cache.repository_latest_version, cache.repository_latest_url),
+            cached(cache.repository_latest_pre_release_version, cache.repository_latest_pre_release_url),
+        )
+        if output.latest is None and output.pre_release is None:
             output = _get_release_data(repository)
-            if output.latest:
-                self._cache.repository_latest_version[repository] = output.latest.version
-                self._cache.repository_latest_url[repository] = output.latest.download_url
-            if output.pre_release:
-                self._cache.repository_latest_pre_release_version[repository] = output.pre_release.version
-                self._cache.repository_latest_pre_release_url[repository] = output.pre_release.download_url
-            self._cache._write()
+            for release, versions, urls in (
+                (output.latest, cache.repository_latest_version, cache.repository_latest_url),
+                (output.pre_release, cache.repository_latest_pre_release_version,
+                 cache.repository_latest_pre_release_url),
+            ):
+                if release is not None:
+                    versions[repository] = release.version
+                    urls[repository] = release.download_url
+                    if release.digest is not None:
+                        cache.repository_digest[release.download_url] = (
+                            f"{release.digest.algorithm}:{release.digest.value}"
+                        )
+            cache._write()
         return output
-            
 
-    def _repo_latest_version(self, repository: str) -> SoftwareReleaseInfo:
-        if (
-            repository not in self._cache.repository_latest_version
-            or repository not in self._cache.repository_latest_url
-        ):
-            result = _get_release_data(repository)
-            if result.latest:
-                self._cache.repository_latest_version[repository] = result.latest.version
-                self._cache.repository_latest_url[repository] = result.latest.download_url
-            if result.pre_release:
-                self._cache.repository_latest_pre_release_version[repository] = result.pre_release.version
-                self._cache.repository_latest_pre_release_url[repository] = result.pre_release.download_url
-            self._cache._write()
-        return SoftwareReleaseInfo(
-            version=self._cache.repository_latest_version[repository],
-            download_url=self._cache.repository_latest_url[repository]
-        )
+    def _repo_latest_version(self, repository):
+        release = self._repo_version(repository).latest
+        if release is None:
+            raise artifacts.ArtifactError("No stable release is available")
+        return release
 
-    def app_latest_version(self, channel: str) -> Optional[SoftwareReleaseInfo]:
+    def app_latest_version(self, channel):
         if not constants.APP_SELF_UPDATES_ENABLED:
             return None
-
         return self._repo_latest_version(constants.REPOSITORY_SLUG)
-    
-    def icu_latest_version(self) -> SoftwareReleaseInfo:
+
+    def icu_latest_version(self):
         return self._repo_latest_version("FaithLife-Community/icu")
 
 
-def logos_reuse_download(
-    sourceurl: str,
-    file: str,
-    targetdir: str,
-    app: App,
-    status_messages: bool = True
-):
-    dirs = [
-        app.conf.user_download_dir,
-        app.conf.download_dir,
-    ]
-    found = 1
-    for i in dirs:
-        if i is not None:
-            logging.debug(f"Checking {i} for {file}.")
-            file_path = Path(i) / file
-            if os.path.isfile(file_path):
-                logging.info(f"{file} exists in {i}. Verifying properties.")
-                if _verify_downloaded_file(
-                    sourceurl,
-                    file_path,
-                    app=app,
-                    status_messages=status_messages
-                ):
-                    logging.info(f"{file} properties match. Using it…")
-                    logging.debug(f"Copying {file} into {targetdir}")
-                    try:
-                        shutil.copy(os.path.join(i, file), targetdir)
-                    except shutil.SameFileError:
-                        pass
-                    found = 0
-                    break
-                else:
-                    logging.info(f"Incomplete file: {file_path}.")
-    if found == 1:
-        file_path = Path(os.path.join(app.conf.download_dir, file))
-        # Start download.
-        _net_get(
-            sourceurl,
-            target=file_path,
-            app=app,
-        )
-        if _verify_downloaded_file(
-            sourceurl,
-            file_path,
-            app=app,
-            status_messages=status_messages
-        ):
-            logging.debug(f"Copying: {file} into: {targetdir}")
-            try:
-                shutil.copy(os.path.join(app.conf.download_dir, file), targetdir)
-            except shutil.SameFileError:
-                pass
-        else:
-            # In case we ever get here, give us an opportunity to recover by trying the download again from the start
-            os.remove(file_path)
-            app.exit(f"Bad file size or checksum: {file_path}")
+def _release_digest(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise artifacts.ArtifactError("Unsupported release digest metadata")
+    digest = artifacts.Digest("sha256", value[7:], "selected GitHub release asset digest")
+    digest.validate()
+    return digest
 
 
-# FIXME: refactor to raise rather than return None
-def _net_get(url: str, target: Optional[Path]=None, app: Optional[App] = None):
-    # TODO:
-    # - Check available disk space before starting download
-    logging.debug(f"Download source: {url}")
-    logging.debug(f"Download destination: {target}")
-    target_props = FileProps(target)  # sets path and size attribs
-    if app and target_props.path:
-        app.status(f"Downloading {target_props.path.name}…", 0)
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc  # Gets the requested domain
-    url_props = UrlProps(url)  # uses requests to set headers, size, md5 attribs
-
-    # Initialize variables.
-    local_size = 0
-    total_size = url_props.size  # None or int
-    logging.debug(f"File size on server: {total_size}")
-    percent = None
-    chunk_size = 100 * 1024  # 100 KB default
-    if type(total_size) is int:
-        # Use smaller of 2% of filesize or 2 MB for chunk_size.
-        chunk_size = min([int(total_size / 50), 2 * 1024 * 1024])
-
-    if target_props.size:
-        logging.debug(f"File exists: {str(target_props.path)}")
-
-    try_again = True
-    last_size = None
-
-    while try_again:
-        try_again = False
-        # Force non-compressed file transfer for accurate progress tracking.
-        headers = {'Accept-Encoding': 'identity'}
-        file_mode = 'wb'
-
-        target_props = FileProps(target)  # sets path and size attribs
-        # If file exists and URL is resumable, set download Range.
-        if target_props.size:
-            local_size = target_props.size
-            logging.info(f"Current downloaded size in bytes: {local_size}")
-            if url_props.headers.get('Accept-Ranges') == 'bytes':
-                file_mode = 'ab'
-                if type(url_props.size) is int:
-                    headers['Range'] = f'bytes={local_size}-{total_size}'
-                else:
-                    headers['Range'] = f'bytes={local_size}-'
-
-        logging.debug(f"{chunk_size=}; {file_mode=}; {headers=}")
-
-        # Log download type.
-        if 'Range' in headers.keys():
-            message = f"Continuing download for {url_props.path}."
-        else:
-            message = f"Starting new download for {url_props.path}."
-        logging.info(message)
-
-        # Initiate download request.
-        try:
-            # FIXME: consider splitting this into two functions with a common base.
-            # One that writes into a file, and one that returns a str, 
-            # that share most of the internal logic
-            if target_props.path is None:  # return url content as text
-                with requests.get(url_props.path, headers=headers) as r:
-                    if callable(r):
-                        logging.error("Failed to retrieve data from the URL.")
-                        return None
-
-                    try:
-                        r.raise_for_status()
-                    except requests.exceptions.HTTPError as e:
-                        if domain in ["github.com", "api.github.com"]:
-                            if (
-                                e.response.status_code == 403
-                                or e.response.status_code == 429
-                            ):
-                                message = "GitHub API rate limit exceeded. Please wait "
-                                if "x-ratelimit-reset" in r.headers:
-                                    epoch_to_reset: str = r.headers["x-ratelimit-reset"]
-                                    seconds_until_reset = ceil(int(epoch_to_reset) - time.time()) 
-                                    if seconds_until_reset < 120:
-                                        message += f"{seconds_until_reset} seconds "
-                                    else:
-                                        # More human readable to display in minutes
-                                        message += f"{ceil(seconds_until_reset / 60)} minutes " 
-                                message += "before trying again."
-                                logging.error(message)
-                        else:
-                            logging.error(f"HTTP error occurred: {e.response.status_code}")
-                        return None
-
-                    return r._content  # raw bytes
-            else:  # download url to target.path
-                with requests.get(url_props.path, stream=True, headers=headers) as r:
-                    with target_props.path.open(mode=file_mode) as f:
-                        if file_mode == 'wb':
-                            mode_text = 'Writing'
-                        else:
-                            mode_text = 'Appending'
-                        logging.debug(f"{mode_text} data to file {target_props.path}.")
-                        for chunk in r.iter_content(chunk_size=chunk_size):
-                            f.write(chunk)
-                            local_size = os.fstat(f.fileno()).st_size
-                            if type(total_size) is int:
-                                percent = local_size / total_size
-                                # if None not in [app, evt]:
-                                if app:
-                                    # This assumes that there is a 1:1 relationship between
-                                    # steps and download jobs, which is presently true
-                                    # If at some point in the future it is no longer true
-                                    # the worst that'll happen is the progress bar will
-                                    # appear to go backwards.
-                                    app.status(
-                                        f"Downloading {target_props.path.name}…",
-                                        percent
-                                    )
-        except requests.exceptions.RequestException as e:
-            # If this was an incomplete read try again
-            new_size = FileProps(target).size
-            if (
-                total_size is not None
-                and new_size is not None
-                and new_size < total_size 
-                and (
-                    last_size is None 
-                    or new_size > last_size
-                )
-            ):
-                logging.warning(f"Only downloaded a portion of the file on this attempt, retrying: {e}")
-                try_again = True
-                last_size = new_size
-                continue
-
-            logging.error(f"Error occurred during HTTP request: {e}")
-            return None  # Return None values to indicate an error condition
+def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, *, kind, digest=None):
+    candidates = [Path(targetdir) / file, Path(app.conf.download_dir) / file]
+    user = app.conf.user_download_dir
+    if user:
+        candidates.append(Path(user) / file)
+    spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest)
+    return artifacts.acquire(spec, Path(targetdir), candidates, app.status if status_messages else None)
 
 
-def _verify_downloaded_file(url: str, file_path: Path | str, app: App, status_messages: bool = True): 
-    if status_messages:
-        app.status(f"Verifying {file_path}…", 0)
-    file_props = FileProps(file_path)
-    url_size = app.conf._network.url_size(url)
-    if url_size is not None and file_props.size != url_size:
-        logging.warning(f"{file_path} is the wrong size.")
-        return False
-    url_md5 = app.conf._network.url_md5(url)
-    if url_md5 is not None and file_props.md5 != url_md5:
-        logging.warning(f"{file_path} has the wrong MD5 sum.")
-        return False
-    logging.debug(f"{file_path} is verified.")
-    return True
+def _net_get(url):
+    return artifacts.get_bytes(url)
 
 
-def _get_first_asset_url(json_data: dict) -> str:
-    """Parses the github api response to find the first asset's download url
-    """
-    assets = json_data.get('assets') or []
-    if len(assets) == 0:
-        raise Exception("Failed to find the first asset in the repository data: "
-                        f"{json_data}")
-    first_asset = assets[0]
-    download_url: Optional[str] = first_asset.get('browser_download_url')
-    if download_url is None:
-        raise Exception("Failed to find the download URL in the repository data: "
-                        f"{json_data}")
-    return download_url
+def _get_first_asset_url(json_data):
+    assets = json_data.get("assets") or []
+    if not assets or not assets[0].get("browser_download_url"):
+        raise artifacts.ArtifactError("Release has no download asset")
+    return assets[0]["browser_download_url"]
 
 
-def _get_version_name(json_data: dict) -> str:
-    """Gets tag name from json data, strips leading v if exists"""
-    tag_name: Optional[str] = json_data.get('tag_name')
-    if tag_name is None:
-        raise Exception("Failed to find the tag_name in the repository data: "
-                        f"{json_data}")
-    # Trim a leading v to normalize the version
-    tag_name = tag_name.lstrip("v")
-    return tag_name
+def _get_version_name(json_data):
+    return json_data["tag_name"].lstrip("v")
 
 
-def _get_release_data(repository) -> GithubSoftwareReleasesInfo:
-    """Gets latest release information
-    
-    Raises:
-        Exception - on failure to make network operation or parse github API
-        
-    Returns:
-        GithubSoftwareReleasesInfo
-    """
-    releases_url = f"https://api.github.com/repos/{repository}/releases"
-    data = _net_get(releases_url)
-    if data is None:
-        logging.warning("Could not get releases from github.")
-        return GithubSoftwareReleasesInfo(latest=None, pre_release=None)
+def _get_release_data(repository):
     try:
-        json_data: list[dict] = json.loads(data.decode())
-    except json.JSONDecodeError as e:
-        logging.error(f"Error decoding Github's JSON response: {e}")
-        raise
+        data = json.loads(_net_get(f"https://api.github.com/repos/{repository}/releases"))
+        data = sorted(data, key=lambda release: datetime.fromisoformat(release["updated_at"]), reverse=True)
 
-    json_data = sorted(json_data, key=lambda release: datetime.fromisoformat(release["updated_at"]), reverse=True)
+        def release(item):
+            return SoftwareReleaseInfo(
+                _get_version_name(item), _get_first_asset_url(item), _release_digest(item["assets"][0].get("digest")),
+            )
 
-    pre_release: Optional[SoftwareReleaseInfo] = None
-    latest_release: Optional[SoftwareReleaseInfo] = None
+        prerelease = release(data[0]) if data and data[0]["prerelease"] else None
+        stable = next((item for item in data if item["prerelease"] is False), None)
+        return GithubSoftwareReleasesInfo(release(stable) if stable else None, prerelease)
+    except artifacts.ArtifactError:
+        logging.warning("Could not obtain release metadata")
+        return GithubSoftwareReleasesInfo(None, None)
+    except (ValueError, KeyError, TypeError) as error:
+        raise artifacts.ArtifactError("Malformed release metadata") from error
 
-    if json_data and json_data[0]["prerelease"]:
-        pre_release = SoftwareReleaseInfo(
-            version=_get_version_name(json_data[0]),
-            download_url=_get_first_asset_url(json_data[0])
-        )
 
-    json_data = list(filter(lambda release: release["prerelease"] is False, json_data))
+def download_recommended_appimage(app):
+    release = app.conf._network.wine_appimage_versions().latest
+    if release is None:
+        raise artifacts.ArtifactError("No recommended AppImage release is available")
+    return logos_reuse_download(
+        release.download_url, app.conf.wine_appimage_recommended_file_name, app.conf.installer_binary_dir,
+        app, kind="appimage", digest=release.digest,
+    )
 
-    if json_data:
-        latest_release = SoftwareReleaseInfo(
-            version=_get_version_name(json_data[0]),
-            download_url=_get_first_asset_url(json_data[0])
-        )
 
-    return GithubSoftwareReleasesInfo(latest=latest_release, pre_release=pre_release)
-
-def download_recommended_appimage(app: App):
-    wine64_appimage_full_filename = Path(app.conf.wine_appimage_recommended_file_name)
-    dest_path = Path(app.conf.installer_binary_dir) / wine64_appimage_full_filename
-    if dest_path.is_file():
-        return
-    else:
-        logos_reuse_download(
-            app.conf.wine_appimage_recommended_url,
-            app.conf.wine_appimage_recommended_file_name,
-            app.conf.installer_binary_dir,
-            app=app
-        )
-
-def _get_faithlife_product_releases(
-    faithlife_product: str,
-    faithlife_product_version: str,
-    faithlife_product_release_channel: str
-) -> list[str]:
-    logging.debug(f"Downloading release list for {faithlife_product} {faithlife_product_version}…")
-    # NOTE: This assumes that Verbum release numbers continue to mirror Logos.
-    if faithlife_product_release_channel == "beta":
-        url = "https://clientservices.logos.com/update/v1/feed/logos10/beta.xml"
-    else:
-        url = f"https://clientservices.logos.com/update/v1/feed/logos{faithlife_product_version}/stable.xml"
-    
-    response_xml_bytes = _net_get(url)
-    if response_xml_bytes is None:
-        logging.warning("Failed to get logos releases")
+def _get_faithlife_product_releases(product, version, channel):
+    url = "https://clientservices.logos.com/update/v1/feed/logos10/beta.xml" if channel == "beta" else (
+        f"https://clientservices.logos.com/update/v1/feed/logos{version}/stable.xml"
+    )
+    try:
+        root = ET.fromstring(_net_get(url).decode("utf-8-sig"))
+    except artifacts.ArtifactError:
+        logging.warning("Could not obtain product releases")
         return []
-
-    # Parse XML
-    root = ET.fromstring(response_xml_bytes.decode('utf-8-sig'))
-
-    # Define namespaces
-    namespaces = {
-        'ns0': 'http://www.w3.org/2005/Atom',
-        'ns1': 'http://services.logos.com/update/v1/'
-    }
-
-    # Extract versions
-    releases = []
-    # Obtain all listed releases.
-    for entry in root.findall('.//ns1:version', namespaces):
-        if entry.text:
-            releases.append(entry.text)
-        # if len(releases) == 5:
-        #    break
-
-    #Filtering not needed at the moment but left here in case we want it later.
-    #Double check this works before releasing.
-    #from packaging.versions import Version
-    #filtered_releases = [version for version in releases if Version("40.0.0.0") > Version(version)]
-    #logging.debug(f"Available releases: {', '.join(releases)}")
-    #logging.debug(f"Filtered releases: {', '.join(filtered_releases)}")
-
-    return releases
+    except (ET.ParseError, UnicodeError) as error:
+        raise artifacts.ArtifactError("Malformed product feed") from error
+    return [entry.text for entry in root.findall(".//{http://services.logos.com/update/v1/}version") if entry.text]
 
 
-def update_lli_binary(app: App):
+def update_lli_binary(app):
     if not constants.APP_SELF_UPDATES_ENABLED:
         app.status(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
         return
 
-    lli_file_path = os.path.realpath(sys.argv[0])
-    lli_download_path = Path(app.conf.download_dir) / constants.BINARY_NAME
-    temp_path = Path(app.conf.download_dir) / f"{constants.BINARY_NAME}.tmp"
-    logging.debug(
-        f"Updating {constants.APP_NAME} to latest version by overwriting: {lli_file_path}")
-
-    # Remove existing downloaded file if different version.
-    if lli_download_path.is_file():
-        logging.info("Checking if existing LLI binary is latest version.")
-        lli_download_ver = utils.get_lli_release_version(lli_download_path)
-        if not lli_download_ver or lli_download_ver != app.conf.app_latest_version:
-            logging.info(f"Removing \"{lli_download_path}\", version: {lli_download_ver}")
-            # Remove incompatible file.
-            lli_download_path.unlink()
-
-    logos_reuse_download(
-        app.conf.app_latest_version_url,
-        constants.BINARY_NAME,
-        app.conf.download_dir,
-        app=app,
+    # Final controller replacement remains M05 work while self-update is disabled.
+    accepted = logos_reuse_download(
+        app.conf.app_latest_version_url, constants.BINARY_NAME, app.conf.download_dir, app, kind="elf",
     )
-    shutil.copy(lli_download_path, temp_path)
-    try:
-        shutil.move(temp_path, lli_file_path)
-    except Exception as e:
-        logging.error(f"Failed to replace the binary: {e}")
-        return
-
-    os.chmod(sys.argv[0], os.stat(sys.argv[0]).st_mode | 0o111)
-    logging.debug(f"Successfully updated {constants.APP_NAME}.")
+    accepted.check()
+    version = utils.get_lli_release_version(accepted.path)
+    if version != app.conf.app_latest_version:
+        raise artifacts.ArtifactError("Controller artifact has the wrong version")
+    target = os.path.realpath(sys.argv[0])
+    temporary = Path(app.conf.download_dir) / f"{constants.BINARY_NAME}.tmp"
+    shutil.copy(accepted.path, temporary)
+    shutil.move(temporary, target)
     utils.restart_lli()

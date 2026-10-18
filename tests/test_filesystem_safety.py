@@ -246,7 +246,12 @@ class TestUninstallBoundaries(unittest.TestCase):
         config.wine_binary = constants.WINE_RECOMMENDED_SIGIL
 
         def transfer(url, filename, directory, **kwargs):
-            (Path(directory) / filename).write_bytes(b"fixture download")
+            from ou_dedetai import artifacts
+            from tests.artifact_fixtures import appimage
+
+            source = Path(config.download_dir) / filename
+            source.write_bytes(appimage())
+            return artifacts.import_local(source, Path(directory), artifacts.ArtifactSpec(url, filename, "appimage"))
 
         with (
             patch.object(installer, "ensure_sys_deps"),
@@ -255,7 +260,9 @@ class TestUninstallBoundaries(unittest.TestCase):
         ):
             self.app.installer_step = self.app.installer_step_count = 0
             installer.ensure_appimage_download(self.app)
-        self.assertEqual((self.cache / "stable.AppImage").read_bytes(), b"fixture download")
+        from tests.artifact_fixtures import appimage
+
+        self.assertEqual((self.cache / "stable.AppImage").read_bytes(), appimage())
         paths.validate_cache_directory(self.cache, self.base, require_marker=True)
 
     def test_failed_removal_preserves_replacement_and_exposes_recovery_tree(self):
@@ -352,6 +359,7 @@ class TestArchiveConfinement(unittest.TestCase):
                 _raw=PersistentConfiguration(install_dir=str(self.root), faithlife_product="Logos"),
                 _overrides=SimpleNamespace(install_dir=None, wine_prefix=str(self.prefix)),
                 icu_latest_version_url="https://example.invalid/icu.tar.gz", icu_latest_version="v1",
+                _network=SimpleNamespace(icu_latest_version=lambda: network.SoftwareReleaseInfo("v1", "url")),
             ), status=Mock(),
         )
 
@@ -368,7 +376,8 @@ class TestArchiveConfinement(unittest.TestCase):
                     archive.addfile(member)
 
     def install_archive(self):
-        with patch.object(wine.network, "logos_reuse_download"):
+        accepted = SimpleNamespace(check=lambda: self.archive)
+        with patch.object(wine.network, "logos_reuse_download", return_value=accepted):
             wine.enforce_icu_data_files(self.app)
 
     def test_normal_layout_and_destination_links_preserve_external_targets(self):

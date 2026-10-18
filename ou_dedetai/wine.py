@@ -8,9 +8,10 @@ import subprocess
 from pathlib import Path
 from packaging.version import Version
 import tempfile
+import threading
 from typing import IO, Optional
 
-from ou_dedetai import constants, maintenance
+from ou_dedetai import artifacts, constants, maintenance, runtime
 from ou_dedetai.app import App
 
 from . import network
@@ -77,8 +78,9 @@ def get_devel_or_stable(version: str) -> str:
 # FIXME: consider raising exceptions on error
 def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
     try:
-        cmd = [paths.executable(binary), "--version"]
-        version_string = subprocess.check_output(cmd, encoding='utf-8').strip()
+        with maintenance.artifact_use():
+            cmd = [runtime.executable(binary), "--version"]
+            version_string = subprocess.check_output(cmd, encoding='utf-8', timeout=15).strip()
         logging.debug(f"Version string: {str(version_string)}")
         branch: Optional[str]
         try:
@@ -398,11 +400,14 @@ def set_fontsmoothing_to_rgb(app: App, wine64_binary: str):
     wine_reg_install(app, name, reg_text, wine64_binary)
 
 
-def install_msi(app: App):
+@maintenance.uses_installation
+def install_msi(app: App, accepted: artifacts.AcceptedArtifact):
     app.status(f"Running MSI installer: {app.conf.faithlife_installer_name}.")
     # Define the Wine executable and initial arguments for msiexec
     wine_binary = app.conf.wine64_binary
-    exe_args = ["/i", f"{app.conf.install_dir}/data/{app.conf.faithlife_installer_name}"]
+    if accepted.spec.kind != "msi":
+        raise artifacts.ArtifactError("MSI installation requires an accepted MSI artifact")
+    exe_args = ["/i", str(accepted.check())]
 
     # Ensure the user agrees to the EULA. Exit if they don't.
     # This code block tells the MSI installer to run non-interactively.
@@ -520,8 +525,7 @@ def run_wine_completed_process(
 
     Useful when wanting to parse the output for wine commands
     """
-    env = get_wine_env(app, additional_wine_dll_overrides)
-    command = [paths.executable(wine_binary)]
+    command, env = _wine_invocation(app, wine_binary, additional_wine_dll_overrides)
     if exe is not None:
         command.append(exe)
     if exe_args:
@@ -557,11 +561,7 @@ def run_wine_process(
     - init: whether or not this call is to initialize the bottle
     - additional_wine_dll_overrides: Add to WINEDLLOVERRIDES
     """
-    env = get_wine_env(app, additional_wine_dll_overrides)
-    if isinstance(wine_binary, Path):
-        wine_binary = str(wine_binary)
-
-    command = [paths.executable(wine_binary)]
+    command, env = _wine_invocation(app, wine_binary, additional_wine_dll_overrides)
     if exe is not None:
         command.append(exe)
     if exe_args:
@@ -574,15 +574,37 @@ def run_wine_process(
         # FIXME: consider calling Popen directly here so we can remove the
         # run_wine_proc_completed_process function - as it is nearly a duplicate
         # of this one, but with a different arg to Popen.
-        return system.popen_command(
-            command,
-            stdout=stdout,
-            stderr=stderr,
-            stdin=stdin,
-            env=env,
-            start_new_session=True,
-            encoding='utf-8'
-        )
+        lease = maintenance.artifact_use()
+        lease.__enter__()
+        try:
+            process = system.popen_command(
+                command,
+                stdout=stdout,
+                stderr=stderr,
+                stdin=stdin,
+                env=env,
+                start_new_session=True,
+                encoding='utf-8'
+            )
+            if process is None:
+                lease.__exit__(None, None, None)
+                return None
+
+            def release():
+                try:
+                    process.wait()
+                finally:
+                    lease.__exit__(None, None, None)
+
+            try:
+                threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
+            except BaseException:
+                process.wait()
+                raise
+            return process
+        except BaseException:
+            lease.__exit__(None, None, None)
+            raise
 
     except subprocess.CalledProcessError as e:
         logging.error(f"Exception running '{' '.join(command)}': {e}")
@@ -677,18 +699,21 @@ def enforce_icu_data_files(app: App):
     icu_filename = os.path.basename(icu_url).removesuffix(".tar.gz")
     # Append the version to the file name so it doesn't collide with previous versions
     icu_filename = f"{icu_filename}-{icu_latest_version}.tar.gz"
-    network.logos_reuse_download(
+    release = app.conf._network.icu_latest_version()
+    accepted = network.logos_reuse_download(
         icu_url,
         icu_filename,
         app.conf.download_dir,
-        app=app
+        app=app,
+        kind="icu",
+        digest=release.digest,
     )
 
     app.status("Copying ICU files…")
 
     with tempfile.TemporaryDirectory(prefix="logos-desktop-icu-") as temporary:
         staging = Path(temporary) / "extracted"
-        utils.untar_file(Path(app.conf.download_dir) / icu_filename, staging)
+        utils.untar_file(accepted.check(), staging)
         candidates = [path for path in (staging / "windows", staging / "icu-win/windows") if path.is_dir()]
         if len(candidates) != 1:
             raise ValueError("ICU archive must contain one supported Windows subtree")
@@ -776,17 +801,11 @@ def get_registry_value(reg_path, name, app: App):
 
 
 def _get_registry_value(reg_path, name, app: App):
-    logging.debug(f"Get value for: {reg_path=}; {name=}")
-    # FIXME: consider breaking run_wine_proc into a helper function before decoding is attempted
-    # NOTE: Can't use run_wine_proc here because of infinite recursion while
-    # trying to determine wine_output_encoding.
+    logging.debug("Get registry value %s in %s", name, reg_path)
+    # Encoding discovery cannot use a helper that requests wine_output_encoding.
     value = None
-    env = get_wine_env(app)
-
-    cmd = [
-        app.conf.wine64_binary,
-        'reg', 'query', reg_path, '/v', name,
-    ]
+    cmd, env = _wine_invocation(app, app.conf.wine64_binary, None)
+    cmd.extend(['reg', 'query', reg_path, '/v', name])
     err_msg = f"Failed to get registry value: {reg_path}\\{name}"
     encoding = app.conf._wine_output_encoding
     if encoding is None:
@@ -812,7 +831,27 @@ def _get_registry_value(reg_path, name, app: App):
     return value
 
 
-def get_wine_env(app: App, additional_wine_dll_overrides: Optional[str]=None) -> dict[str, str]: 
+def _wine_invocation(app, binary, overrides):
+    with runtime.activation_guard(app):
+        executable = runtime.executable(binary, app)
+        env = get_wine_env(app, overrides)
+        concrete = Path(executable).resolve()
+        if concrete.name.lower().endswith(".appimage"):
+            env["WINE"] = env["WINELOADER"] = str(concrete)
+            env["WINESERVER"] = str(concrete.parent / "wineserver")
+        else:
+            loader = env.get("WINELOADER") or env.get("WINE")
+            if loader:
+                pinned = Path(runtime.executable(loader, app))
+                env["WINE"] = env["WINELOADER"] = str(pinned)
+                if pinned.resolve().name.lower().endswith(".appimage"):
+                    env["WINESERVER"] = str(pinned.resolve().parent / "wineserver")
+                elif env.get("WINESERVER"):
+                    env["WINESERVER"] = runtime.executable(env["WINESERVER"], app)
+        return [executable], env
+
+
+def get_wine_env(app: App, additional_wine_dll_overrides: Optional[str]=None) -> dict[str, str]:
     logging.debug("Getting wine environment.")
     wine_env = os.environ.copy()
     winepath = Path(app.conf.wine_binary)

@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine, system, paths, maintenance
+from ou_dedetai import network, utils, constants, wine, system, paths, maintenance, runtime
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -441,6 +441,7 @@ class PersistentConfiguration:
                     output[k] = utils.get_relative_path(v, self.install_dir)
         return output
 
+    @runtime.configuration_writer
     def write_config(self, *, checked=False, config_file_path=None) -> None:
         config_file_path = config_file_path or LegacyConfiguration.config_file_path()
         output = self._as_dict()
@@ -567,7 +568,9 @@ class Config:
     def __init__(self, ephemeral_config: EphemeralConfiguration, app) -> None:
         from ou_dedetai.app import App
         self.app: "App" = app
-        self._raw = PersistentConfiguration.load_from_path(ephemeral_config.config_path)
+        self._raw = runtime.recover_startup(
+            ephemeral_config, PersistentConfiguration.load_from_path(ephemeral_config.config_path),
+        )
         self._overrides = ephemeral_config
 
         self._network = self._create_network_requests_with_hook()
@@ -791,15 +794,10 @@ class Config:
     def winetricks_binary(self) -> str:
         """Download winetricks if it doesn't exist"""
         from ou_dedetai import system
-        # Path is now static, the installer puts a symlink here if we're using appimage
-        winetricks_path = Path(self.installer_binary_dir) / "winetricks"
-    
-        system.ensure_winetricks(
+        return system.ensure_winetricks(
             app=self.app,
             status_messages=False
         )
-
-        return self._absolute_from_install_dir(winetricks_path)
 
     @property
     def install_dir_default(self) -> str:

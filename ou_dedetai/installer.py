@@ -10,8 +10,10 @@ from typing import Optional
 from ou_dedetai.app import App
 
 from . import constants
+from . import artifacts
 from . import maintenance
 from . import network
+from . import runtime
 from . import system
 from . import utils
 from . import wine
@@ -222,16 +224,17 @@ def ensure_appimage_download(app: App):
     if download_url is None:
         raise ValueError("The selected AppImage release has no download URL")
 
-    downloaded_file = str(Path(app.conf.download_dir) / filename)
-    network.logos_reuse_download(
+    versions = app.conf._network.wine_appimage_versions()
+    release = versions.latest if filename == app.conf.wine_appimage_recommended_file_name else versions.pre_release
+    accepted = network.logos_reuse_download(
         download_url,
         filename,
-        app.conf.download_dir,
+        app.conf.installer_binary_dir,
         app=app,
+        kind="appimage",
+        digest=release.digest if release else None,
     )
-    logging.debug(f"> File exists?: {downloaded_file}: {Path(downloaded_file).is_file()}")
-    
-    app.conf.wine_binary = downloaded_file
+    runtime.activate(app, accepted)
 
 
 def ensure_wine_executables(app: App):
@@ -267,26 +270,18 @@ def ensure_product_installer_download(app: App):
     app.installer_step += 1
     app.status(f"Ensuring {app.conf.faithlife_product} installer is downloaded…")
 
-    downloaded_file = utils.get_downloaded_file_path(app.conf.download_dir, app.conf.faithlife_installer_name) 
-    if not downloaded_file:
-        downloaded_file = Path(app.conf.download_dir) / app.conf.faithlife_installer_name 
-    network.logos_reuse_download(
+    return network.logos_reuse_download(
         app.conf.faithlife_installer_download_url,
         app.conf.faithlife_installer_name,
-        app.conf.download_dir,
+        str(Path(app.conf.install_dir) / "data"),
         app=app,
+        kind="msi",
     )
-    # Copy file into install dir.
-    installer = Path(f"{app.conf.install_dir}/data/{app.conf.faithlife_installer_name}")
-    if not installer.is_file():
-        shutil.copy(downloaded_file, installer.parent)
-
-    logging.debug(f"> '{downloaded_file}' exists?: {Path(downloaded_file).is_file()}")
 
 
 def ensure_wineprefix_init(app: App):
     app.installer_step_count += 1
-    ensure_product_installer_download(app=app)
+    accepted = ensure_product_installer_download(app=app)
     app.installer_step += 1
     app.status("Ensuring wineprefix is initialized…")
 
@@ -300,11 +295,12 @@ def ensure_wineprefix_init(app: App):
         wine.wineserver_wait(app)
         logging.debug("Wine init complete.")
     logging.debug(f"> {init_file} exists?: {init_file.is_file()}")
+    return accepted
 
 
 def ensure_wineprefix_config(app: App):
     app.installer_step_count += 1
-    ensure_wineprefix_init(app=app)
+    accepted = ensure_wineprefix_init(app=app)
     app.installer_step += 1
     app.status("Ensuring wineprefix configuration…")
 
@@ -319,20 +315,22 @@ def ensure_wineprefix_config(app: App):
     # Force fontsmooth=rgb in registry.
     logging.debug("Setting fontsmoothing=rgb in wineprefix registry.")
     wine.set_fontsmoothing_to_rgb(app=app, wine64_binary=app.conf.wine64_binary)
+    return accepted
 
 
 def ensure_fonts(app: App):
     """Ensure the arial font is installed"""
     app.installer_step_count += 1
-    ensure_wineprefix_config(app=app)
+    accepted = ensure_wineprefix_config(app=app)
     app.installer_step += 1
 
     wine.install_fonts(app)
+    return accepted
 
 
 def ensure_icu_data_files(app: App):
     app.installer_step_count += 1
-    ensure_fonts(app=app)
+    accepted = ensure_fonts(app=app)
     app.installer_step += 1
     app.status("Ensuring ICU data files are installed…")
     logging.debug('- ICU data files')
@@ -340,11 +338,12 @@ def ensure_icu_data_files(app: App):
     wine.enforce_icu_data_files(app=app)
 
     logging.debug('> ICU data files installed')
+    return accepted
 
 
 def ensure_product_installed(app: App):
     app.installer_step_count += 1
-    ensure_icu_data_files(app=app)
+    accepted = ensure_icu_data_files(app=app)
     app.installer_step += 1
     app.status(f"Ensuring {app.conf.faithlife_product} is installed…")
 
@@ -361,7 +360,7 @@ def ensure_product_installed(app: App):
     ):
         # FIXME: Should we try to cleanup on a failed msi?
         # Like terminating msiexec if already running for Logos
-        process = wine.install_msi(app)
+        process = wine.install_msi(app, accepted)
         if process:
             process.wait()
 
@@ -442,47 +441,17 @@ def get_progress_pct(current, total):
 
 @maintenance.uses_installation
 def create_wine_appimage_symlinks(app: App):
-    app.status("Creating wine appimage symlinks…")
-    appdir_bindir = Path(app.conf.installer_binary_dir)
-    os.environ['PATH'] = f"{app.conf.installer_binary_dir}:{os.getenv('PATH')}"
-    # Ensure AppImage symlink.
-    appimage_link = appdir_bindir / app.conf.wine_appimage_link_file_name
-    if app.conf.wine_binary_code not in ['AppImage', 'Recommended'] or app.conf.wine_appimage_path is None: 
-        logging.debug("No need to symlink non-appimages")
+    if app.conf.wine_appimage_path is None:
         return
-    
-    # Only use the appimage_path if it exists
-    # It may not exist if it was an old install's .appimage
-    # where the install dir has been cleared.
-    if app.conf.wine_appimage_path.exists():
-        appimage_filename = app.conf.wine_appimage_path.name
-    else:
-        appimage_filename = app.conf.wine_appimage_recommended_file_name
-    appimage_file = appdir_bindir / appimage_filename
-    # Ensure appimage is copied to appdir_bindir.
-    downloaded_file = utils.get_downloaded_file_path(app.conf.download_dir, appimage_filename) 
-    if downloaded_file is None:
-        logging.critical("Failed to get a valid wine appimage")
+    source = Path(app.conf.wine_appimage_path)
+    if source.parent.parent.parent.name == ".artifacts":
+        artifacts.installed(source, "appimage")
         return
-    if not appimage_file.exists():
-        app.status(f"Copying: {downloaded_file} into: {appdir_bindir}")
-        shutil.copy(downloaded_file, appdir_bindir)
-    os.chmod(appimage_file, 0o755)
-    app.conf.wine_appimage_path = appimage_file
-    app.conf.wine_binary = str(appimage_file)
-
-    appimage_link.unlink(missing_ok=True)  # remove & replace
-    appimage_link.symlink_to(f"./{appimage_filename}")
-
-    # NOTE: if we symlink "winetricks" then the log is polluted with:
-    # "Executing: cd /tmp/.mount_winet.../bin"
-    (appdir_bindir / "winetricks").unlink(missing_ok=True)
-
-    # Ensure wine executables symlinks.
-    for name in ["wine", "wine64", "wineserver", "winetricks"]:
-        p = appdir_bindir / name
-        p.unlink(missing_ok=True)
-        p.symlink_to(f"./{app.conf.wine_appimage_link_file_name}")
+    accepted = artifacts.import_local(
+        source, Path(app.conf.installer_binary_dir),
+        artifacts.ArtifactSpec("local:" + str(source), source.name, "appimage"),
+    )
+    runtime.activate(app, accepted)
 
 
 def desktop_exec(arguments: list[str], *, accepts_url: bool = False) -> str:

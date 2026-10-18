@@ -333,13 +333,21 @@ def compare_logos_linux_installer_version(app: App) -> Optional[VersionCompariso
 def compare_recommended_appimage_version(app: App):
     status = None
     message = None
-    wine_exe_path = app.conf.wine_binary
+    from . import runtime
+
+    try:
+        wine_exe_path = runtime.executable(app.conf.wine_binary, app)
+    except (RuntimeError, OSError, ValueError) as error:
+        return -1, str(error)
     wine_release, error_message = wine.get_wine_release(wine_exe_path)
     if wine_release is not None and wine_release is not False:
         current_version = Version(f"{wine_release.major}.{wine_release.minor}")
         logging.debug(f"Current wine release: {current_version}")
 
-        recommended_version = Version(app.conf.wine_appimage_recommended_version)
+        try:
+            recommended_version = Version(app.conf.wine_appimage_recommended_version)
+        except (RuntimeError, OSError, ValueError) as error:
+            return -1, str(error)
         logging.debug(f"Recommended wine release: {recommended_version}")
         if current_version < recommended_version:
             # Current release is older than recommended.
@@ -369,7 +377,7 @@ def get_lli_release_version(lli_binary):
     os.chmod(lli_binary, mode=st.st_mode | stat.S_IXUSR)
     # Get version number.
     cmd = [lli_binary, '--version']
-    vstr = subprocess.check_output(cmd, text=True)
+    vstr = subprocess.check_output(cmd, text=True, timeout=15)
     m = re.search(r'\d+\.\d+\.\d+(-[a-z]+\.\d+)?', vstr)
     if m:
         lli_version = m[0]
@@ -410,24 +418,16 @@ def check_appimage(filestr):
         logging.error("check_appimage: received None for file.")
         return False
 
-    file_path = Path(filestr)
+    from . import artifacts
 
-    appimage, appimage_type = is_appimage(file_path)
-    if appimage:
-        logging.debug("It is an AppImage!")
-        if appimage_type == 1:
-            logging.error(f"{file_path}: Can't handle AppImage version {str(appimage_type)} yet.")
-            return False
-        else:
-            logging.debug("It is a usable AppImage!")
-            return True
-    else:
-        logging.debug("It is not an AppImage!")
+    try:
+        artifacts.validate_format(Path(filestr), "appimage")
+        return True
+    except (artifacts.ArtifactError, OSError):
         return False
 
 
 def find_appimage_files(app: App) -> list[str]:
-    release_version = app.conf.installed_faithlife_product_release or app.conf.faithlife_product_release 
     appimages = []
     directories = [
         app.conf.installer_binary_dir,
@@ -444,15 +444,7 @@ def find_appimage_files(app: App) -> list[str]:
         appimage_paths = Path(d).glob('wine*.appimage', case_sensitive=False)
         for p in appimage_paths:
             if p is not None and check_appimage(p):
-                output1, output2 = wine.check_wine_version_and_branch(
-                    release_version,
-                    p,
-                    app.conf.faithlife_product_version
-                )
-                if output1 is not None and output1:
-                    appimages.append(str(p))
-                else:
-                    logging.info(f"AppImage file {p} not added: {output2}")
+                appimages.append(str(p))
 
     return appimages
 
@@ -497,39 +489,21 @@ def find_wine_binary_files(app: App, release_version: Optional[str]) -> list[str
 
 
 @maintenance.uses_installation
-def set_appimage_symlink(app: App):
-    # This function assumes make_skel() has been run once.
-    if app.conf.wine_binary_code not in ["AppImage", "Recommended"]:
-        logging.debug("AppImage commands disabled since we're not using an appimage")
+def set_appimage_symlink(app: App, source=None):
+    from . import artifacts, runtime
+
+    selected = source if source is not None else app.conf.wine_appimage_path
+    if selected is None:
         return
-    if app.conf.wine_appimage_path is None:
-        logging.debug("No need to set appimage symlink, as it wasn't set")
-        return
-
-    logging.debug(f"{app.conf.wine_appimage_path=}")
-    logging.debug(f"{app.conf.wine_appimage_recommended_file_name=}")
-    appimage_file_path = Path(app.conf.wine_appimage_path)
-    appdir_bindir = Path(app.conf.installer_binary_dir)
-    appimage_symlink_path = appdir_bindir / app.conf.wine_appimage_link_file_name
-
-    destination_file_path = appdir_bindir / appimage_file_path.name
-
-    if appimage_file_path.name == app.conf.wine_appimage_recommended_file_name:
-        # Default case.
-        # This saves in the install binary dir
-        network.download_recommended_appimage(app)
+    local = Path(selected)
+    if local.parent.parent.parent.name == ".artifacts":
+        accepted = artifacts.installed(local, "appimage")
     else:
-        # Verify user-selected AppImage.
-        if not check_appimage(appimage_file_path):
-            app.exit(f"Cannot use {appimage_file_path}.")
-
-        if destination_file_path != appimage_file_path:
-            logging.info(f"Copying {destination_file_path} to {app.conf.installer_binary_dir}.")
-            shutil.copy(appimage_file_path, destination_file_path)
-
-    delete_symlink(appimage_symlink_path)
-    os.symlink(destination_file_path, appimage_symlink_path)
-    app.conf.wine_appimage_path = destination_file_path
+        accepted = artifacts.import_local(
+            local, Path(app.conf.installer_binary_dir),
+            artifacts.ArtifactSpec("local:" + str(local), local.name, "appimage"),
+        )
+    runtime.activate(app, accepted)
 
 
 def update_to_latest_lli_release(app: App):
@@ -568,15 +542,10 @@ def update_to_latest_recommended_appimage(app: App):
     if app.conf.wine_binary_code not in ["AppImage", "Recommended"]:
         logging.debug("AppImage commands disabled since we're not using an appimage")
         return
-    app.conf.wine_appimage_path = Path(app.conf.wine_appimage_recommended_file_name)
-    status, _ = compare_recommended_appimage_version(app)
-    if status == 0:
-        # TODO: Consider also removing old appimage from install dir. 
-        set_appimage_symlink(app)
-    elif status == 1:
-        logging.debug("The AppImage is already set to the latest recommended.")
-    elif status == 2:
-        logging.debug("The AppImage version is newer than the latest recommended.")
+    from . import runtime
+
+    accepted = network.download_recommended_appimage(app)
+    runtime.activate(app, accepted)
 
 
 def get_downloaded_file_path(download_dir: str, filename: str):
