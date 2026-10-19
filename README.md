@@ -41,5 +41,9 @@ Upstream credits include Ferion11, John Goodman, T. H. Wright, N. Marti and
 N. Shaaban. The [MIT license](LICENSE), including DanielDevBR's copyright notice,
 is retained. Logos and Verbum are third-party products.
 
+The Qt application icon adapts Lucide's Book Open Text glyph under the ISC license.
+See [icon attribution and source](ou_dedetai/img/ATTRIBUTION.md) and the included
+[Lucide license](ou_dedetai/img/lucide-LICENSE.txt).
+
 Development of this baseline used AI assistance through OpenCode, with the scoped
 validation and independent review recorded privately by the maintainer.

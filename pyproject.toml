@@ -46,7 +46,7 @@ version = {attr = "ou_dedetai.constants.LLI_CURRENT_VERSION"}
 where = ["."]
 
 [tool.setuptools.package-data]
-"ou_dedetai.img" = ["*icon.png"]
+"ou_dedetai.img" = ["*icon.png", "logos-desktop.svg", "lucide-LICENSE.txt", "ATTRIBUTION.md"]
 
 [tool.ruff]
 line-length = 120

@@ -4,14 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QKeySequence, QPalette, QShortcut
+from PySide6.QtGui import QIcon, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QStackedWidget, QStyle, QVBoxLayout, QWidget,
 )
 
-from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
+from ou_dedetai.constants import APP_IMAGE_DIR, PROMPT_OPTION_DIRECTORY
 from .app import QtApp
 from .bridge import Bridge
 from .dialogs import DialogHost
@@ -215,6 +215,9 @@ class MainWindow(QMainWindow):
     def __init__(self, config, theme, services):
         super().__init__()
         self.setWindowTitle("LogosDesktop · Design preview")
+        icon = QIcon(str(APP_IMAGE_DIR / "logos-desktop-icon.png"))
+        QApplication.instance().setWindowIcon(icon)
+        self.setWindowIcon(icon)
         self.resize(1100, 760)
         self.setMinimumSize(640, 480)
         self.theme = theme
