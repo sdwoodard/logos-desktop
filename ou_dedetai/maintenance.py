@@ -57,11 +57,11 @@ class Context:
     product: str | None = None
 
     @classmethod
-    def from_app(cls, app):
+    def from_app(cls, app, *, prompt=True):
         raw = app.conf._raw
         overrides = app.conf._overrides
         install = getattr(overrides, "install_dir", None) or raw.install_dir
-        if not isinstance(install, (str, Path)) or not str(install):
+        if (not isinstance(install, (str, Path)) or not str(install)) and prompt:
             install = app.conf.install_dir
         if not isinstance(install, (str, Path)) or not Path(install).is_absolute():
             raise MaintenanceError("Select an absolute installation directory first")
@@ -72,16 +72,20 @@ class Context:
 
     @property
     def state(self) -> Path:
-        base = private_directory(Path(constants.STATE_DIR).expanduser().parent / "logos-desktop/maintenance")
+        return private_directory(self.state_path)
+
+    @property
+    def state_path(self) -> Path:
+        base = Path(constants.STATE_DIR).expanduser().parent / "logos-desktop/maintenance"
         key = hashlib.sha256(os.fsencode(self.prefix)).hexdigest()
-        return private_directory(base / key)
+        return base / key
 
     @property
     def pending(self) -> Path:
         return self.state / "restore.pending"
 
     def needs_recovery(self):
-        return os.path.lexists(self.pending) or os.path.lexists(self.state / "restore.json")
+        return os.path.lexists(self.state_path / "restore.pending") or os.path.lexists(self.state_path / "restore.json")
 
 
 _local = threading.local()
@@ -124,7 +128,7 @@ def configured(app):
 
 
 @contextmanager
-def change_selection(configuration, install=None):
+def change_selection(configuration, install=None, *, document=None):
     """Exclude selection changes until all users of this Config have finished."""
     selecting = getattr(_local, "selecting", set())
     if id(configuration) in selecting:
@@ -137,10 +141,23 @@ def change_selection(configuration, install=None):
         old = getattr(configuration._overrides, "install_dir", None) or configuration._raw.install_dir
         selected = install or old
         prefixes = set()
-        for value in (old, selected):
-            if value:
-                prefix = getattr(configuration._overrides, "wine_prefix", None) or Path(value) / "data/wine64_bottle"
-                prefixes.add(Path(prefix).resolve())
+        if hasattr(configuration._overrides, "environment"):
+            from . import config_store
+
+            previous = configuration._raw._as_dict()
+            proposed = dict(previous if document is None else document)
+            if install is not None:
+                proposed["install_dir"] = install
+            for values in (previous, proposed):
+                context = config_store.context(values, configuration._overrides.environment)
+                if context is not None:
+                    prefixes.add(context.prefix)
+        else:
+            for value in (old, selected):
+                if value:
+                    prefix = getattr(configuration._overrides, "wine_prefix", None)
+                    prefix = prefix or Path(value) / "data/wine64_bottle"
+                    prefixes.add(Path(prefix).resolve())
         try:
             for prefix in sorted(prefixes):
                 leases.append(Lease(Context(prefix), exclusive=True))
@@ -180,6 +197,11 @@ class Lease:
                     raise MaintenanceBusy("Another controller is using this installation") from error
                 if context.needs_recovery() and not recovery:
                     raise RecoveryRequired(f"Restore recovery is required. Preserved state: {context.state}")
+                if context.install is not None and not recovery:
+                    from . import runtime
+
+                    if runtime.pending(context.install):
+                        raise RecoveryRequired("Runtime selection needs recovery. Use --repair before installation use")
             except BaseException:
                 os.close(descriptor)
                 raise
@@ -361,6 +383,8 @@ def maintains_installation(function):
 @contextmanager
 def installing(app):
     """Own an idle prefix exclusively while permitting this owner's Wine commands."""
+    if getattr(_local, "installing", None) is None:
+        reconcile(app)
     with configured(app) as context:
         active = getattr(_local, "installing", None)
         if active is not None:
@@ -389,3 +413,14 @@ def changes_installation(function):
 
 def installation_owned():
     return getattr(_local, "installing", None) is not None
+
+
+def reconcile(app):
+    """Reconcile journals only for an explicitly requested mutating operation."""
+    from . import backup, runtime
+
+    context = Context.from_app(app)
+    backup.recover_pending_restore(context, app)
+    if runtime.pending(context.install):
+        runtime.recover(app)
+    return Context.from_app(app)

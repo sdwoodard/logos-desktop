@@ -13,8 +13,6 @@ import logging
 import os
 import sys
 
-from .repair import detect_and_recover
-
 from . import cli
 from . import artifacts
 from . import constants
@@ -24,6 +22,7 @@ from . import system
 from . import tui_app
 from . import utils
 from . import updates
+from . import config_store
 
 
 def get_parser():
@@ -110,6 +109,11 @@ def get_parser():
         ),
     )
     cmd = grp.add_mutually_exclusive_group()
+    cmd.add_argument('--repair', dest='repair_app', action='store_true', help='repair the selected installation')
+    cmd.add_argument(
+        '--status', dest='installation_status', action='store_true',
+        help='inspect the selected installation without changing it',
+    )
     cmd.add_argument(
         '--install-app', action='store_true',
         help='install FaithLife app',
@@ -212,7 +216,7 @@ def get_parser():
 
 
 def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]: 
-    if args.config:
+    if args.config is not None:
         ephemeral_config = EphemeralConfiguration.load_from_path(args.config)
     else:
         ephemeral_config = EphemeralConfiguration.load()
@@ -222,14 +226,14 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         ephemeral_config.dialog = args.dialog
 
     if args.quiet:
-        msg.update_log_level(logging.WARNING)
+        ephemeral_config.log_level = logging.WARNING
         ephemeral_config.quiet = True
 
     if args.verbose:
-        msg.update_log_level(logging.INFO)
+        ephemeral_config.log_level = logging.INFO
 
     if args.debug:
-        msg.update_log_level(logging.DEBUG)
+        ephemeral_config.log_level = logging.DEBUG
         if not ephemeral_config.wine_debug:
             ephemeral_config.wine_debug = constants.DEFAULT_WINEDEBUG
         # Developers may want to consider adding +relay for excessive debug output
@@ -239,7 +243,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         ephemeral_config.delete_log = True
 
     if args.set_appimage:
-        ephemeral_config.wine_appimage_path = args.set_appimage[0]
+        ephemeral_config.wine_appimage_path = str(config_store.absolute_path(args.set_appimage[0]))
 
     if args.skip_dependencies or constants.RUNMODE == 'snap':
         ephemeral_config.install_dependencies_skip = True
@@ -249,8 +253,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
 
     if args.custom_binary_path:
         if os.path.isdir(args.custom_binary_path):
-            # Set legacy environment variable for config to pick up
-            os.environ["CUSTOMBINPATH"] = args.custom_binary_path
+            ephemeral_config.custom_binary_path = str(config_store.absolute_path(args.custom_binary_path))
         else:
             message = f"Custom binary path does not exist: \"{args.custom_binary_path}\"\n"
             parser.exit(status=1, message=message)
@@ -279,6 +282,8 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
 
     # Set action return function.
     actions = [
+        'repair_app',
+        'installation_status',
         'backup',
         'create_shortcuts',
         'edit_config',
@@ -305,7 +310,6 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
     for arg in actions:
         if getattr(args, arg) or getattr(args, arg) == []:
             if arg == "set_appimage":
-                ephemeral_config.wine_appimage_path = getattr(args, arg)[0]
                 if not utils.file_exists(ephemeral_config.wine_appimage_path):
                     e = f"Invalid file path: '{ephemeral_config.wine_appimage_path}'. File does not exist."
                     raise argparse.ArgumentTypeError(e)
@@ -321,7 +325,17 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         run_action = install_app
     if run_action is None:
         run_action = run_control_panel
-    logging.debug(f"{run_action=}")
+    cli_fields = {
+        "check_for_updates": "check_updates_now", "dialog": "dialog", "quiet": "quiet",
+        "verbose": "log_level", "debug": "log_level", "delete_log": "delete_log",
+        "set_appimage": "wine_appimage_path", "skip_dependencies": "install_dependencies_skip",
+        "custom_binary_path": "custom_binary_path",
+    }
+    ephemeral_config.cli_overrides = {
+        field: getattr(ephemeral_config, field) for argument, field in cli_fields.items() if getattr(args, argument)
+    }
+    if args.debug:
+        ephemeral_config.cli_overrides["wine_debug"] = ephemeral_config.wine_debug
     return ephemeral_config, run_action
 
 
@@ -363,20 +377,6 @@ def setup_config(cli_args=None) -> Tuple[EphemeralConfiguration, Callable[[Ephem
     if cli_args is None:
         cli_args = parser.parse_args()
 
-    # Get config based on env and configuration file temporarily just to load a couple 
-    # values out. We'll load this fully later.
-    temp = EphemeralConfiguration.load()
-    log_level = temp.log_level or constants.DEFAULT_LOG_LEVEL
-    app_log_path = temp.app_log_path or constants.DEFAULT_APP_LOG_PATH
-    del temp
-
-    # Set runtime config.
-    # Update log configuration.
-    msg.update_log_level(log_level)
-    msg.update_log_path(app_log_path)
-    # test = logging.getLogger().handlers
-
-    # Parse CLI args and update affected config vars.
     return parse_args(cli_args, parser)
 
 
@@ -390,19 +390,11 @@ def is_app_installed(ephemeral_config: EphemeralConfiguration):
 
 
 def run(ephemeral_config: EphemeralConfiguration, action: Callable[[EphemeralConfiguration], None]): 
-    # Attempt to repair installation if it is broken.
-    # Must be done before calling the action to avoid errosly thinking the app isn't
-    # installed when it's broken
-    if not updates.startup_handoff():
-        detect_and_recover(ephemeral_config)
-    # Run desired action (requested function, defaults to control_panel)
     if action == "disabled":
         print("That option is disabled.", file=sys.stderr)
         sys.exit(1)
     if action.__name__ == 'run_control_panel':
-        # if utils.app_is_installed():
-        #     wine.set_logos_paths()
-        action(ephemeral_config)  # run control_panel right away
+        action(ephemeral_config)
         return
     
     # Proceeding with the CLI interface
@@ -417,20 +409,17 @@ def run(ephemeral_config: EphemeralConfiguration, action: Callable[[EphemeralCon
         'run_indexing',
         'run_installed_app',
         'update_installed_app',
-        'stop_installed_app',
         'set_appimage',
         'toggle_app_logging',
     ]
     if action.__name__ not in install_required:
         logging.info(f"Running function: {action.__name__}")
         action(ephemeral_config)
-    elif is_app_installed(ephemeral_config):  # install_required; checking for app
-        # wine.set_logos_paths()
-        # Run the desired Logos action.
+    elif is_app_installed(ephemeral_config):
         logging.info(f"Running function: {action.__name__}")
         action(ephemeral_config)
-    else:  # install_required, but app not installed
-        print("App is not installed, but required for this operation. Consider installing first.", file=sys.stderr) 
+    else:
+        print("App is not ready for this operation. Inspect --status or request --repair.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -471,15 +460,22 @@ def main():
         return
     arguments = updates.resume_arguments(args.config or LegacyConfiguration.config_file_path(), args.dialog)
     updates.recover_startup(arguments)
-    msg.initialize_logging()
-    ephemeral_config, action = setup_config(args)
+    try:
+        ephemeral_config, action = setup_config(args)
+    except config_store.ConfigurationError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from error
+    diagnostic = action.__name__ in ("installation_status", "get_support", "stop_installed_app", "edit_config")
+    if not diagnostic:
+        msg.initialize_logging(ephemeral_config.app_log_path)
+    msg.update_log_level(ephemeral_config.log_level or constants.DEFAULT_LOG_LEVEL)
     system.check_architecture()
 
     # NOTE: DELETE_LOG is an outlier here. It's an action, but it's one that
     # can be run in conjunction with other actions, so it gets special
     # treatment here once config is set.
     app_log_path = ephemeral_config.app_log_path or constants.DEFAULT_APP_LOG_PATH
-    if ephemeral_config.delete_log and os.path.isfile(app_log_path):
+    if not diagnostic and ephemeral_config.delete_log and os.path.isfile(app_log_path):
         # Write empty file.
         with open(app_log_path, 'w') as f:
             f.write('')

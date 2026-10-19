@@ -404,7 +404,7 @@ def is_appimage(file_path):
 
 
 def check_appimage(filestr):
-    logging.debug(f"Checking if {filestr} is a usable AppImage.")
+    logging.getLogger(__name__).debug("Checking if %s is a usable AppImage", filestr)
     if filestr is None:
         logging.error("check_appimage: received None for file.")
         return False

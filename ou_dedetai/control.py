@@ -176,6 +176,8 @@ def uninstall(app: App):
 
     # Reloading would recreate a cache that the user just asked to remove.
     app.conf._raw = PersistentConfiguration()
+    if callable(getattr(app.conf, "invalidate_context", None)):
+        app.conf.invalidate_context()
     for attribute in (
         "_wine64_path", "_wine64_identity", "_download_dir", "_wine_user", "_logos_exe",
         "_installed_faithlife_product_release", "_wine_binary_files", "_wine_appimage_files",
@@ -281,7 +283,14 @@ def _write_support(app, output_path):
 
         if app.conf._raw.wine_binary:
             try:
-                run_commands += [[runtime.executable(app.conf.wine_binary, app), "--version"]]
+                selected = Path(app.conf._raw.wine_binary)
+                if not selected.is_absolute():
+                    selected = Path(app.conf._raw.install_dir) / selected
+                # AppImage resolution can import bytes into the prefix. Diagnostics
+                # skip it rather than changing the failing installation.
+                if selected.resolve().name.lower().endswith(".appimage"):
+                    raise ValueError("AppImage execution is skipped during read-only diagnostics")
+                run_commands += [[str(paths.executable(selected)), "--version"]]
             except (ValueError, OSError, artifacts.ArtifactError, maintenance.MaintenanceError) as error:
                 logging.warning("Skipping runtime diagnostic: %s", error)
 
@@ -324,7 +333,7 @@ def _write_support(app, output_path):
                 context_to_write[env] = os.getenv(env)
 
         # Also add our DIALOG to the list
-        context_to_write["DIALOG"] = system.get_dialog()
+        context_to_write["DIALOG"] = getattr(app.conf._overrides, "dialog", None) or "cli"
 
         # These aren't really envs, but still relevant. Consider a different file?
         context_to_write["RUNMODE"] = constants.RUNMODE

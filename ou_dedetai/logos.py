@@ -97,7 +97,7 @@ class LogosManager:
             if cef_running:
                 self.logos_state = State.RUNNING
 
-    def get_logos_pids(self):
+    def get_logos_pids(self, context=None):
         app = self.app
         # FIXME: consider refactoring to make one call to get a system pids
         # Currently this gets all system pids 4 times
@@ -108,7 +108,28 @@ class LogosManager:
             app.conf.logos_cef_exe_windows_path
         ]:
             if exe_path:
-                self.existing_processes[exe_path] = system.get_pids(exe_path)
+                candidates = system.get_pids(exe_path)
+                if context is not None:
+                    candidates = [process for process in candidates if self._matches_selection(process, context)]
+                self.existing_processes[exe_path] = candidates
+
+    def _matches_selection(self, process, context):
+        """A Windows argv match alone does not identify a Wine installation."""
+        try:
+            if not process.is_running() or process.uids().real != os.geteuid():
+                return False
+            prefix = process.environ().get("WINEPREFIX")
+            if not prefix or not Path(prefix).is_absolute() or Path(prefix).resolve() != context.prefix:
+                return False
+            conf = self.app.conf
+            expected = {
+                conf.logos_exe, conf.logos_system_exe_windows_path,
+                conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path,
+            } - {None}
+            return bool(expected.intersection(process.cmdline())) and process.is_running()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+            logging.warning("Skipped a Stop candidate whose selected-prefix identity could not be verified")
+            return False
 
     def monitor(self):
         if self.app.is_installed():
@@ -178,6 +199,10 @@ class LogosManager:
     def start(self):
         self.logos_state = State.STARTING
         try:
+            from . import repair
+
+            if repair.inspect(maintenance.Context.from_app(self.app)) == repair.FailureType.FailedUpgrade:
+                raise maintenance.RecoveryRequired("A failed upgrade requires explicit --repair before launch")
             selected_runtime = runtime.executable(self.app.conf.wine_binary, self.app)
             wine_release, _ = wine.get_wine_release(selected_runtime)
             good_wine, reason = wine.check_wine_rules(
@@ -278,29 +303,28 @@ class LogosManager:
     # alone for now. Only found it when manually modifying the database.
 
     def stop(self):
-        logging.debug("Stopping LogosManager.")
+        context = maintenance.Context.from_app(self.app, prompt=False)
+        previous = self.logos_state
         self.logos_state = State.STOPPING
-        if len(self.existing_processes) == 0:
-            self.get_logos_pids()
-
-        pids: list[str] = []
-        for processes in self.processes.values():
-            pids.append(str(processes.pid))
-
-        for existing_processes in self.existing_processes.values():
-            pids.extend(str(proc.pid) for proc in existing_processes)
-
-        if pids:
-            try:
-                system.run_command(['kill', '-9'] + pids)
-                logging.debug(f"Stopped Logos processes at PIDs {', '.join(pids)}.")
-            except Exception as e:
-                logging.debug(f"Error while stopping Logos processes: {e}.")
-        else:
-            logging.debug("No Logos processes to stop.")
-        self.logos_state = State.STOPPED
-        # The Logos process has exited, if we wait here it hangs
-        # wine.wineserver_wait(self.app)
+        try:
+            self.get_logos_pids(context)
+            candidates = {process.pid: process for group in self.existing_processes.values() for process in group}
+            for child in self.processes.values():
+                if child.poll() is None:
+                    try:
+                        candidates[child.pid] = psutil.Process(child.pid)
+                    except psutil.NoSuchProcess:
+                        pass
+            for process in candidates.values():
+                if self._matches_selection(process, context):
+                    try:
+                        process.kill()
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        pass
+            self.logos_state = State.STOPPED
+        except BaseException:
+            self.logos_state = previous
+            raise
 
     def end_processes(self):
         for process_name, process in self.processes.items():

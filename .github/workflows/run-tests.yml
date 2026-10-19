@@ -30,6 +30,7 @@ jobs:
           tests.test_backup tests.test_maintenance
           tests.test_tui_maintenance
           tests.test_installation tests.test_logging
+          tests.test_config tests.test_recovery_dispatch
       - name: Check retained version comparisons in a separate process
         run: >-
           python -m unittest -v

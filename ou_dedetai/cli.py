@@ -44,6 +44,26 @@ class CLI(App):
         installer.install(self)
         self.exit("Install has finished", intended=True)
 
+    def repair_app(self):
+        from . import repair
+
+        repair.repair_installation(self)
+
+    def installation_status(self):
+        from . import repair, runtime
+
+        raw = self.conf._raw
+        print(f"Configuration: {self.conf.config_file_path}")
+        if not raw.install_dir or not raw.faithlife_product:
+            print("Installation is not configured")
+            return
+        context = maintenance.Context.from_app(self, prompt=False)
+        failure = repair.inspect(context)
+        print(f"Product: {context.product}\nPrefix: {context.prefix}")
+        print("Failed upgrade requires --repair" if failure else "No failed-upgrade layout detected")
+        if context.needs_recovery() or runtime.pending(context.install):
+            print("Pending recovery records are preserved. Use --repair before mutating this installation")
+
     def update_installed_app(self):
         utils.update_faithlife_product(self)
         self.exit("Update has finished", intended=True)

@@ -1,4 +1,5 @@
 import importlib
+import json
 import stat
 import tempfile
 import unittest
@@ -205,6 +206,29 @@ class TestPrivateSupport(unittest.TestCase):
 
 @unittest.skipIf(gui_app is None, f"Native Tk import unavailable: {GUI_IMPORT_ERROR}")
 class TestPrivateGuiUpdates(unittest.TestCase):
+    def test_advanced_release_and_wine_callbacks_preserve_custom_destination(self):
+        from tests.test_config import configuration
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "selected.json"
+            install = root / "custom"
+            selected.write_text(json.dumps({
+                "install_dir": str(install), "faithlife_product": "Logos", "faithlife_product_version": "10",
+                "faithlife_product_release": "38.0.0.0", "wine_binary": "data/bin/wine",
+            }))
+            with patch.object(constants, "STATE_DIR", str(root / "state/app")):
+                window = object.__new__(gui_app.InstallerWindow)
+                window.conf = configuration(selected)
+                window.gui = Mock()
+                window.gui.releasevar.get.return_value = "40.1.0.0"
+                window.gui.winevar.get.return_value = str(install / "tools/wine")
+                window.set_release()
+                self.assertEqual(window.conf.install_dir, str(install))
+                window.set_wine()
+                self.assertEqual(window.conf.install_dir, str(install))
+                self.assertEqual(configuration(selected).install_dir, str(install))
+
     def test_stale_wine_snapshot_does_not_render_latest_recommended(self):
         window = object.__new__(gui_app.ControlWindow)
         window.conf = SimpleNamespace(

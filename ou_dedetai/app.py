@@ -46,15 +46,11 @@ class App(abc.ABC):
         # This lazy load is required otherwise these would be circular imports
         from ou_dedetai.config import Config
         from ou_dedetai.logos import LogosManager
-        from ou_dedetai.system import check_incompatibilities
 
         self.conf = Config(config, self)
         self.logos = LogosManager(app=self)
         self._threads = []
         self._pending_exit: Optional[tuple[str, bool]] = None
-        # Ensure everything is good to start
-        check_incompatibilities(self)
-
         def _config_updated_hook_runner():
             while True:
                 self._config_updated_event.wait()

@@ -765,6 +765,9 @@ def _wine_invocation(app, binary, overrides):
                     env["WINESERVER"] = str(pinned.resolve().parent / "wineserver")
                 elif env.get("WINESERVER"):
                     env["WINESERVER"] = runtime.executable(env["WINESERVER"], app)
+        explicit_server = getattr(app.conf._overrides, "wineserver_binary", None)
+        if explicit_server is not None:
+            env["WINESERVER"] = runtime.executable(app.conf.wineserver_binary, app)
         return [executable], env
 
 

@@ -70,6 +70,8 @@ class TestNetwork(unittest.TestCase):
             with patch.multiple(constants, CACHE_BASE=base, CACHE_DIR=str(cache),
                                 NETWORK_CACHE_PATH=str(cache / "network.json")):
                 network.CachedRequests.load()
+                self.assertFalse(cache.exists())
+                cache.mkdir(mode=0o700)
                 (cache / "network.json").write_text(json.dumps({
                     "url_size_and_hash": {"url": [1, "unsafe old ETag"]},
                     "repository_latest_version": {"example/repo": "1"},

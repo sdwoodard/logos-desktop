@@ -21,6 +21,8 @@ paths while migration is prepared. Both `logos-desktop` and the transitional
 still Tkinter. Native Qt work is planned.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for source setup and focused checks.
+See [CONFIGURATION.md](CONFIGURATION.md) for profile selection, setting precedence,
+legacy files, atomic saves and explicit recovery commands.
 
 ## Support
 

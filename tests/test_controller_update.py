@@ -288,7 +288,7 @@ class TestUpdateAdmission(unittest.TestCase):
                 constants, APP_SELF_UPDATES_ENABLED=enabled, CONTROLLER_DISTRIBUTION=distribution,
             ), patch.object(sys, "argv", ["controller", "--update-self", "-c", "/broken/profile.json"]), patch.object(
                 main, "setup_config",
-            ) as config, patch.object(main, "detect_and_recover") as recover, patch.object(
+            ) as config, patch("ou_dedetai.repair.repair_installation") as recover, patch.object(
                 main.PersistentConfiguration, "load_from_path",
             ) as load:
                 with self.assertRaises(SystemExit):

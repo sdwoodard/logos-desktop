@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import backup, constants, control, database, installer, logos, maintenance, system, utils, wine
+from ou_dedetai import (
+    backup, config_store, constants, control, database, installer, logos, maintenance, system, utils, wine,
+)
 from ou_dedetai.config import Config
 from ou_dedetai import repair
 from tests.test_backup import fixture_app
@@ -272,12 +274,11 @@ time.sleep(20)
 
         def run():
             try:
-                repair.detect_and_recover(self.app.conf._overrides)
+                repair.repair_installation(self.app)
             except BaseException as error:
                 errors.append(error)
 
         with (
-            patch.object(repair.PersistentConfiguration, "load_from_path", return_value=self.app.conf._raw),
             patch.object(repair.ou_dedetai.config, "get_wine_user", return_value="fixture"),
             patch.object(repair, "detect_broken_install", side_effect=inspect),
         ):
@@ -318,7 +319,7 @@ time.sleep(20)
             for attribute, value in (("install_dir", self.root / "other"), ("faithlife_product", "Verbum")):
                 with self.assertRaises(maintenance.MaintenanceBusy):
                     setattr(configuration, attribute, value)
-            with patch.object(repair.PersistentConfiguration, "load_from_path", return_value=configuration._raw):
+            with patch("ou_dedetai.config.PersistentConfiguration.load_from_path", return_value=configuration._raw):
                 with self.assertRaises(maintenance.MaintenanceBusy):
                     configuration.reload()
             self.assertEqual(configuration._raw.install_dir, str(self.context.install))
@@ -407,19 +408,17 @@ time.sleep(20)
         configuration._overrides.wine_prefix = None
         loaded = replace(configuration._raw)
         observed = []
+        self.app.approve = Mock(return_value=True)
 
         def install(app):
             observed.append(app.conf._raw.faithlife_product_release)
 
         with (
-            patch.object(repair.PersistentConfiguration, "load_from_path", return_value=loaded),
             patch.object(repair.ou_dedetai.config, "get_wine_user", return_value="fixture"),
             patch.object(repair, "detect_broken_install", return_value=repair.FailureType.FailedUpgrade),
-            patch.object(repair, "run_under_app", side_effect=lambda ephemeral, callback: callback(self.app)),
             patch.object(repair.ou_dedetai.installer, "install", side_effect=install),
-            patch.object(repair.time, "sleep"),
         ):
-            repair.detect_and_recover(configuration._overrides)
+            repair.repair_installation(self.app)
         self.assertEqual(observed, [None])
         configuration._write.assert_called_once_with(checked=True)
         self.assertEqual(loaded.faithlife_product_release, "old-target")
@@ -431,10 +430,10 @@ time.sleep(20)
         configuration._overrides.config_path = str(self.root / "selected.json")
         configuration._write = Config._write.__get__(configuration)
         configuration.app._config_updated_event = Mock()
-        with patch("builtins.open", side_effect=PermissionError("injected config write failure")):
+        with patch.object(config_store.Target, "stage", side_effect=PermissionError("injected stage failure")):
             with self.assertRaisesRegex(maintenance.MaintenanceError, "Runtime logging changed"):
                 configuration.faithlife_product_logging = True
-        with patch.object(configuration._raw, "write_config") as writer:
+        with patch.object(configuration._raw, "write_config", return_value=config_store.Saved({})) as writer:
             configuration.faithlife_product_logging = True
             writer.assert_called_once_with(checked=True, config_file_path=configuration._overrides.config_path)
 
@@ -497,11 +496,11 @@ except maintenance.MaintenanceBusy:
         configuration._overrides.config_path = str(self.root / "selected.json")
         configuration._write = Config._write.__get__(configuration)
         configuration.app._config_updated_event = Mock()
-        with patch("ou_dedetai.config.os.makedirs", side_effect=PermissionError("injected directory failure")):
+        with patch.object(config_store.Target, "__init__", side_effect=PermissionError("injected parent failure")):
             with self.assertRaises(maintenance.MaintenanceError):
                 configuration.faithlife_product_logging = True
         self.assertIsNone(configuration._raw.faithlife_product_logging)
-        with patch.object(configuration._raw, "write_config") as writer:
+        with patch.object(configuration._raw, "write_config", return_value=config_store.Saved({})) as writer:
             configuration.faithlife_product_logging = True
             writer.assert_called_once_with(checked=True, config_file_path=configuration._overrides.config_path)
 

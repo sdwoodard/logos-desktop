@@ -51,11 +51,6 @@ class GuiApp(App):
         super().__init__(ephemeral_config)
         self.root = root
         self._status_gui = gui
-        # Now spawn a new thread to ensure choices are set to set to defaults so user
-        # isn't App.ask'ed
-        def _populate_initial_defaults():
-            self.populate_defaults()
-        self.start_thread(_populate_initial_defaults)
 
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
@@ -151,10 +146,7 @@ class GuiApp(App):
             raise system.SuperuserCommandNotFound("No superuser command found. Please install pkexec.")
     
     def populate_defaults(self) -> None:
-        """If any prompt is unset, set it to it's default value
-        
-        Useful for startign the UI at an installable state,
-        the user can change these choices later"""
+        """Populate choices only after an installation workflow was selected."""
 
         # For the GUI, use defaults until user says otherwise.
         if self.conf._raw.faithlife_product is None:
@@ -162,29 +154,15 @@ class GuiApp(App):
         if self.conf._raw.faithlife_product_version is None:
             self.conf.faithlife_product_version = constants.FAITHLIFE_PRODUCT_VERSIONS[0] 
 
-        # Now that we know product and version are set we can download the releases
-        # And use the first one
-        # Also ensure that our network cache is populated
-        if self.conf._network._faithlife_product_releases(
-            self.conf._raw.faithlife_product,
-            self.conf._raw.faithlife_product_version,
-            self.conf._raw.faithlife_product_release_channel,
-        ):
-            if self.conf._raw.faithlife_product_release is None:
-                self.conf.faithlife_product_release = self.conf.faithlife_product_releases[0] 
-        else:
-            # Spawn a thread that does this, as the download takes a second
-            def _populate_product_release_default():
-                # Always Get the latest release
-                latest_release = self.conf.faithlife_product_releases[0]
-                # If the release wasn't set before, set it now
-                if self.conf._raw.faithlife_product_release is None:
-                    self.conf.faithlife_product_release = latest_release
-            self.start_thread(_populate_product_release_default)
-
         # Set the install_dir to default, no option in the GUI to change it
         if self.conf._raw.install_dir is None:
             self.conf.install_dir = self.conf.install_dir_default
+
+        if self.conf._raw.faithlife_product_release is None:
+            releases = self.conf.faithlife_product_releases
+            if not releases:
+                raise ou_dedetai.maintenance.MaintenanceError("No product release is available for installation")
+            self.conf.faithlife_product_release = releases[0]
 
         if self.conf._raw.wine_binary is None:
             wine_choices = utils.get_wine_options(self)
@@ -382,12 +360,9 @@ class InstallerWindow:
         self.set_input_widgets_state('enabled', [self.gui.okay_button])
 
     def _post_dropdown_change(self):
-        """Steps to preform after a dropdown has been updated"""
-        # Ensure progress counter is reset.
+        """Reset progress without changing the selected installation destination."""
         self.installer_step = 0
         self.installer_step_count = 0
-        # Reset install_dir to default based on possible new value
-        self.conf.install_dir = self.conf.install_dir_default
 
     def set_input_widgets_state(self, state, widgets='all'):
         if state == 'enabled':

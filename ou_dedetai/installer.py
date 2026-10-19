@@ -73,6 +73,7 @@ def ensure_sys_deps(app: App):
     app.status("Ensuring system dependencies are met…")
 
     if not app.conf.skip_install_system_dependencies:
+        system.check_incompatibilities(app)
         utils.install_dependencies(app)
         logging.debug("> Done.")
     else:
@@ -424,7 +425,7 @@ def install(app: App):
     if not app.conf._raw.faithlife_product:
         app.conf.faithlife_product
     if not getattr(app.conf._raw, "faithlife_product_version", None):
-        app.conf.faithlife_product_version
+        app.conf._change(faithlife_product_version=app.conf.faithlife_product_version)
     if not (getattr(app.conf._overrides, "install_dir", None) or app.conf._raw.install_dir):
         app.conf.install_dir
     with maintenance.installing(app):

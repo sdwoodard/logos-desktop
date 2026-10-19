@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ou_dedetai import artifacts, constants, control, installer, maintenance, network, runtime, system, utils, wine
-from ou_dedetai.config import Config, PersistentConfiguration
+from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
 from tests.artifact_fixtures import appimage, msi, winetricks_zip
 from tests.test_artifacts import response
 
@@ -177,12 +177,13 @@ class TestArtifactConsumers(unittest.TestCase):
         for failure in range(1, 8):
             calls = []
 
-            def replace(source, target):
-                if Path(target).name != "runtime.json":
+            def replace(source, target, **kwargs):
+                name = Path(target).name
+                if name != "runtime.json" and not name.endswith((".previous", ".legacy-original")):
                     calls.append(target)
                     if len(calls) == failure:
                         raise OSError("intended activation publication failure")
-                return original(source, target)
+                return original(source, target, **kwargs)
 
             with self.subTest(boundary=failure), patch.object(runtime.os, "replace", side_effect=replace):
                 with self.assertRaises(artifacts.ArtifactError):
@@ -357,7 +358,12 @@ class TestArtifactConsumers(unittest.TestCase):
                 loaded.write_config(checked=True, config_file_path=conf._overrides.config_path)
             configuration = object.__new__(Config)
             with patch.object(Config, "_create_network_requests_with_hook", return_value=Mock()):
-                Config.__init__(configuration, conf._overrides, self.app)
+                overrides = EphemeralConfiguration.load_from_path(conf._overrides.config_path)
+                Config.__init__(configuration, overrides, self.app)
+            self.assertTrue(runtime.pending(conf.install_dir))
+            self.app.conf = configuration
+            runtime.recover(self.app)
+            self.app.conf = conf
             self.assertEqual(configuration._raw.wine_binary, conf._raw.wine_binary)
             self.assertEqual(self.state(), before)
 
@@ -494,7 +500,7 @@ class TestArtifactConsumers(unittest.TestCase):
                 runtime.activate(self.app, accepted)
         before = self.state()
         self.app.approve = Mock()
-        with self.assertRaisesRegex(maintenance.RecoveryRequired, "Restart LogosDesktop"):
+        with self.assertRaisesRegex(maintenance.RecoveryRequired, "recovery"):
             control.uninstall(self.app)
         self.app.approve.assert_not_called()
         self.assertEqual(self.state(), before)

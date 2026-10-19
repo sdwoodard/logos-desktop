@@ -3,12 +3,11 @@ from contextlib import ExitStack
 import os
 import subprocess
 from typing import Any, Optional
-from dataclasses import dataclass
-import json
+from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine, system, paths, maintenance, runtime
+from ou_dedetai import network, utils, constants, wine, system, paths, maintenance, runtime, config_store
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -67,91 +66,39 @@ class LegacyConfiguration:
     @classmethod
     def bool_keys(cls) -> list[str]:
         """Returns a list of keys that are of type bool"""
-        return [
-            "VERBOSE",
-            "SKIP_DEPENDENCIES",
-            "DEBUG",
-            "CHECK_UPDATES"
-        ]
+        return list(config_store.BOOLEAN_FIELDS.intersection(cls.__dataclass_fields__))
 
     @classmethod
     def config_file_path(cls) -> str:
-        return os.getenv("CONFIG_FILE") or constants.DEFAULT_CONFIG_PATH
+        value = os.environ["CONFIG_FILE"] if "CONFIG_FILE" in os.environ else constants.DEFAULT_CONFIG_PATH
+        return str(config_store.absolute_path(value))
 
     @classmethod
     def load(cls) -> "LegacyConfiguration":
-        """Find the relevant config file and load it"""
-        # Update config from CONFIG_FILE.
-        config_file_path = LegacyConfiguration.config_file_path()
-        # This moves the first legacy config to the new location
-        if not utils.file_exists(config_file_path):
-            for legacy_config in constants.LEGACY_CONFIG_FILES:
-                if utils.file_exists(legacy_config):
-                    Path(config_file_path).parent.mkdir(parents=True, exist_ok=True)
-                    os.rename(legacy_config, config_file_path)
+        """Discover legacy input without moving or rewriting it."""
+        destination = LegacyConfiguration.config_file_path()
+        source = destination
+        if "CONFIG_FILE" not in os.environ and not Path(destination).exists():
+            for candidate in constants.LEGACY_CONFIG_FILES:
+                if Path(candidate).is_file():
+                    source = str(config_store.absolute_path(candidate))
                     break
-        # This may be a config that used to be in the legacy location
-        # Now it's all in the same location
-        return LegacyConfiguration.load_from_path(config_file_path)
+        loaded = cls.load_from_path(source)
+        loaded._destination = destination
+        return loaded
 
     @classmethod
     def load_from_path(cls, config_file_path: str) -> "LegacyConfiguration":
-        config_dict: dict[str, str] = {}
-        
-        if not Path(config_file_path).exists():
-            pass
-        elif config_file_path.endswith('.json'):
-            try:
-                with open(config_file_path, 'r') as config_file:
-                    cfg = json.load(config_file)
-
-                for key, value in cfg.items():
-                    config_dict[key] = value
-            except TypeError as e:
-                logging.error("Error opening Config file.")
-                logging.error(e)
-                raise e
-            except FileNotFoundError:
-                logging.info(f"No config file not found at {config_file_path}")
-            except json.JSONDecodeError as e:
-                logging.error("Config file could not be read.")
-                logging.error(e)
-                raise e
-        elif config_file_path.endswith('.conf'):
-            # Legacy config from bash script.
-            logging.info("Reading from legacy config file.")
-            with open(config_file_path, 'r') as config_file:
-                for line in config_file:
-                    line = line.strip()
-                    if len(line) == 0:  # skip blank lines
-                        continue
-                    if line[0] == '#':  # skip commented lines
-                        continue
-                    parts = line.split('=')
-                    if len(parts) == 2:
-                        value = parts[1].strip('"').strip("'")  # remove quotes
-                        vparts = value.split('#')  # get rid of potential comment
-                        if len(vparts) > 1:
-                            value = vparts[0].strip().strip('"').strip("'")
-                        config_dict[parts[0]] = value
-
-        # Now restrict the key values pairs to just those found in LegacyConfiguration
-        output: dict = {}
-        config_env = LegacyConfiguration.load_from_env().__dict__
-        # Now update from ENV
-        for var, env_var in config_env.items():
-            if env_var is not None:
-                output[var] = env_var
-            elif var in config_dict:
-                if var in LegacyConfiguration.bool_keys():
-                    output[var] = utils.parse_bool(config_dict[var])
-                else:
-                    output[var] = config_dict[var]
-
-        # Populate the path this config was loaded from
-        output["CONFIG_FILE"] = config_file_path
-
-        return LegacyConfiguration(**output)
+        path = config_store.absolute_path(config_file_path)
+        document, _ = config_store.read_document(path)
+        document = config_store.apply_changes(document, environment_document(), path)
+        install = document.get("install_dir")
+        for name in config_store.PATH_FIELDS - {"install_dir", "INSTALLDIR", "wine_binary", "WINE_EXE"}:
+            if document.get(name) is not None:
+                document[name] = str(config_store.absolute_path(document[name], base=install or path.parent))
+        output = {name: document[name] for name in cls.__dataclass_fields__ if name in document}
+        output["CONFIG_FILE"] = str(path)
+        return cls(**output)
 
     @classmethod
     def load_from_env(cls) -> "LegacyConfiguration":
@@ -161,10 +108,20 @@ class LegacyConfiguration:
             env_var = os.getenv(var)
             if env_var is not None:
                 if var in LegacyConfiguration.bool_keys():
-                    output[var] = utils.parse_bool(env_var)
+                    output[var] = config_store.boolean(env_var, var, "environment")
                 else:
                     output[var] = env_var
         return LegacyConfiguration(**output)
+
+
+def environment_document():
+    """Capture only explicitly supplied legacy overrides, with invocation path bases."""
+    legacy = LegacyConfiguration.load_from_env()
+    output = {name: value for name, value in legacy.__dict__.items() if value is not None}
+    for name in config_store.PATH_FIELDS:
+        if name in output and output[name] not in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
+            output[name] = str(config_store.absolute_path(output[name]))
+    return config_store.canonical(output, Path.cwd() / "environment")
 
 
 @dataclass
@@ -221,7 +178,16 @@ class EphemeralConfiguration:
 
     # Start internal values
     config_path: str
-    """Path this config was loaded from"""
+    """Active read source, rebound to config_destination after migration commits."""
+
+    config_destination: Optional[str] = None
+    """Selected write destination, distinct only during default legacy discovery."""
+    environment: dict[str, Any] = field(default_factory=dict)
+    """Only supplied environment values, kept separate from saved projections."""
+    cli_overrides: dict[str, Any] = field(default_factory=dict)
+    """Only supplied CLI values, reapplied when the saved document changes."""
+    runtime_selection: dict[str, Any] = field(default_factory=dict)
+    """An explicitly activated runtime wins for this controller invocation."""
 
     assume_yes: bool = False
     """Whether to assume yes to all prompts or ask the user
@@ -301,11 +267,39 @@ class EphemeralConfiguration:
 
     @classmethod
     def load(cls) -> "EphemeralConfiguration":
-        return EphemeralConfiguration.from_legacy(LegacyConfiguration.load())
+        legacy = LegacyConfiguration.load()
+        document, _ = config_store.read_document(legacy.CONFIG_FILE)
+        return cls.project(document, legacy.CONFIG_FILE, destination=legacy._destination)
 
     @classmethod
     def load_from_path(cls, path: str) -> "EphemeralConfiguration":
-        return EphemeralConfiguration.from_legacy(LegacyConfiguration.load_from_path(path))
+        path = str(config_store.absolute_path(path))
+        document, _ = config_store.read_document(path)
+        return cls.project(document, path)
+
+    @classmethod
+    def project(cls, document, path, *, destination=None, environment=None, cli_overrides=None, runtime_selection=None):
+        """Resolve saved paths, then apply only genuine environment and CLI overlays."""
+        environment = environment_document() if environment is None else environment
+        effective = config_store.apply_changes(document, environment, path)
+        effective = config_store.apply_changes(effective, runtime_selection or {}, path)
+        install = effective.get("install_dir")
+        for name in config_store.PATH_FIELDS - {"install_dir", "INSTALLDIR", "wine_binary", "WINE_EXE"}:
+            if effective.get(name) is not None:
+                effective[name] = str(config_store.absolute_path(effective[name], base=install or Path(path).parent))
+        legacy = LegacyConfiguration(**{
+            name: value for name, value in effective.items() if name in LegacyConfiguration.__dataclass_fields__
+        })
+        legacy.CONFIG_FILE = str(path)
+        result = cls.from_legacy(legacy)
+        result.install_dir = environment.get("install_dir")
+        result.config_destination = str(destination or path)
+        result.environment = copy.deepcopy(environment)
+        result.cli_overrides = copy.deepcopy(cli_overrides or {})
+        result.runtime_selection = copy.deepcopy(runtime_selection or {})
+        for name, value in result.cli_overrides.items():
+            setattr(result, name, value)
+        return result
 
 
 @dataclass
@@ -352,54 +346,35 @@ class PersistentConfiguration:
     """
 
     @classmethod
-    def load_from_path(cls, config_file_path: str) -> "PersistentConfiguration":
-        # First read in the legacy configuration
-        legacy = LegacyConfiguration.load_from_path(config_file_path)
-        new_config: PersistentConfiguration = PersistentConfiguration.from_legacy(legacy) 
-
-        new_keys = new_config.__dict__.keys()
-
-        config_dict = new_config.__dict__
-
-        # Check to see if this config is actually "legacy"
-        if len([k for k, v in legacy.__dict__.items() if v is not None]) > 1:
-            config_dict["_legacy"] = legacy
-
-        if Path(config_file_path).exists():
-            if config_file_path.endswith('.json'):
-                with open(config_file_path, 'r') as config_file:
-                    cfg = json.load(config_file)
-
-                for key, value in cfg.items():
-                    if key in new_keys:
-                        config_dict[key] = value
-            else:
-                logging.info("Not reading new values from non-json config")
+    def load_from_path(cls, config_file_path: str, *, environment=True) -> "PersistentConfiguration":
+        path = config_store.absolute_path(config_file_path)
+        document, content = config_store.read_document(path)
+        if isinstance(environment, dict):
+            overrides = environment
+        elif environment:
+            overrides = environment_document()
         else:
-            logging.info("Not reading new values from non-existent config")
+            overrides = {}
+        loaded = cls.from_document(document, overrides)
+        loaded._file_path = str(path)
+        loaded._file_bytes = content
+        return loaded
 
-        # Now override with values from ENV
-        legacy_env = LegacyConfiguration.load_from_env()
-        config_env = PersistentConfiguration.from_legacy(legacy_env)
-        channel_overrides = {
-            "app_release_channel": legacy_env.lli_release_channel,
-            "faithlife_product_release_channel": legacy_env.logos_release_channel,
-        }
-        for k, v in config_env.__dict__.items():
-            if k == "_legacy":
-                continue
-            if k in channel_overrides and channel_overrides[k] is None:
-                continue
-            if v is not None:
-                config_dict[k] = v
-
-        retained_legacy = config_dict.get("_legacy") or LegacyConfiguration()
-        for name, value in legacy_env.__dict__.items():
-            if value is not None:
-                setattr(retained_legacy, name, value)
-        config_dict["_legacy"] = retained_legacy
-
-        return PersistentConfiguration(**config_dict)
+    @classmethod
+    def from_document(cls, document, overrides):
+        effective = config_store.apply_changes(document, overrides, "configuration")
+        public = {name for name in cls.__dataclass_fields__ if not name.startswith("_")}
+        legacy_names = LegacyConfiguration.__dataclass_fields__
+        loaded = cls(**{name: value for name, value in effective.items() if name in public})
+        loaded._legacy = LegacyConfiguration(**{
+            name: value for name, value in effective.items() if name in legacy_names
+        })
+        loaded._extra = {name: value for name, value in effective.items()
+                         if name not in public and name not in legacy_names}
+        loaded._saved = copy.deepcopy(document)
+        loaded._environment = copy.deepcopy(overrides)
+        loaded._baseline = loaded._as_dict()
+        return loaded
 
     @classmethod
     def from_legacy(cls, legacy: LegacyConfiguration) -> "PersistentConfiguration":
@@ -425,23 +400,13 @@ class PersistentConfiguration:
         )
 
     def _as_dict(self) -> dict[str, Any]:
-        # Copy the values into a flat structure for easy json dumping
-        output = copy.deepcopy(self.__dict__)
-        # Merge the legacy dictionary if present
+        output = copy.deepcopy(getattr(self, "_extra", {}))
         if self._legacy is not None:
-            output |= self._legacy.__dict__
-            # Don't save DIALOG into the config
-            if os.getenv("DIALOG"):
-                del output["DIALOG"]
-        
-        # Remove all keys starting with _ (to remove legacy from the saved blob)
-        for k in list(output.keys()):
-            if (
-                k.startswith("_")
-                or output[k] is None
-                or k == "CONFIG_FILE"
-            ):
-                del output[k]
+            output.update({name: value for name, value in self._legacy.__dict__.items()
+                           if not name.startswith("_") and value is not None})
+        output.update({name: getattr(self, name) for name in self.__dataclass_fields__ if not name.startswith("_")})
+        output = config_store.canonical(output, getattr(self, "_file_path", "configuration"))
+        output = {name: value for name, value in output.items() if value is not None}
         if self.install_dir is not None:
             path_fields = {
                 "wine_binary", "backup_dir", "WINE_EXE", "BACKUPDIR",
@@ -460,31 +425,24 @@ class PersistentConfiguration:
         return output
 
     @runtime.configuration_writer
-    def write_config(self, *, checked=False, config_file_path=None) -> None:
-        config_file_path = config_file_path or LegacyConfiguration.config_file_path()
+    def write_config(self, *, checked=False, config_file_path=None):
+        """Commit only changed fields, preserving saved values hidden by overrides."""
+        path = config_file_path or getattr(self, "_file_path", None) or LegacyConfiguration.config_file_path()
         output = self._as_dict()
-
-        def write_json_file(config_file_path: str) -> None:
-            logging.info(f"Writing config to {config_file_path}")
-            try:
-                os.makedirs(os.path.dirname(config_file_path), exist_ok=True)
-                with open(config_file_path, 'w') as config_file:
-                    # Write this into a string first to avoid partial writes
-                    # if encoding fails (which it shouldn't)
-                    json_str = json.dumps(output, indent=4, sort_keys=True)
-                    config_file.write(json_str)
-                    config_file.write('\n')
-            except IOError as e:
-                logging.error(f"Error writing to file {config_file_path}: {e}")
-                if checked:
-                    raise maintenance.MaintenanceError(f"Configuration could not be saved: {config_file_path}") from e
-                # Continue, the installer can still operate even if it fails to write.
-
-        if self.install_dir is not None:
-            portable_config_path = os.path.expanduser(self.install_dir + f"/{constants.BINARY_NAME}.json") 
-            write_json_file(portable_config_path)
-
-        write_json_file(config_file_path)
+        baseline = getattr(self, "_baseline", {})
+        changes = {name: output.get(name) for name in output.keys() | baseline.keys()
+                   if output.get(name) != baseline.get(name)}
+        saved = config_store.save(
+            path, changes, source_path=getattr(self, "_file_path", path),
+            source_bytes=getattr(self, "_file_bytes", None),
+            overrides=getattr(self, "_environment", {}),
+            expected=getattr(self, "_saved", None),
+        )
+        loaded = self.from_document(saved.document, getattr(self, "_environment", {}))
+        loaded._file_path = str(config_store.absolute_path(path))
+        loaded._file_bytes = config_store.encode(saved.document)
+        self.__dict__.update(loaded.__dict__)
+        return saved
 
 # Needed this logic outside this class too for before when the app is initialized
 def get_wine_prefix_path(install_dir: str) -> str:
@@ -577,31 +535,80 @@ class Config:
     # Start constants
     _curses_color_scheme_valid_values = ["System", "Light", "Dark", "Logos"]
 
-    # Singleton logic, this enforces that only one config object exists at a time.
-    def __new__(cls, *args, **kwargs) -> "Config":
-        if not hasattr(cls, '_instance'):
-            cls._instance = super(Config, cls).__new__(cls)
-        return cls._instance
-
     def __init__(self, ephemeral_config: EphemeralConfiguration, app) -> None:
         from ou_dedetai.app import App
         self.app: "App" = app
-        self._raw = runtime.recover_startup(
-            ephemeral_config, PersistentConfiguration.load_from_path(ephemeral_config.config_path),
-        )
         self._overrides = ephemeral_config
-
+        self._raw = PersistentConfiguration.load_from_path(
+            ephemeral_config.config_path, environment=getattr(ephemeral_config, "environment", True),
+        )
+        self.rebind(self._raw)
+        self.persistence_warning = ""
+        self.invalidate_context()
+        self._download_dir = self._user_download_dir = None
         self._network = self._create_network_requests_with_hook()
-        logging.debug("Current persistent config:")
-        for k, v in self._raw.__dict__.items():
-            logging.debug(f"{k}: {v}")
-        logging.debug("Current ephemeral config:")
-        for k, v in self._overrides.__dict__.items():
-            logging.debug(f"{k}: {v}")
-        logging.debug("Current network cache:")
-        for k, v in self._network._cache.__dict__.items():
-            logging.debug(f"{k}: {v}")
-        logging.debug("End config dump")
+
+    def rebind(self, raw):
+        """Publish one saved/effective context after save, reload or journal recovery."""
+        previous = self._overrides
+        path = getattr(raw, "_file_path", previous.config_path)
+        environment = getattr(previous, "environment", getattr(raw, "_environment", {}))
+        runtime_selection = getattr(previous, "runtime_selection", {})
+        if hasattr(raw, "_saved"):
+            transient = config_store.apply_changes(environment, runtime_selection, path)
+            rebound = PersistentConfiguration.from_document(raw._saved, transient)
+            rebound._file_path, rebound._file_bytes = raw._file_path, raw._file_bytes
+            raw = rebound
+        overrides = EphemeralConfiguration.project(
+            getattr(raw, "_saved", raw._as_dict()), path,
+            destination=getattr(previous, "config_destination", None) or path,
+            environment=environment,
+            cli_overrides=getattr(previous, "cli_overrides", {}),
+            runtime_selection=runtime_selection,
+        )
+        for name in ("assume_yes", "quiet", "agreed_to_faithlife_terms", "app_run_as_root_permitted", "wine_args"):
+            if hasattr(previous, name):
+                setattr(overrides, name, getattr(previous, name))
+        self._raw, self._overrides = raw, overrides
+        self.invalidate_context()
+
+    def invalidate_context(self):
+        for name in (
+            "_wine_user", "_wine_user_identity", "_wine64_path", "_wine64_identity",
+            "_wine_output_encoding", "_installed_faithlife_product_release", "_installed_release_identity",
+            "_wine_binary_files", "_wine_appimage_files", "_recommended_wine_context", "_recommended_wine_status",
+        ):
+            setattr(self, name, None)
+
+    def _change(self, *, legacy_changes=None, **changes):
+        """Keep in-memory edits and their disk patch inside the same writer admission."""
+        try:
+            with runtime.configuration_lock():
+                previous = {name: getattr(self._raw, name) for name in changes}
+                previous_legacy = copy.deepcopy(self._raw._legacy)
+                for name, value in changes.items():
+                    setattr(self._raw, name, value)
+                if legacy_changes:
+                    if self._raw._legacy is None:
+                        self._raw._legacy = LegacyConfiguration()
+                    for name, value in legacy_changes.items():
+                        setattr(self._raw._legacy, name, value)
+                try:
+                    self._write(checked=True)
+                except BaseException:
+                    for name, value in previous.items():
+                        setattr(self._raw, name, value)
+                    self._raw._legacy = previous_legacy
+                    raise
+                self.invalidate_context()
+        except OSError as error:
+            raise config_store.ConfigurationError("Configuration write admission failed") from error
+        warning = getattr(self, "persistence_warning", "")
+        if warning:
+            try:
+                self.app.status(warning)
+            except Exception:
+                logging.exception("Configuration committed, but its warning could not be displayed")
 
     def _create_network_requests_with_hook(self) -> network.NetworkRequests:
         def _network_cache_hook():
@@ -620,26 +627,27 @@ class Config:
         dependent_parameters: Optional[list[str]] = None
     ) -> str:  
         if not getattr(self._raw, parameter):
-            if dependent_parameters is not None:
-                for dependent_config_key in dependent_parameters:
-                    setattr(self._raw, dependent_config_key, None)
             answer = self.app.ask(question, options)
-            # Use the setter on this class if found, otherwise set in self._user
-            if getattr(Config, parameter) and getattr(Config, parameter).fset is not None:
+            if getattr(Config, parameter, None) and getattr(Config, parameter).fset is not None:
                 getattr(Config, parameter).fset(self, answer)
             else:
-                setattr(self._raw, parameter, answer)
-                self._write()
+                changes = {name: None for name in dependent_parameters or []}
+                changes[parameter] = answer
+                self._change(**changes)
         # parameter given should be a string
         return str(getattr(self._raw, parameter))
 
     def _write(self, *, checked=False) -> None:
-        """Writes configuration to file and lets the app know something changed"""
-        if checked:
-            self._raw.write_config(checked=True, config_file_path=self._overrides.config_path)
-        else:
-            self._raw.write_config()
+        """Save the selected profile and report a committed portable-copy failure."""
+        destination = getattr(self._overrides, "config_destination", None) or self._overrides.config_path
+        saved = self._raw.write_config(checked=True, config_file_path=destination)
+        self._overrides.config_path = destination
+        if isinstance(self._overrides, EphemeralConfiguration):
+            self.rebind(self._raw)
+        self.persistence_warning = saved.warning
         self.app._config_updated_event.set()
+        if saved.warning:
+            logging.warning(saved.warning)
 
     def _relative_from_install_dir(self, path: Path | str) -> str:
         """Store descendants relatively without changing external path identity."""
@@ -658,20 +666,24 @@ class Config:
         return str(paths.absolute_from_install(path, self.install_dir))
 
     def reload(self):
-        """Re-loads the configuration from disk"""
-        loaded = PersistentConfiguration.load_from_path(self._overrides.config_path)
-        with maintenance.change_selection(self, loaded.install_dir):
-            self._raw = loaded
-            self._network = self._create_network_requests_with_hook()
-            self._logos_exe = self._download_dir = self._wine_output_encoding = None
-            self._installed_faithlife_product_release = self._wine_binary_files = None
-            self._wine_appimage_files = self._wine_user = None
-            self._wine64_path = self._user_download_dir = None
-            self.app._config_updated_event.set()
+        """Reload the bound profile without journal recovery or unrelated discovery."""
+        path = self._overrides.config_path
+        environment = getattr(self._overrides, "environment", True)
+        loaded = PersistentConfiguration.load_from_path(path, environment=environment)
+        with maintenance.change_selection(self, loaded.install_dir, document=loaded._as_dict()):
+            with runtime.configuration_lock():
+                if self._overrides.config_path != path:
+                    raise maintenance.MaintenanceBusy("Configuration source changed during reload. Retry it")
+                current = PersistentConfiguration.load_from_path(path, environment=environment)
+                if config_store.selection_identity(current._saved) != config_store.selection_identity(loaded._saved):
+                    raise maintenance.MaintenanceBusy("Installation changed during reload. Retry after it settles")
+                self.rebind(current)
+                self._network = self._create_network_requests_with_hook()
+                self.app._config_updated_event.set()
 
     @property
     def config_file_path(self) -> str:
-        return LegacyConfiguration.config_file_path()
+        return self._overrides.config_path
 
     @property
     def faithlife_product(self) -> str:
@@ -691,33 +703,27 @@ class Config:
     def faithlife_product(self, value: Optional[str]):
         if self._raw.faithlife_product != value:
             with maintenance.change_selection(self):
-                self._raw.faithlife_product = value
-                self.faithlife_product_version = None
-                self._write()
+                changes = dict(faithlife_product=value, faithlife_product_version=None, faithlife_product_release=None)
+                if self._overrides.install_dir is None:
+                    changes["install_dir"] = None
+                self._change(**changes)
 
     @property
     def faithlife_product_version(self) -> str:
-        if self._overrides.faithlife_product_version is not None:
+        if getattr(self._overrides, "faithlife_product_version", None) is not None:
             return self._overrides.faithlife_product_version
         if self._raw.faithlife_product_version is not None:
             return self._raw.faithlife_product_version
-        # The only version we presently support is 10 - so set it.
-        self.faithlife_product_version = "10"
-        return self.faithlife_product_version
-        # Keep following in case we need to prompt for additional versions in the future
-        #question = f"Which version of {self.faithlife_product} should the script install?: "
-        #options = constants.FAITHLIFE_PRODUCT_VERSIONS
-        #return self._ask_if_not_found("faithlife_product_version", question, options, [])
+        return "10"
 
     @faithlife_product_version.setter
     def faithlife_product_version(self, value: Optional[str]):
         if self._raw.faithlife_product_version != value:
             with maintenance.change_selection(self):
-                self._raw.faithlife_product_version = value
-                self._raw.faithlife_product_release = None
+                changes = dict(faithlife_product_version=value, faithlife_product_release=None)
                 if self._overrides.install_dir is None:
-                    self._raw.install_dir = None
-                self._write()
+                    changes["install_dir"] = None
+                self._change(**changes)
 
     @property
     def faithlife_product_releases(self) -> list[str]:
@@ -793,14 +799,7 @@ class Config:
             if self._overrides.install_dir or self._raw.install_dir:
                 context = admission.enter_context(maintenance.configured(self.app))
                 admission.enter_context(maintenance.use(context))
-            previous = self._raw.faithlife_product_release
-            self._raw.faithlife_product_release = value
-            try:
-                self._write(checked=True)
-            except maintenance.MaintenanceError:
-                self._raw.faithlife_product_release = previous
-                raise
-            self._wine_binary_files = None
+            self._change(faithlife_product_release=value)
 
     @property
     def faithlife_product_icon_path(self) -> str:
@@ -816,12 +815,9 @@ class Config:
     @faithlife_product_logging.setter
     def faithlife_product_logging(self, value: bool):
         if self._raw.faithlife_product_logging != value:
-            previous = self._raw.faithlife_product_logging
-            self._raw.faithlife_product_logging = value
             try:
-                self._write(checked=True)
+                self._change(faithlife_product_logging=value)
             except maintenance.MaintenanceError as error:
-                self._raw.faithlife_product_logging = previous
                 raise maintenance.MaintenanceError(
                     f"Runtime logging changed, but its setting could not be saved: {error}"
                 ) from error
@@ -874,12 +870,10 @@ class Config:
     @install_dir.setter
     def install_dir(self, value: Optional[str | Path]):
         if value is not None:
-            value = str(Path(value).absolute())
+            value = str(config_store.absolute_path(value))
         if self._raw.install_dir != value:
             with maintenance.change_selection(self, value):
-                self._raw.install_dir = value
-                self._wine_appimage_files = None
-                self._write()
+                self._change(install_dir=value)
 
     @property
     # This used to be called APPDIR_BINDIR
@@ -988,12 +982,18 @@ class Config:
         relative = self._relative_from_install_dir(value)
 
         if self._raw.wine_binary != relative:
-            self._raw.wine_binary = relative
-            # Reset dependents
-            self._raw.wine_binary_code = None
-            self._overrides.wine_appimage_path = None
-            self._wine64_path = None
-            self._write()
+            previous_selection = getattr(self._overrides, "runtime_selection", {})
+            if hasattr(self._overrides, "runtime_selection"):
+                self._overrides.runtime_selection = {}
+            try:
+                self._change(
+                    wine_binary=relative, wine_binary_code=None,
+                    legacy_changes={"SELECTED_APPIMAGE_FILENAME": None},
+                )
+            except BaseException:
+                if hasattr(self._overrides, "runtime_selection"):
+                    self._overrides.runtime_selection = previous_selection
+                raise
 
     @property
     def wine_binary_files(self) -> list[str]:
@@ -1017,8 +1017,7 @@ class Config:
         
         One of: Recommended, AppImage, System, Proton, PlayOnLinux, Custom"""
         if self._raw.wine_binary_code is None:
-            self._raw.wine_binary_code = utils.get_winebin_code_and_desc(self.app, self.wine_binary)[0]
-            self._write()
+            self._change(wine_binary_code=utils.get_winebin_code_and_desc(self.app, self.wine_binary)[0])
         return self._raw.wine_binary_code
 
     @property
@@ -1074,6 +1073,9 @@ class Config:
     @property
     # This used to be called WINESERVER_EXE
     def wineserver_binary(self) -> str:
+        override = getattr(self._overrides, "wineserver_binary", None)
+        if override is not None:
+            return self._absolute_from_install_dir(override)
         return str(Path(self.wine_binary).parent / 'wineserver')
 
     # FIXME: seems like the logic around wine appimages can be simplified
@@ -1097,6 +1099,8 @@ class Config:
             value = str(value)
         if self._overrides.wine_appimage_path != value:
             self._overrides.wine_appimage_path = value
+            if hasattr(self._overrides, "cli_overrides"):
+                self._overrides.cli_overrides["wine_appimage_path"] = value
             # Reset dependents
             self._raw.wine_binary_code = None
             # NOTE: we don't save this persistently, it's assumed
@@ -1196,24 +1200,18 @@ class Config:
             new_channel = "beta"
         else:
             new_channel = "stable"
-        self._raw.faithlife_product_release_channel = new_channel
-        self._write()
+        self._change(faithlife_product_release_channel=new_channel)
     
     def toggle_installer_release_channel(self):
         new_channel = "beta" if self._raw.app_release_channel == "stable" else "stable"
-        previous = self._raw.app_release_channel
-        self._raw.app_release_channel = new_channel
-        try:
-            self._write(checked=True)
-        except BaseException:
-            self._raw.app_release_channel = previous
-            raise
+        self._change(app_release_channel=new_channel)
     
     @property
     def backup_dir(self) -> Path:
         question = "New or existing folder to store backups in: "
         options = [PROMPT_OPTION_DIRECTORY]
-        return Path(self._ask_if_not_found("backup_dir", question, options))
+        value = self._ask_if_not_found("backup_dir", question, options)
+        return Path(self._absolute_from_install_dir(value))
     
     @property
     def curses_color_scheme(self) -> str:
@@ -1229,8 +1227,7 @@ class Config:
                 "Invalid curses theme, expected one of: "
                 f"{", ".join(self._curses_color_scheme_valid_values)} but got: {value}"
             )
-        self._raw.curses_color_scheme = value
-        self._write()
+        self._change(curses_color_scheme=value)
     
     def cycle_curses_color_scheme(self):
         new_index = self._curses_color_scheme_valid_values.index(self.curses_color_scheme) + 1
@@ -1256,10 +1253,13 @@ class Config:
         if (
             not self._raw.install_dir
             or not self._raw.faithlife_product 
-            or not self._raw.faithlife_product_version
         ):
             return None
         # Cache a successful result (as it goes out to the fs)
+        identity = self.wine_prefix, self._raw.faithlife_product
+        if getattr(self, "_wine_user_identity", None) != identity:
+            self._wine_user = None
+            self._wine_user_identity = identity
         if not self._wine_user:
             self._wine_user = get_wine_user(self.wine_prefix)
         return self._wine_user
@@ -1315,6 +1315,8 @@ class Config:
     @skip_install_system_dependencies.setter
     def skip_install_system_dependencies(self, val: bool):
         self._overrides.install_dependencies_skip = val
+        if hasattr(self._overrides, "cli_overrides"):
+            self._overrides.cli_overrides["install_dependencies_skip"] = val
 
     @property
     def download_dir(self) -> str:
@@ -1333,6 +1335,10 @@ class Config:
     def installed_faithlife_product_release(self) -> Optional[str]:
         if self._raw.install_dir is None:
             return None
+        identity = self.wine_prefix, self._raw.faithlife_product, self.wine_user
+        if getattr(self, "_installed_release_identity", None) != identity:
+            self._installed_faithlife_product_release = None
+            self._installed_release_identity = identity
         if self._installed_faithlife_product_release is None:
             self._installed_faithlife_product_release = utils.get_current_logos_version(self._logos_appdata_dir)
         return self._installed_faithlife_product_release

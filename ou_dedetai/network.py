@@ -80,7 +80,9 @@ class CachedRequests:
 
     @classmethod
     def load(cls):
-        paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
+        cache = Path(constants.CACHE_DIR)
+        if cache.exists() or cache.is_symlink():
+            paths.validate_cache_directory(cache, constants.CACHE_BASE)
         path = Path(constants.NETWORK_CACHE_PATH)
         if path.exists():
             if path.is_symlink() or not path.is_file():

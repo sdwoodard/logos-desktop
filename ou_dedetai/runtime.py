@@ -2,7 +2,6 @@
 
 from base64 import b64decode, b64encode
 from contextlib import contextmanager
-import copy
 from functools import wraps
 import fcntl
 import hashlib
@@ -32,6 +31,9 @@ def configuration_lock():
         )
         descriptor = os.open(root / "configuration.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                raise maintenance.MaintenanceError("Unsafe configuration lock")
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             _local.writing = True
             yield
@@ -45,9 +47,6 @@ def configuration_writer(function):
     def write(*args, **kwargs):
         try:
             with configuration_lock():
-                install = args[0].install_dir
-                if install and os.path.lexists(selection_state(Path(install)) / "runtime.json"):
-                    raise maintenance.RecoveryRequired("Recover the pending runtime selection before saving settings")
                 return function(*args, **kwargs)
         except OSError as error:
             if kwargs.get("checked"):
@@ -56,10 +55,15 @@ def configuration_writer(function):
     return write
 
 
-def selection_state(install):
+def selection_state(install, *, create=True):
     key = hashlib.sha256(os.fsencode(install.resolve())).hexdigest()
     base = Path(constants.STATE_DIR).expanduser().parent / "logos-desktop/runtime-selection"
-    return maintenance.private_directory(base / key)
+    path = base / key
+    return maintenance.private_directory(path) if create else path
+
+
+def pending(install):
+    return os.path.lexists(selection_state(Path(install), create=False) / "runtime.json")
 
 
 @contextmanager
@@ -97,6 +101,11 @@ def _replace_bytes(path, content, mode=0o600):
             os.fchmod(output.fileno(), mode)
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -120,10 +129,13 @@ def _replace_link(path, target):
         os.replace(temporary, path)
 
 
-def _restore(snapshots):
+def _restore(snapshots, proposed):
+    expected = {saved["path"]: saved for saved in proposed}
     for saved in reversed(snapshots):
         path = Path(saved["path"])
         _safe_target(path)
+        if _snapshot(path) not in (saved, expected[saved["path"]]):
+            raise maintenance.RecoveryRequired(f"Runtime recovery target changed. Preserved without overwrite: {path}")
         if saved.get("absent"):
             path.unlink(missing_ok=True)
         elif "link" in saved:
@@ -135,7 +147,8 @@ def _restore(snapshots):
 def _targets(app):
     conf = app.conf
     bindir = Path(conf.installer_binary_dir)
-    configs = [Path(conf.install_dir) / f"{constants.BINARY_NAME}.json", Path(conf._overrides.config_path)]
+    destination = getattr(conf._overrides, "config_destination", None) or conf._overrides.config_path
+    configs = [Path(conf.install_dir) / f"{constants.BINARY_NAME}.json", Path(destination)]
     link = conf.wine_appimage_link_file_name
     if Path(link).name != link or link in artifacts.COMPANIONS or link in (".", "..", ""):
         raise artifacts.ArtifactError("Invalid selected runtime link name")
@@ -155,10 +168,11 @@ def _safe_target(path):
             raise artifacts.ArtifactError("Runtime activation needs an owned nonshared parent")
 
 
-@maintenance.uses_installation
 def recover(app):
     """Restore a previous activation before admitting another runtime consumer."""
-    with activation_guard(app, exclusive=True) as context, configuration_lock():
+    with maintenance.configured(app) as selected, maintenance.use(selected, recovery=True), activation_guard(
+        app, exclusive=True,
+    ) as context, configuration_lock():
         _recover_locked(app, context)
 
 
@@ -177,13 +191,32 @@ def _recover_locked(app, context):
             saved["path"] for saved in snapshots
         } != allowed:
             raise ValueError("Recovery context mismatch")
-        _restore(snapshots)
+        source = Path(record.get("source", app.conf._overrides.config_path))
+        destination = Path(getattr(app.conf._overrides, "config_destination", None) or app.conf._overrides.config_path)
+        if source != destination:
+            allowed_sources = {Path(app.conf._overrides.config_path)}
+            if destination == Path(constants.DEFAULT_CONFIG_PATH):
+                allowed_sources.update(Path(path) for path in constants.LEGACY_CONFIG_FILES)
+            unchanged = hashlib.sha256(source.read_bytes()).hexdigest() == record["source_hash"]
+            if source not in allowed_sources or not unchanged:
+                raise ValueError("Migration source changed during runtime recovery")
+        proposed = record["next"]
+        if {saved["path"] for saved in proposed} != allowed or len(proposed) != len(allowed):
+            raise ValueError("Recovery publication mismatch")
+        _restore(snapshots, proposed)
         from .config import PersistentConfiguration
 
-        app.conf._raw = PersistentConfiguration.load_from_path(app.conf._overrides.config_path)
+        app.conf._raw = PersistentConfiguration.load_from_path(
+            str(source), environment=getattr(app.conf._overrides, "environment", True),
+        )
+        app.conf._overrides.config_path = str(source)
+        if callable(getattr(app.conf, "rebind", None)):
+            app.conf.rebind(app.conf._raw)
         app.conf._overrides.wine_appimage_path = record.get("override")
         for name in ("_wine64_path", "_wine64_identity", "_wine_binary_files", "_wine_appimage_files"):
             setattr(app.conf, name, None)
+        if callable(getattr(app.conf, "invalidate_context", None)):
+            app.conf.invalidate_context()
         journal.unlink()
     except (OSError, ValueError, KeyError, TypeError, artifacts.ArtifactError) as error:
         raise maintenance.RecoveryRequired(f"Runtime recovery failed. Preserved record: {journal}") from error
@@ -197,7 +230,7 @@ def recover_startup(overrides, persistent):
     if not install:
         return persistent
     install = Path(install)
-    if not os.path.lexists(selection_state(install) / "runtime.json"):
+    if not pending(install):
         return persistent
     conf = SimpleNamespace(
         _raw=persistent, _overrides=overrides, install_dir=str(install),
@@ -230,56 +263,83 @@ def activate(app, accepted):
             _safe_target(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             _safe_target(path)
-        snapshots = [_snapshot(path) for path in (*links, *configs)]
-        journal = selection_state(context.install) / "runtime.json"
-        override = conf._overrides.wine_appimage_path
-        record = {"install": str(context.install), "previous": snapshots,
-                  "override": str(override) if override is not None else None}
-        old_binary, old_code = conf._raw.wine_binary, conf._raw.wine_binary_code
-        fields = ("_wine64_path", "_wine64_identity", "_wine_binary_files", "_wine_appimage_files")
-        old_cache = {name: getattr(conf, name, None) for name in fields}
-        old_override = conf._overrides.wine_appimage_path
-        from .config import LegacyConfiguration
+        from .config import PersistentConfiguration
+        from . import config_store
 
-        proposed_raw = copy.deepcopy(conf._raw)
-        proposed_raw.wine_binary = paths.relative_to_install(accepted.path, conf.install_dir)
-        proposed_raw.wine_binary_code = "AppImage"
-        legacy = proposed_raw._legacy or LegacyConfiguration()
-        legacy.WINE_EXE = proposed_raw.wine_binary
-        legacy.WINEBIN_CODE = "AppImage"
-        legacy.SELECTED_APPIMAGE_FILENAME = None
-        legacy.WINEPREFIX = str(context.prefix)
-        legacy.APPDIR_BINDIR = str(conf.installer_binary_dir)
-        proposed_raw._legacy = legacy
-        proposed = proposed_raw._as_dict()
-        content = (json.dumps(proposed, indent=4, sort_keys=True) + "\n").encode()
-        _replace_bytes(journal, json.dumps(record).encode())
-        try:
-            selected = links[0]
-            _replace_link(selected, str(accepted.path))
-            for alias in links[1:]:
-                _replace_link(alias, selected.name)
-            for config in configs:
-                _replace_bytes(config, content)
-            journal.unlink()
-        except BaseException as error:
+        source = conf._overrides.config_path
+        destination = getattr(conf._overrides, "config_destination", None) or source
+        changes = {
+            "install_dir": str(context.install), "faithlife_product": context.product,
+            "faithlife_product_version": conf.faithlife_product_version,
+            "wine_binary": paths.relative_to_install(accepted.path, conf.install_dir), "wine_binary_code": "AppImage",
+            "SELECTED_APPIMAGE_FILENAME": None, "WINEPREFIX": str(context.prefix),
+            "APPDIR_BINDIR": str(conf.installer_binary_dir),
+        }
+        with config_store.prepare(
+            destination, changes, source_path=source, source_bytes=getattr(conf._raw, "_file_bytes", None),
+            expected=getattr(conf._raw, "_saved", None),
+        ) as prepared:
+            auxiliary = {target.path for target, _, _ in prepared.backups}
+            if auxiliary.intersection(links):
+                raise artifacts.ArtifactError("Runtime links conflict with configuration recovery copies")
+            prepared.preserve_previous()
+            snapshots = [_snapshot(path) for path in (*links, *configs)]
+            journal = selection_state(context.install) / "runtime.json"
+            override = conf._overrides.wine_appimage_path
+            record = {
+                "install": str(context.install), "previous": snapshots,
+                "override": str(override) if override is not None else None, "source": source,
+                "next": [
+                    {"path": str(links[0]), "link": str(accepted.path)},
+                    *({"path": str(alias), "link": links[0].name} for alias in links[1:]),
+                    *({"path": str(path), "content": b64encode(prepared.content).decode(), "mode": 0o600}
+                      for path in configs),
+                ],
+            }
+            if source != destination:
+                record["source_hash"] = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+            _replace_bytes(journal, json.dumps(record).encode())
             try:
-                _restore(snapshots)
-                journal.unlink(missing_ok=True)
-            except (OSError, ValueError) as rollback_error:
-                raise maintenance.RecoveryRequired(
-                    f"Runtime activation failed. Recovery record retained at {journal}"
-                ) from rollback_error
-            raise artifacts.ArtifactError("Runtime activation failed. Previous selection restored") from error
-        finally:
-            conf._raw.wine_binary, conf._raw.wine_binary_code = old_binary, old_code
-            conf._overrides.wine_appimage_path = old_override
-            for name, value in old_cache.items():
-                setattr(conf, name, value)
-        conf._raw = proposed_raw
+                prepared.validate()
+                selected = links[0]
+                _replace_link(selected, str(accepted.path))
+                for alias in links[1:]:
+                    _replace_link(alias, selected.name)
+                for config in configs:
+                    if prepared.source is not None:
+                        prepared.source.validate()
+                    next(target for target in prepared.targets if target.path == config).validate()
+                    _replace_bytes(config, prepared.content)
+                journal.unlink()
+            except BaseException as error:
+                try:
+                    _restore(snapshots, record["next"])
+                    journal.unlink(missing_ok=True)
+                except (OSError, ValueError, maintenance.MaintenanceError) as rollback_error:
+                    raise maintenance.RecoveryRequired(
+                        f"Runtime activation failed. Recovery record retained at {journal}"
+                    ) from rollback_error
+                raise artifacts.ArtifactError("Runtime activation failed. Previous selection restored") from error
+        conf._overrides.config_path = destination
+        if hasattr(conf._overrides, "config_destination"):
+            conf._overrides.config_destination = destination
+        if hasattr(conf._overrides, "cli_overrides"):
+            conf._overrides.cli_overrides.pop("wine_appimage_path", None)
+        if hasattr(conf._overrides, "runtime_selection"):
+            conf._overrides.runtime_selection = {
+                "wine_binary": changes["wine_binary"], "wine_binary_code": "AppImage",
+                "SELECTED_APPIMAGE_FILENAME": None,
+            }
+        conf._raw = PersistentConfiguration.load_from_path(
+            destination, environment=getattr(conf._overrides, "environment", True),
+        )
+        if callable(getattr(conf, "rebind", None)):
+            conf.rebind(conf._raw)
         conf._overrides.wine_appimage_path = None
-        for name in fields:
+        for name in ("_wine64_path", "_wine64_identity", "_wine_binary_files", "_wine_appimage_files"):
             setattr(conf, name, None)
+        if callable(getattr(conf, "invalidate_context", None)):
+            conf.invalidate_context()
         app._config_updated_event.set()
     return accepted
 

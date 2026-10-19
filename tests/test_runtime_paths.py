@@ -47,7 +47,7 @@ class TestRuntimePaths(unittest.TestCase):
                     self.assertEqual(config._relative_from_install_dir(original), stored)
                     config.wine_binary = original
                     self.assertEqual(config._raw._as_dict()["wine_binary"], stored)
-                    reloaded = PersistentConfiguration(**json.loads(json.dumps(config._raw._as_dict())))
+                    reloaded = PersistentConfiguration.from_document(json.loads(json.dumps(config._raw._as_dict())), {})
                     self.assertEqual(reloaded.wine_binary, stored)
             config._raw.faithlife_product_release = str(install / "not-a-path-field")
             self.assertEqual(config._raw._as_dict()["faithlife_product_release"], str(install / "not-a-path-field"))

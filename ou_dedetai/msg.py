@@ -62,7 +62,7 @@ def get_log_level_name(level):
     return name
 
 
-def initialize_logging():
+def initialize_logging(app_log_path=None):
     '''
     Log levels:
         Level       Value   Description
@@ -74,7 +74,7 @@ def initialize_logging():
         NOTSET      0       all events are handled
     '''
 
-    app_log_path = constants.DEFAULT_APP_LOG_PATH
+    app_log_path = app_log_path or constants.DEFAULT_APP_LOG_PATH
     # Ensure the application log's directory exists
     os.makedirs(os.path.dirname(app_log_path), exist_ok=True)
 
@@ -106,13 +106,16 @@ def initialize_logging():
         stderr_h,
     ]
 
-    # Set initial config.
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=handlers,
-    )
+    logger = logging.getLogger()
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    for previous in list(logger.handlers):
+        if previous.name in ("logfile", "terminal"):
+            logger.removeHandler(previous)
+            previous.close()
+    logger.setLevel(logging.DEBUG)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     logging.debug(f"Installer log file: {app_log_path}")
 
 
