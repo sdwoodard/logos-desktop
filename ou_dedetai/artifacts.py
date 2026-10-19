@@ -39,6 +39,15 @@ class ArtifactError(RuntimeError):
     """The operation did not produce bytes acceptable to its consumer."""
 
 
+class MetadataError(ArtifactError):
+    """Metadata is unavailable without implying a successfully empty feed."""
+
+    def __init__(self, message, status="offline", retry_after=0):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
 @dataclass(frozen=True)
 class Digest:
     algorithm: str
@@ -153,12 +162,9 @@ def _secure_response(response):
 
 
 def get_bytes(url):
-    try:
-        with requests.get(url, timeout=NETWORK_TIMEOUT, headers={"Accept-Encoding": "identity"}) as response:
-            require_response(response, url)
-            return response.content
-    except requests.RequestException as error:
-        raise ArtifactError(f"Request failed for {safe_url(url)} ({type(error).__name__})") from None
+    from . import metadata
+
+    return metadata.request(url)
 
 
 def head_metadata(url):

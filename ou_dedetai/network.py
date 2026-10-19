@@ -1,20 +1,31 @@
 """Release metadata and application-facing artifact acquisition."""
 
 from base64 import b64encode
+from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
 import json
 import logging
 import os
 from pathlib import Path
-import shutil
-import sys
+import re
 import tempfile
+import threading
 import time
 from typing import Callable, Optional
 from xml.etree import ElementTree as ET
 
-from . import artifacts, constants, paths, utils
+from . import artifacts, constants, paths, releases
+from .releases import GithubSoftwareReleasesInfo, SoftwareReleaseInfo as SoftwareReleaseInfo
+
+
+@dataclass(frozen=True)
+class ProductLookup:
+    versions: tuple[str, ...] = ()
+    status: str = "unchecked"
+    message: str = "Product releases have not been checked"
+    checked: float | None = None
+    stale: bool = False
+    retry_after: float = 0
 
 
 class FileProps:
@@ -54,19 +65,6 @@ class UrlProps:
 
 
 @dataclass
-class SoftwareReleaseInfo:
-    version: str
-    download_url: str
-    digest: artifacts.Digest | None = None
-
-
-@dataclass
-class GithubSoftwareReleasesInfo:
-    latest: Optional[SoftwareReleaseInfo]
-    pre_release: Optional[SoftwareReleaseInfo]
-
-
-@dataclass
 class CachedRequests:
     faithlife_product_releases: dict = field(default_factory=dict)
     repository_latest_version: dict = field(default_factory=dict)
@@ -74,6 +72,9 @@ class CachedRequests:
     repository_latest_pre_release_version: dict = field(default_factory=dict)
     repository_latest_pre_release_url: dict = field(default_factory=dict)
     repository_digest: dict = field(default_factory=dict)
+    release_entries: dict = field(default_factory=dict)
+    faithlife_checked: dict = field(default_factory=dict)
+    product_entries: dict = field(default_factory=dict)
     last_updated: Optional[float] = None
     _update_hook: Optional[Callable[[], None]] = None
 
@@ -98,7 +99,8 @@ class CachedRequests:
                             values.pop(key, None)
                     if type(values.get("last_updated")) not in (int, float):
                         values.pop("last_updated", None)
-                    for key in values.keys() - {"last_updated", "faithlife_product_releases"}:
+                    for key in values.keys() - {"last_updated", "faithlife_product_releases",
+                                                 "release_entries", "faithlife_checked", "product_entries"}:
                         values[key] = {name: value for name, value in values[key].items()
                                        if isinstance(name, str) and isinstance(value, str) and value}
                     release_cache = {}
@@ -121,7 +123,7 @@ class CachedRequests:
     def _as_dict(self):
         return {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
 
-    def _write(self):
+    def _write(self, content=None):
         path = Path(constants.NETWORK_CACHE_PATH)
         cache = paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE)
         if path.parent != cache:
@@ -130,7 +132,7 @@ class CachedRequests:
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=cache, delete=False) as output:
                 temporary = Path(output.name)
-                json.dump(self._as_dict(), output, indent=4, sort_keys=True)
+                json.dump(self._as_dict() if content is None else content, output, indent=4, sort_keys=True)
                 output.write("\n")
             os.replace(temporary, path)
         finally:
@@ -145,89 +147,217 @@ class CachedRequests:
         )
 
     def ensure_fresh(self, force=False):
-        if force or not self._is_fresh():
-            self = CachedRequests(last_updated=time.time())
-            self._write()
+        # Entry freshness is checked by readers without discarding offline data.
         return self
 
 
 class NetworkRequests:
     def __init__(self, force_clean=None, hook=None):
-        self._cache = CachedRequests.load().ensure_fresh(force=force_clean or False)
+        load_error = ""
+        try:
+            self._cache = CachedRequests.load()
+        except (OSError, ValueError) as error:
+            self._cache = CachedRequests()
+            load_error = f"Could not read release cache ({type(error).__name__})"
+            logging.warning(load_error)
         self._cache._update_hook = hook
+        self._lock = threading.RLock()
+        self._write_lock = threading.Lock()
+        self._revisions = {}
+        self._inflight = {}
+        self._force = bool(force_clean)
+        self._forced = set()
+        self.persistence_error = load_error
 
     def faithlife_product_releases(self, product, version, channel):
-        channels = self._cache.faithlife_product_releases.setdefault(product, {}).setdefault(version, {})
-        if not channels.get(channel):
-            channels[channel] = _get_faithlife_product_releases(product, version, channel)
-            self._cache._write()
-        return channels[channel]
+        lookup = self.product_release(product, version, channel)
+        if lookup.status not in ("ok", "empty") or lookup.stale:
+            raise artifacts.ArtifactError(lookup.message)
+        return list(lookup.versions)
 
-    def wine_appimage_versions(self):
-        return self._repo_version("FaithLife-Community/wine-appimages")
-
-    def _repo_version(self, repository):
-        cache = self._cache
-
-        def cached(version, url):
-            if repository not in version or repository not in url:
-                return None
-            digest = cache.repository_digest.get(url[repository])
-            parsed = _release_digest(digest)
-            return SoftwareReleaseInfo(version[repository], url[repository], parsed)
-
-        output = GithubSoftwareReleasesInfo(
-            cached(cache.repository_latest_version, cache.repository_latest_url),
-            cached(cache.repository_latest_pre_release_version, cache.repository_latest_pre_release_url),
-        )
-        if output.latest is None and output.pre_release is None:
-            output = _get_release_data(repository)
-            for release, versions, urls in (
-                (output.latest, cache.repository_latest_version, cache.repository_latest_url),
-                (output.pre_release, cache.repository_latest_pre_release_version,
-                 cache.repository_latest_pre_release_url),
+    def product_release(self, product, version, channel, *, force=False, refresh=True):
+        key = f"feed:{product}:{version}:{channel}"
+        with self._lock:
+            entry = self._cache.product_entries.get(key, {})
+            entry = entry if isinstance(entry, dict) else {}
+            versions = entry.get("versions", [])
+            if not isinstance(versions, list) or not all(
+                isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d+){1,3}", value) for value in versions
             ):
-                if release is not None:
-                    versions[repository] = release.version
-                    urls[repository] = release.download_url
-                    if release.digest is not None:
-                        cache.repository_digest[release.download_url] = (
-                            f"{release.digest.algorithm}:{release.digest.value}"
-                        )
-            cache._write()
-        return output
+                entry, versions = {}, []
+            checked, fresh, retry, status = self._freshness(entry, empty=not versions)
+            revision = self._revisions.get(key, 0)
+            needed = (force or (self._force and key not in self._forced) or not fresh
+                      or status not in ("ok", "empty", "unchecked")) and time.time() >= retry
+
+        if refresh and needed:
+            def load():
+                try:
+                    values = _fetch_faithlife_product_releases(product, version, channel)
+                    return ProductLookup(tuple(values), "ok" if values else "empty", "No product releases available")
+                except artifacts.MetadataError as error:
+                    return ProductLookup(status=error.status, message=str(error), retry_after=error.retry_after)
+                except artifacts.ArtifactError as error:
+                    return ProductLookup(status="malformed", message=str(error))
+
+            def publish(received):
+                previous = self._cache.product_entries.get(key, {})
+                previous = previous if isinstance(previous, dict) else {}
+                if received.status in ("ok", "empty"):
+                    previous = {"versions": list(received.versions), "checked": time.time(), "retry": 0,
+                                "status": received.status, "message": received.message}
+                else:
+                    previous = dict(previous, status=received.status, message=received.message,
+                                    retry=time.time() + max(60, received.retry_after))
+                self._cache.product_entries[key] = previous
+
+            self._refresh(key, revision, load, publish)
+            return self.product_release(product, version, channel, refresh=False)
+        message = entry.get("message", "Product release information is unavailable")
+        return ProductLookup(tuple(versions), status, message,
+                             checked, checked is not None and (not fresh or status not in ("ok", "empty")))
+
+    def wine_appimage_versions(self, *, refresh=True):
+        return self._repo_version("FaithLife-Community/wine-appimages", refresh=refresh)
+
+    def _persist(self):
+        try:
+            with self._write_lock:
+                with self._lock:
+                    content = deepcopy(self._cache._as_dict())
+                self._cache._write(content)
+            self.persistence_error = ""
+        except (OSError, ValueError) as error:
+            self.persistence_error = f"Could not save release metadata ({type(error).__name__})"
+            logging.warning(self.persistence_error)
+            if self._cache._update_hook:
+                self._cache._update_hook()
+
+    def _freshness(self, entry, *, empty=False):
+        now = time.time()
+        checked = entry.get("checked")
+        checked = checked if type(checked) in (int, float) and 0 <= checked <= now else None
+        ttl = 300 if empty else constants.CACHE_LIFETIME_HOURS * 3600
+        fresh = checked is not None and now - checked < ttl
+        retry = entry.get("retry", 0)
+        retry = retry if type(retry) in (int, float) and 0 <= retry <= now + 86400 else 0
+        return checked, fresh, retry, entry.get("status", "unchecked")
+
+    def _refresh(self, key, revision, load, publish):
+        """Coalesce one key without holding snapshot admission during I/O."""
+        with self._lock:
+            if self._revisions.get(key, 0) != revision:
+                return
+            event = self._inflight.get(key)
+            waiting = event is not None
+            if not waiting:
+                event = self._inflight[key] = threading.Event()
+        if waiting:
+            from . import processes
+
+            deadline = time.monotonic() + 240
+            while not event.wait(0.1):
+                if processes.cancelled():
+                    raise artifacts.MetadataError("Release check cancelled")
+                if time.monotonic() >= deadline:
+                    break
+            return
+        try:
+            received = load()
+            with self._lock:
+                publish(received)
+                self._revisions[key] = revision + 1
+                self._forced.add(key)
+            self._persist()
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+                event.set()
+
+    def _catalog(self, repository, *, force=False, refresh=True):
+        key = releases.policy_key(repository)
+        with self._lock:
+            entry = self._cache.release_entries.get(key, {})
+            if not isinstance(entry, dict):
+                entry = {}
+            try:
+                catalog = releases.deserialize(entry.get("catalog"), repository)
+            except (ValueError, TypeError, KeyError, artifacts.ArtifactError):
+                catalog = GithubSoftwareReleasesInfo(None, None)
+                entry = {"status": entry.get("status", "unchecked"), "message": entry.get("message", ""),
+                         "retry": entry.get("retry", 0)}
+            checked, fresh, retry, status = self._freshness(entry, empty=catalog.status == "empty")
+            revision = self._revisions.get(key, 0)
+            needed = (force or (self._force and key not in self._forced) or not fresh
+                      or status not in ("ok", "empty", "unchecked")) and time.time() >= retry
+        if refresh and needed:
+            def load():
+                try:
+                    return _get_release_data(repository)
+                except artifacts.ArtifactError as error:
+                    return GithubSoftwareReleasesInfo(None, None, "malformed", str(error))
+
+            def publish(received):
+                previous = self._cache.release_entries.get(key, {})
+                previous = previous if isinstance(previous, dict) else {}
+                if received.status in ("ok", "empty"):
+                    previous = {"catalog": releases.serialize(received), "checked": time.time(),
+                                "status": received.status, "message": received.message, "retry": 0}
+                else:
+                    previous = dict(previous, status=received.status, message=received.message,
+                                    retry=time.time() + max(60, received.retry_after))
+                self._cache.release_entries[key] = previous
+
+            self._refresh(key, revision, load, publish)
+            return self._catalog(repository, refresh=False)
+        return catalog, checked, fresh, status, entry.get("message", "")
+
+    def _repo_version(self, repository, *, refresh=True):
+        catalog, checked, fresh, status, message = self._catalog(repository, refresh=refresh)
+        stale = checked is not None and (not fresh or status not in ("ok", "empty"))
+        return GithubSoftwareReleasesInfo(catalog.latest, catalog.pre_release, "stale" if stale else status, message)
 
     def _repo_latest_version(self, repository):
         release = self._repo_version(repository).latest
-        if release is None:
-            raise artifacts.ArtifactError("No stable release is available")
+        if release is None or release.error:
+            raise artifacts.ArtifactError(release.error if release else "No stable release is available")
         return release
 
     def app_latest_version(self, channel):
         if not constants.APP_SELF_UPDATES_ENABLED:
             return None
-        return self._repo_latest_version(constants.REPOSITORY_SLUG)
+        lookup = self.controller_release(channel)
+        return lookup.release if lookup.status == "ok" and not lookup.stale else None
+
+    def controller_release(self, channel, *, force=False, refresh=True):
+        if not constants.APP_SELF_UPDATES_ENABLED:
+            return releases.ReleaseLookup(status="disabled", message=constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
+        channel = releases.channel_name(channel)
+        catalog, checked, fresh, status, message = self._catalog(
+            constants.REPOSITORY_SLUG, force=force, refresh=refresh,
+        )
+        release = releases.choose(catalog, channel)
+        if release is not None and release.error:
+            status, message = "incompatible", release.error
+        elif release is None and status == "ok":
+            status, message = "empty", "No release is available for this channel"
+        return releases.ReleaseLookup(release, status, message or "No release is available", checked,
+                                      checked is not None and (not fresh or status not in ("ok", "empty")))
 
     def icu_latest_version(self):
         return self._repo_latest_version("FaithLife-Community/icu")
 
 
 def _release_digest(value):
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.startswith("sha256:"):
-        raise artifacts.ArtifactError("Unsupported release digest metadata")
-    digest = artifacts.Digest("sha256", value[7:], "selected GitHub release asset digest")
-    digest.validate()
-    return digest
+    return releases.release_digest(value)
 
 
-def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, *, kind, digest=None):
+def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, *, kind, digest=None, size=None):
     candidates = [Path(targetdir) / file, Path(app.conf.download_dir) / file]
     user = app.conf.user_download_dir
     if user:
         candidates.append(Path(user) / file)
-    spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest)
+    spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest, size)
     return artifacts.acquire(spec, Path(targetdir), candidates, app.status if status_messages else None)
 
 
@@ -235,59 +365,40 @@ def _net_get(url):
     return artifacts.get_bytes(url)
 
 
-def _get_first_asset_url(json_data):
-    assets = json_data.get("assets") or []
-    if not assets or not assets[0].get("browser_download_url"):
-        raise artifacts.ArtifactError("Release has no download asset")
-    return assets[0]["browser_download_url"]
-
-
-def _get_version_name(json_data):
-    return json_data["tag_name"].lstrip("v")
-
-
 def _get_release_data(repository):
-    try:
-        data = json.loads(_net_get(f"https://api.github.com/repos/{repository}/releases"))
-        data = sorted(data, key=lambda release: datetime.fromisoformat(release["updated_at"]), reverse=True)
-
-        def release(item):
-            return SoftwareReleaseInfo(
-                _get_version_name(item), _get_first_asset_url(item), _release_digest(item["assets"][0].get("digest")),
-            )
-
-        prerelease = release(data[0]) if data and data[0]["prerelease"] else None
-        stable = next((item for item in data if item["prerelease"] is False), None)
-        return GithubSoftwareReleasesInfo(release(stable) if stable else None, prerelease)
-    except artifacts.ArtifactError:
-        logging.warning("Could not obtain release metadata")
-        return GithubSoftwareReleasesInfo(None, None)
-    except (ValueError, KeyError, TypeError) as error:
-        raise artifacts.ArtifactError("Malformed release metadata") from error
+    return releases.fetch(repository, _net_get)
 
 
 def download_recommended_appimage(app):
-    release = app.conf._network.wine_appimage_versions().latest
-    if release is None:
+    catalog = app.conf._network.wine_appimage_versions()
+    release = catalog.latest
+    if catalog.status != "ok" or release is None or release.error:
         raise artifacts.ArtifactError("No recommended AppImage release is available")
     return logos_reuse_download(
-        release.download_url, app.conf.wine_appimage_recommended_file_name, app.conf.installer_binary_dir,
-        app, kind="appimage", digest=release.digest,
+        release.download_url, release.name, app.conf.installer_binary_dir,
+        app, kind="appimage", digest=release.digest, size=release.size,
     )
 
 
 def _get_faithlife_product_releases(product, version, channel):
+    try:
+        return _fetch_faithlife_product_releases(product, version, channel)
+    except artifacts.MetadataError:
+        return []
+
+
+def _fetch_faithlife_product_releases(product, version, channel):
     url = "https://clientservices.logos.com/update/v1/feed/logos10/beta.xml" if channel == "beta" else (
         f"https://clientservices.logos.com/update/v1/feed/logos{version}/stable.xml"
     )
     try:
         root = ET.fromstring(_net_get(url).decode("utf-8-sig"))
-    except artifacts.ArtifactError:
-        logging.warning("Could not obtain product releases")
-        return []
     except (ET.ParseError, UnicodeError) as error:
         raise artifacts.ArtifactError("Malformed product feed") from error
-    return [entry.text for entry in root.findall(".//{http://services.logos.com/update/v1/}version") if entry.text]
+    versions = [entry.text for entry in root.findall(".//{http://services.logos.com/update/v1/}version") if entry.text]
+    if not all(re.fullmatch(r"\d+(?:\.\d+){1,3}", version) for version in versions):
+        raise artifacts.ArtifactError("Product feed contains an invalid version")
+    return versions
 
 
 def update_lli_binary(app):
@@ -295,16 +406,6 @@ def update_lli_binary(app):
         app.status(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
         return
 
-    # Final controller replacement remains M05 work while self-update is disabled.
-    accepted = logos_reuse_download(
-        app.conf.app_latest_version_url, constants.BINARY_NAME, app.conf.download_dir, app, kind="elf",
-    )
-    accepted.check()
-    version = utils.get_lli_release_version(accepted.path)
-    if version != app.conf.app_latest_version:
-        raise artifacts.ArtifactError("Controller artifact has the wrong version")
-    target = os.path.realpath(sys.argv[0])
-    temporary = Path(app.conf.download_dir) / f"{constants.BINARY_NAME}.tmp"
-    shutil.copy(accepted.path, temporary)
-    shutil.move(temporary, target)
-    utils.restart_lli()
+    from . import updates
+
+    return updates.prepare(app)

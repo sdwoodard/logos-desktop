@@ -56,6 +56,10 @@ REPOSITORY_NEW_ISSUE_LINK = f"{REPOSITORY_LINK}/issues/new"
 # Private development has no supported controller release feed or replacement path.
 APP_SELF_UPDATES_ENABLED = False
 APP_SELF_UPDATE_DISABLED_MESSAGE = "Controller self-updates are disabled during private development."
+APP_RELEASE_LINEAGE = "logos-desktop"
+APP_RELEASE_VERSION = None
+# A release build must explicitly identify its distribution before self-replacement.
+CONTROLLER_DISTRIBUTION = "source"
 
 CACHE_LIFETIME_HOURS = 12
 """How long to wait before considering our version cache invalid"""

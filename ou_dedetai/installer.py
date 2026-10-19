@@ -214,25 +214,22 @@ def ensure_appimage_download(app: App):
     if Path(app.conf.wine_binary) != Path(app.conf.installer_binary_dir) / filename:
         logging.debug("Preserving the explicitly selected external AppImage")
         return
-    if filename == app.conf.wine_appimage_recommended_file_name:
-        download_url = app.conf.wine_appimage_recommended_url
-    elif filename == app.conf.wine_appimage_beta_file_name:
-        download_url = app.conf.wine_appimage_beta_url
-    else:
+    versions = app.conf._network.wine_appimage_versions()
+    release = next((release for release in (versions.latest, versions.pre_release)
+                    if release is not None and release.name == filename), None)
+    if release is None:
         logging.debug("The selected custom AppImage has no managed release URL")
         return
-    if download_url is None:
-        raise ValueError("The selected AppImage release has no download URL")
-
-    versions = app.conf._network.wine_appimage_versions()
-    release = versions.latest if filename == app.conf.wine_appimage_recommended_file_name else versions.pre_release
+    if release.error:
+        raise artifacts.ArtifactError(release.error)
     accepted = network.logos_reuse_download(
-        download_url,
-        filename,
+        release.download_url,
+        release.name,
         app.conf.installer_binary_dir,
         app=app,
         kind="appimage",
-        digest=release.digest if release else None,
+        digest=release.digest,
+        size=release.size,
     )
     runtime.activate(app, accepted)
 
@@ -386,14 +383,11 @@ def ensure_launcher_executable(app: App):
     if constants.RUNMODE == 'binary':
         app.status(f"Copying launcher to {app.conf.install_dir}…")
 
-        # Copy executable into install dir.
-        launcher_exe = Path(f"{app.conf.install_dir}/{constants.BINARY_NAME}")
-        if launcher_exe.is_file():
-            logging.debug("Removing existing launcher binary.")
-            launcher_exe.unlink()
-        logging.info(f"Creating launcher binary by copying this installer binary to {launcher_exe}.")
-        shutil.copy(sys.executable, launcher_exe)
-        logging.debug(f"> File exists?: {launcher_exe}: {launcher_exe.is_file()}")
+        from . import updates
+
+        launcher_exe = Path(app.conf.install_dir) / constants.BINARY_NAME
+        copied = updates.copy_launcher(Path(sys.executable), launcher_exe)
+        app._standalone_launcher_available = copied is not None
     else:
         app.status(
             "Running from source. Skipping launcher copy."
@@ -406,8 +400,11 @@ def ensure_launcher_shortcuts(app: App):
     app.installer_step += 1
     app.status("Creating launcher shortcuts…")
     if constants.RUNMODE == 'binary':
-        app.status("Creating launcher shortcuts…")
-        create_launcher_shortcuts(app)
+        if getattr(app, "_standalone_launcher_available", False):
+            app.status("Creating launcher shortcuts…")
+            create_launcher_shortcuts(app)
+        else:
+            app.status("This installation method manages its controller shortcuts")
     else:
         # This is done so devs can run this without it clobbering their install
         app.status(

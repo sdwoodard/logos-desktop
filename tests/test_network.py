@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import requests
 
-from ou_dedetai import artifacts, constants, network
+from ou_dedetai import artifacts, constants, metadata, network
 from tests.test_artifacts import response
 
 
@@ -49,7 +49,8 @@ class TestNetwork(unittest.TestCase):
         self.assertEqual(head.call_args.kwargs["timeout"], (10, 30))
         for load in (lambda: network._get_release_data("example/repo"),
                      lambda: network._get_faithlife_product_releases("Logos", "10", "stable")):
-            with patch.object(artifacts.requests, "get", side_effect=requests.ReadTimeout) as get:
+            with (patch.object(artifacts.requests, "get", side_effect=requests.ReadTimeout) as get,
+                  patch.object(metadata, "request", side_effect=metadata.read)):
                 result = load()
             self.assertIsNotNone(result)
             self.assertEqual(get.call_args.kwargs["timeout"], (10, 30))
@@ -59,7 +60,8 @@ class TestNetwork(unittest.TestCase):
             (b"not JSON", lambda: network._get_release_data("example/repo")),
             (b"not XML", lambda: network._get_faithlife_product_releases("Logos", "10", "stable")),
         ):
-            with patch.object(artifacts.requests, "get", return_value=response(content)):
+            with (patch.object(artifacts.requests, "get", return_value=response(content)),
+                  patch.object(metadata, "request", side_effect=metadata.read)):
                 with self.assertRaises(artifacts.ArtifactError):
                     load()
         with tempfile.TemporaryDirectory() as directory:

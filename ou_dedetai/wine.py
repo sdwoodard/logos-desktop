@@ -79,8 +79,14 @@ def get_devel_or_stable(version: str) -> str:
 def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
     try:
         with maintenance.artifact_use():
+            from . import processes, updates
+
             cmd = [runtime.executable(binary), "--version"]
-            version_string = subprocess.check_output(cmd, encoding='utf-8', timeout=15).strip()
+            output, status = processes.capture(cmd, env=updates.fresh_environment(), timeout=15,
+                                               limit=16384, label="Wine version probe")
+            if status != 0:
+                raise RuntimeError("Wine version probe failed")
+            version_string = output.decode("utf-8").strip()
         logging.debug(f"Version string: {str(version_string)}")
         branch: Optional[str]
         try:
@@ -693,20 +699,16 @@ def run_wine_during_install(
 @maintenance.uses_installation
 def enforce_icu_data_files(app: App):
     app.status("Downloading ICU files…")
-    icu_url = app.conf.icu_latest_version_url
-    icu_latest_version = app.conf.icu_latest_version
-
-    icu_filename = os.path.basename(icu_url).removesuffix(".tar.gz")
-    # Append the version to the file name so it doesn't collide with previous versions
-    icu_filename = f"{icu_filename}-{icu_latest_version}.tar.gz"
     release = app.conf._network.icu_latest_version()
+    icu_filename = f"icu-win-{release.version}.tar.gz"
     accepted = network.logos_reuse_download(
-        icu_url,
+        release.download_url,
         icu_filename,
         app.conf.download_dir,
         app=app,
         kind="icu",
         digest=release.digest,
+        size=release.size,
     )
 
     app.status("Copying ICU files…")

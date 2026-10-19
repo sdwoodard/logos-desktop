@@ -263,6 +263,7 @@ class ControlGui(StatusGui):
         # in order for tkinker to know how large to draw it
         self.update_lli_label = Label(self, text=f"Update {constants.APP_NAME}\n\n")
         self.update_lli_button = Button(self, text="Update")
+        self.check_controller_button = Button(self, text="Check now")
         # AppImage buttons
         self.latest_appimage_label = Label(
             self,
@@ -319,6 +320,7 @@ class ControlGui(StatusGui):
         row += 1
         self.update_lli_label.grid(column=0, row=row, sticky='w', pady=2)
         self.update_lli_button.grid(column=1, row=row, sticky='w', pady=2)
+        self.check_controller_button.grid(column=2, row=row, sticky='w', pady=2)
         row += 1
         self.latest_appimage_label.grid(column=0, row=row, sticky='w', pady=2)
         self.latest_appimage_button.grid(column=1, row=row, sticky='w', pady=2)

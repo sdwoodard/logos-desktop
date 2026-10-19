@@ -121,7 +121,11 @@ class CLI(App):
         utils.update_to_latest_recommended_appimage(self)
 
     def update_self(self):
-        utils.update_to_latest_lli_release(self)
+        from . import updates
+
+        prepared = utils.update_to_latest_lli_release(self)
+        if prepared is not None:
+            prepared.restart(updates.resume_arguments(self.conf._overrides.config_path, self.conf._overrides.dialog))
 
     def get_support(self):
         control.get_support(self)

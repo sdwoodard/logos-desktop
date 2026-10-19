@@ -127,9 +127,11 @@ class TestRuntimePaths(unittest.TestCase):
                 config._download_dir = None
                 config._raw.faithlife_product_version = "10"
                 config._network = Mock()
-                beta = network.SoftwareReleaseInfo("2", "https://example.invalid/beta.AppImage")
+                beta = network.SoftwareReleaseInfo("2", "https://example.invalid/beta.AppImage", name="beta.AppImage")
                 config._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
-                    latest=network.SoftwareReleaseInfo("1", "https://example.invalid/stable.AppImage"),
+                    latest=network.SoftwareReleaseInfo(
+                        "1", "https://example.invalid/stable.AppImage", name="stable.AppImage",
+                    ),
                     pre_release=beta if prerelease else None,
                 )
                 config._raw.wine_binary = choice
@@ -155,7 +157,7 @@ class TestRuntimePaths(unittest.TestCase):
                     installer.ensure_appimage_download(app)
                 download.assert_called_once_with(
                     f"https://example.invalid/{filename}", filename, config.installer_binary_dir,
-                    app=app, kind="appimage", digest=None,
+                    app=app, kind="appimage", digest=None, size=None,
                 )
                 self.assertEqual(Path(config.wine_binary).name, filename)
                 self.assertEqual(artifacts.installed(config.wine_binary, "appimage").path.read_bytes(), appimage())

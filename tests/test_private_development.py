@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import constants, control, network, tui_app, utils
+from ou_dedetai import constants, control, network, releases, tui_app, updates, utils
 from ou_dedetai.config import Config
 from ou_dedetai.app import App, UserExitedFromAsk
 
@@ -73,18 +73,12 @@ class TestPrivateUpdates(unittest.TestCase):
                 with self.subTest(update=update.__name__):
                     app = SimpleNamespace(status=Mock())
                     with (
-                        patch.object(network.sys, "argv", [str(launcher)]),
-                        patch.object(network.os.path, "realpath") as resolve,
-                        patch.object(utils, "compare_logos_linux_installer_version") as compare,
-                        patch.object(utils, "get_lli_release_version") as probe,
-                        patch.object(network, "logos_reuse_download") as download,
-                        patch.object(network.shutil, "copy") as copy,
-                        patch.object(network.shutil, "move") as move,
-                        patch.object(utils, "restart_lli") as restart,
+                        patch.object(updates, "eligible") as admit,
+                        patch.object(updates, "prepare") as prepare,
                     ):
                         update(app)
 
-                        for operation in (resolve, compare, probe, download, copy, move, restart):
+                        for operation in (admit, prepare):
                             operation.assert_not_called()
 
                     app.status.assert_called_once_with(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
@@ -211,6 +205,19 @@ class TestPrivateSupport(unittest.TestCase):
 
 @unittest.skipIf(gui_app is None, f"Native Tk import unavailable: {GUI_IMPORT_ERROR}")
 class TestPrivateGuiUpdates(unittest.TestCase):
+    def test_stale_wine_snapshot_does_not_render_latest_recommended(self):
+        window = object.__new__(gui_app.ControlWindow)
+        window.conf = SimpleNamespace(
+            _raw=SimpleNamespace(wine_binary_code="AppImage", wine_binary="fixture.AppImage"),
+            recommended_wine_status=(-1, "Recommended Wine information is stale or unavailable"),
+        )
+        window.gui = Mock()
+        window.is_installed = Mock(return_value=True)
+        with (patch.object(gui_app.ControlWindow, "clear_status"), patch.object(gui_app.gui, "ToolTip") as tooltip):
+            window.update_latest_appimage_button()
+        self.assertIn("stale", tooltip.call_args.args[1])
+        self.assertNotIn("already set to the latest", tooltip.call_args.args[1])
+
     def test_post_uninstall_empty_selection_still_offers_install_controls(self):
         window = object.__new__(gui_app.ControlWindow)
         window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None))
@@ -233,7 +240,8 @@ class TestPrivateGuiUpdates(unittest.TestCase):
 
     def test_binary_window_initialization_does_not_start_release_discovery(self):
         def initialize_fixture(window, *args, **kwargs):
-            window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None))
+            window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None), _network=Mock(),
+                                          app_release_channel="stable")
 
         with (
             patch.object(constants, "RUNMODE", "binary"),
@@ -241,6 +249,8 @@ class TestPrivateGuiUpdates(unittest.TestCase):
             patch.object(gui_app.ControlWindow, "start_thread") as start_thread,
             patch.object(gui_app.ControlWindow, "clear_status"),
             patch.object(gui_app.ControlWindow, "_config_update_hook"),
+            patch.object(gui_app.ControlWindow, "update_product_button"),
+            patch.object(gui_app.ControlWindow, "update_latest_appimage_button"),
             patch.object(gui_app.ControlWindow, "config_updated_hooks", []),
             patch.object(gui_app.gui, "ToolTip"),
             patch.object(utils, "compare_logos_linux_installer_version") as compare,
@@ -257,7 +267,10 @@ class TestPrivateGuiUpdates(unittest.TestCase):
 
     def test_unavailable_binary_release_keeps_label_and_refresh_defined(self):
         window = object.__new__(gui_app.ControlWindow)
-        window.conf = SimpleNamespace(app_latest_version=None)
+        window._controller_checks = SimpleNamespace(
+            result=releases.ReleaseLookup(status="empty", message="No controller release information is available"),
+            eligibility_message="",
+        )
         window.gui = Mock()
 
         with (

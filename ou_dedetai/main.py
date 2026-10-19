@@ -6,7 +6,7 @@ from typing import Callable, Tuple
 
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import (
-    EphemeralConfiguration, PersistentConfiguration, get_wine_prefix_path
+    EphemeralConfiguration, LegacyConfiguration, PersistentConfiguration, get_wine_prefix_path
 )
 
 import logging
@@ -18,12 +18,12 @@ from .repair import detect_and_recover
 from . import cli
 from . import artifacts
 from . import constants
-from . import gui_app
 from . import msg
 from . import maintenance
 from . import system
 from . import tui_app
 from . import utils
+from . import updates
 
 
 def get_parser():
@@ -43,6 +43,7 @@ def get_parser():
         '-a', '--check-for-updates', action='store_true',
         help='force a check for updates'
     )
+    cfg.add_argument('--dialog', choices=('tk', 'tui'), help='choose the controller interface')
     cfg.add_argument(
         '-K', '--skip-dependencies', action='store_true',
         help='skip dependencies check and installation',
@@ -215,6 +216,10 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         ephemeral_config = EphemeralConfiguration.load_from_path(args.config)
     else:
         ephemeral_config = EphemeralConfiguration.load()
+    if args.check_for_updates:
+        ephemeral_config.check_updates_now = True
+    if args.dialog:
+        ephemeral_config.dialog = args.dialog
 
     if args.quiet:
         msg.update_log_level(logging.WARNING)
@@ -235,11 +240,6 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
 
     if args.set_appimage:
         ephemeral_config.wine_appimage_path = args.set_appimage[0]
-
-    # FIXME: Should this have been args.check_for_updates?
-    # Should this even be an option?
-    # if network.check_for_updates:
-    #     ephemeral_config.check_updates_now = True
 
     if args.skip_dependencies or constants.RUNMODE == 'snap':
         ephemeral_config.install_dependencies_skip = True
@@ -329,6 +329,8 @@ def run_control_panel(ephemeral_config: EphemeralConfiguration):
     dialog = ephemeral_config.dialog or system.get_dialog()
     logging.info(f"Using DIALOG: {dialog}")
     if dialog == 'tk':
+        from . import gui_app
+
         gui_app.start_gui_app(ephemeral_config)
     else:
         try:
@@ -349,14 +351,17 @@ def install_app(ephemeral_config: EphemeralConfiguration):
     dialog = ephemeral_config.dialog or system.get_dialog()
     logging.info(f"Using DIALOG: {dialog}")
     if dialog == 'tk':
+        from . import gui_app
+
         gui_app.start_gui_app(ephemeral_config, install_only=True)
     else:
         cli.CLI(ephemeral_config).install_app()
 
 
-def setup_config() -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]: 
+def setup_config(cli_args=None) -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]:
     parser = get_parser()
-    cli_args = parser.parse_args()  # parsing early lets 'help' run immediately
+    if cli_args is None:
+        cli_args = parser.parse_args()
 
     # Get config based on env and configuration file temporarily just to load a couple 
     # values out. We'll load this fully later.
@@ -388,7 +393,8 @@ def run(ephemeral_config: EphemeralConfiguration, action: Callable[[EphemeralCon
     # Attempt to repair installation if it is broken.
     # Must be done before calling the action to avoid errosly thinking the app isn't
     # installed when it's broken
-    detect_and_recover(ephemeral_config)
+    if not updates.startup_handoff():
+        detect_and_recover(ephemeral_config)
     # Run desired action (requested function, defaults to control_panel)
     if action == "disabled":
         print("That option is disabled.", file=sys.stderr)
@@ -428,9 +434,45 @@ def run(ephemeral_config: EphemeralConfiguration, action: Callable[[EphemeralCon
         sys.exit(1)
 
 
+def run_controller_update(args):
+    """Dispatch an admitted update without constructing the Wine application."""
+    from types import SimpleNamespace
+    from . import network
+
+    updates.eligible()
+    if constants.APP_RELEASE_VERSION is None:
+        raise updates.UpdateError("This private build has no LogosDesktop release version")
+    config_path = args.config or LegacyConfiguration.config_file_path()
+    raw = PersistentConfiguration.load_from_path(config_path)
+    overrides = EphemeralConfiguration.load_from_path(config_path)
+    conf = SimpleNamespace(
+        _raw=raw, _overrides=overrides, app_release_channel=raw.app_release_channel,
+        download_dir=constants.CACHE_DIR, _network=network.NetworkRequests(args.check_for_updates),
+    )
+    app = SimpleNamespace(conf=conf, status=lambda message, percent=None: print(message))
+    arguments = updates.resume_arguments(config_path, args.dialog or overrides.dialog)
+    prepared = updates.prepare(app)
+    prepared.restart(arguments)
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--fetch-metadata":
+        from . import metadata
+
+        metadata.worker(sys.argv[2])
+        return
+    args = get_parser().parse_args()
+    if args.update_self:
+        try:
+            run_controller_update(args)
+        except (artifacts.ArtifactError, OSError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            raise SystemExit(1) from error
+        return
+    arguments = updates.resume_arguments(args.config or LegacyConfiguration.config_file_path(), args.dialog)
+    updates.recover_startup(arguments)
     msg.initialize_logging()
-    ephemeral_config, action = setup_config()
+    ephemeral_config, action = setup_config(args)
     system.check_architecture()
 
     # NOTE: DELETE_LOG is an outlier here. It's an action, but it's one that

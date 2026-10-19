@@ -378,8 +378,15 @@ class PersistentConfiguration:
             logging.info("Not reading new values from non-existent config")
 
         # Now override with values from ENV
-        config_env = PersistentConfiguration.from_legacy(LegacyConfiguration.load_from_env()) 
+        legacy_env = LegacyConfiguration.load_from_env()
+        config_env = PersistentConfiguration.from_legacy(legacy_env)
+        channel_overrides = {
+            "app_release_channel": legacy_env.lli_release_channel,
+            "faithlife_product_release_channel": legacy_env.logos_release_channel,
+        }
         for k, v in config_env.__dict__.items():
+            if k in channel_overrides and channel_overrides[k] is None:
+                continue
             if v is not None:
                 config_dict[k] = v
 
@@ -719,11 +726,13 @@ class Config:
 
     @property
     def is_installed_faithlife_product_release_latest(self) -> Optional[bool]:
-        releases = self.faithlife_product_releases
-        if not releases:
-            # We didn't get any releases back. Strange.
-            logging.debug("No faithlife releases on the given channel.")
+        if not self._raw.faithlife_product or not self._raw.faithlife_product_version:
             return None
+        lookup = self._network.product_release(self._raw.faithlife_product, self._raw.faithlife_product_version,
+                                               self.faithlife_product_release_channel, refresh=False)
+        if lookup.stale or lookup.status != "ok" or not lookup.versions:
+            return None
+        releases = lookup.versions
         installed = self.installed_faithlife_product_release
         if installed is None:
             return None
@@ -735,6 +744,33 @@ class Config:
             return tuple(int(part) for part in version.split("."))
 
         return _normalize(releases[0]) == _normalize(installed)
+
+    def refresh_release_snapshots(self, *, force=False):
+        """Called by the owned release worker, never by widget rendering."""
+        from . import processes
+
+        if self._raw.faithlife_product and self._raw.faithlife_product_version:
+            self._network.product_release(self._raw.faithlife_product, self._raw.faithlife_product_version,
+                                          self.faithlife_product_release_channel, force=force)
+        if processes.cancelled():
+            return
+        if self._raw.wine_binary and self._raw.wine_binary_code in ("Recommended", "AppImage"):
+            context = self._raw.install_dir, self._raw.wine_binary
+            catalog = self._network.wine_appimage_versions()
+            if catalog.status != "ok":
+                status = (-1, "Recommended Wine information is stale or unavailable")
+            else:
+                status = utils.compare_recommended_appimage_version(self.app)
+            if context == (self._raw.install_dir, self._raw.wine_binary):
+                self._recommended_wine_status = status
+                self._recommended_wine_context = context
+
+    @property
+    def recommended_wine_status(self):
+        context = self._raw.install_dir, self._raw.wine_binary
+        if context != getattr(self, "_recommended_wine_context", None):
+            return -1, "Recommended Wine information has not been checked for this selection"
+        return self._recommended_wine_status
 
     @faithlife_product_release.setter
     def faithlife_product_release(self, value: Optional[str]):
@@ -1087,9 +1123,10 @@ class Config:
 
     @property
     def wine_appimage_recommended_version(self) -> str:
-        # Getting version and branch rely on the filename having this format:
-        #   wine-[branch]_[version]-[arch]
-        return self.wine_appimage_recommended_file_name.split('-')[1].split('_')[1]
+        release = self._network.wine_appimage_versions().latest
+        if release is None or release.error:
+            raise ValueError("Recommended Wine release information is unavailable")
+        return release.version
 
     @property
     def wine_dll_overrides(self) -> str:
@@ -1141,12 +1178,14 @@ class Config:
         self._write()
     
     def toggle_installer_release_channel(self):
-        if self._raw.app_release_channel == "stable":
-            new_channel = "dev"
-        else:
-            new_channel = "stable"
+        new_channel = "beta" if self._raw.app_release_channel == "stable" else "stable"
+        previous = self._raw.app_release_channel
         self._raw.app_release_channel = new_channel
-        self._write()
+        try:
+            self._write(checked=True)
+        except BaseException:
+            self._raw.app_release_channel = previous
+            raise
     
     @property
     def backup_dir(self) -> Path:
@@ -1285,6 +1324,9 @@ class Config:
     def app_latest_version(self) -> Optional[str]:
         release = self._network.app_latest_version(self.app_release_channel)
         return release.version if release is not None else None
+
+    def controller_release(self, *, force=False, refresh=False):
+        return self._network.controller_release(self.app_release_channel, force=force, refresh=refresh)
 
     @property
     def icu_latest_version(self) -> str:

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from textual.widgets import Static
 from textual.app import App as TextualApp
 
-from ou_dedetai import constants, control, maintenance, tui_app
+from ou_dedetai import constants, control, maintenance, processes, tui_app
 from tests.test_runtime_paths import fixture_config
 
 
@@ -25,7 +25,7 @@ class PromptUI(TextualApp):
         yield Static("Disposable maintenance prompt fixture")
 
     def on_mount(self):
-        pass
+        processes.resume()
 
     def go_to_main_menu(self):
         pass
@@ -33,6 +33,7 @@ class PromptUI(TextualApp):
 
 class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
     async def test_quit_or_pruning_cancels_actual_uninstall_wait_and_releases_lease(self):
+        self.addCleanup(processes.resume)
         for shutdown in ("quit", "prune"):
             with self.subTest(shutdown=shutdown), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)

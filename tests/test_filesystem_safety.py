@@ -231,7 +231,7 @@ class TestUninstallBoundaries(unittest.TestCase):
         config._overrides.config_path = str(self.config)
         config._network = Mock()
         config._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
-            network.SoftwareReleaseInfo("1", "https://example.invalid/stable.AppImage"), None,
+            network.SoftwareReleaseInfo("1", "https://example.invalid/stable.AppImage", name="stable.AppImage"), None,
         )
         self.app.conf = config
         self.assertEqual(config.download_dir, str(self.cache))

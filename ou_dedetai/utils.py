@@ -11,8 +11,6 @@ import psutil
 import re
 import shutil
 import signal
-import stat
-import subprocess
 import sys
 import tarfile
 import time
@@ -72,12 +70,7 @@ def die(message):
 
 
 def restart_lli():
-    logging.debug(f"Restarting {constants.APP_NAME}.")
-    pidfile = Path(constants.PID_FILE)
-    if pidfile.is_file():
-        pidfile.unlink()
-    os.execv(sys.executable, [sys.executable])
-    sys.exit()
+    raise RuntimeError("Use the prepared controller transaction to restart its exact target")
 
 
 def get_user_downloads_dir() -> str:
@@ -311,7 +304,9 @@ def compare_logos_linux_installer_version(app: App) -> Optional[VersionCompariso
     if latest_version is None:
         return None
 
-    current = Version(constants.LLI_CURRENT_VERSION)
+    if constants.APP_RELEASE_VERSION is None:
+        return None
+    current = Version(constants.APP_RELEASE_VERSION)
     latest = Version(latest_version)
 
     if current < latest:
@@ -371,17 +366,11 @@ def compare_recommended_appimage_version(app: App):
 
 
 def get_lli_release_version(lli_binary):
-    lli_version = None
-    # Ensure user-executable by adding 0o001.
-    st = lli_binary.stat()
-    os.chmod(lli_binary, mode=st.st_mode | stat.S_IXUSR)
-    # Get version number.
-    cmd = [lli_binary, '--version']
-    vstr = subprocess.check_output(cmd, text=True, timeout=15)
-    m = re.search(r'\d+\.\d+\.\d+(-[a-z]+\.\d+)?', vstr)
-    if m:
-        lli_version = m[0]
-    return lli_version
+    from . import artifacts, updates
+
+    if not isinstance(lli_binary, artifacts.AcceptedArtifact) or lli_binary.spec.digest is None:
+        raise artifacts.ArtifactError("Version inspection requires an accepted controller and release digest")
+    return updates.probe(lli_binary.check())
 
 
 def is_appimage(file_path):
@@ -511,16 +500,7 @@ def update_to_latest_lli_release(app: App):
         app.status(constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
         return
 
-    result = compare_logos_linux_installer_version(app)
-
-    if constants.RUNMODE != 'binary':
-        logging.error(f"Can't update {constants.APP_NAME} when run as {constants.RUNMODE}.")
-    elif result == VersionComparison.OUT_OF_DATE:
-        network.update_lli_binary(app=app)
-    elif result == VersionComparison.UP_TO_DATE:
-        logging.debug(f"{constants.APP_NAME} is already at the latest version.")
-    elif result == VersionComparison.DEVELOPMENT:
-        logging.debug(f"{constants.APP_NAME} is at a newer version than the latest.") # noqa: 501
+    return network.update_lli_binary(app=app)
 
 
 @maintenance.uses_installation

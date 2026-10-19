@@ -43,9 +43,11 @@ def fixture_app(root):
         _network=Mock(), icu_latest_version_url="https://example.invalid/icu.tar.gz", icu_latest_version="1",
     )
     conf._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
-        network.SoftwareReleaseInfo("1", conf.wine_appimage_recommended_url), None,
+        network.SoftwareReleaseInfo("1", conf.wine_appimage_recommended_url, name="wine.AppImage"), None,
     )
-    conf._network.icu_latest_version.return_value = network.SoftwareReleaseInfo("1", conf.icu_latest_version_url)
+    conf._network.icu_latest_version.return_value = network.SoftwareReleaseInfo(
+        "1", conf.icu_latest_version_url, name="icu-win.tar.gz",
+    )
     app = SimpleNamespace(
         conf=conf, status=Mock(), installer_step=0, installer_step_count=0, _config_updated_event=Event(),
         is_installed=Mock(return_value=False), approve_or_exit=Mock(side_effect=AssertionError("No real terms")),
@@ -77,6 +79,46 @@ class TestArtifactConsumers(unittest.TestCase):
     def state(self):
         links, configs = runtime._targets(self.app)
         return [runtime._snapshot(path) for path in (*links, *configs)]
+
+    def test_appimage_acquisition_pins_one_descriptor_across_refresh(self):
+        conf = self.app.conf
+        conf.wine_binary = str(Path(conf.installer_binary_dir) / "wine.AppImage")
+        selected = network.SoftwareReleaseInfo(
+            "1", "https://example.invalid/old.AppImage", name="wine.AppImage", size=123,
+        )
+        refreshed = network.SoftwareReleaseInfo("2", "https://example.invalid/new.AppImage", name="new.AppImage")
+        conf._network.wine_appimage_versions.side_effect = [
+            network.GithubSoftwareReleasesInfo(selected, None),
+            network.GithubSoftwareReleasesInfo(refreshed, None),
+        ]
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        with (patch.object(installer, "ensure_sys_deps"), patch.object(installer, "check_system_compatibility"),
+              patch.object(network, "logos_reuse_download", return_value=accepted) as acquire,
+              patch.object(runtime, "activate") as activate):
+            installer.ensure_appimage_download(self.app)
+        conf._network.wine_appimage_versions.assert_called_once()
+        acquire.assert_called_once_with(selected.download_url, selected.name, conf.installer_binary_dir,
+                                        app=self.app, kind="appimage", digest=None, size=123)
+        activate.assert_called_once_with(self.app, accepted)
+
+    def test_icu_acquisition_pins_version_url_digest_and_size(self):
+        conf = self.app.conf
+        selected = network.SoftwareReleaseInfo("72.1-custom+4", "https://example.invalid/old.tar.gz", size=123)
+        refreshed = network.SoftwareReleaseInfo("75.1", "https://example.invalid/new.tar.gz", size=456)
+        conf._network.icu_latest_version.side_effect = [selected, refreshed]
+        accepted = SimpleNamespace(check=lambda: self.root / "accepted.tar.gz")
+
+        def extracted(source, staging):
+            self.assertEqual(source, self.root / "accepted.tar.gz")
+            (staging / "windows").mkdir(parents=True)
+
+        with (patch.object(network, "logos_reuse_download", return_value=accepted) as acquire,
+              patch.object(utils, "untar_file", side_effect=extracted), patch.object(wine, "copy_icu_files") as copy):
+            wine.enforce_icu_data_files(self.app)
+        conf._network.icu_latest_version.assert_called_once()
+        acquire.assert_called_once_with(selected.download_url, "icu-win-72.1-custom+4.tar.gz", conf.download_dir,
+                                        app=self.app, kind="icu", digest=None, size=123)
+        copy.assert_called_once()
 
     def test_actual_msi_chain_and_argv_ignore_stale_installer_paths(self):
         conf = self.app.conf

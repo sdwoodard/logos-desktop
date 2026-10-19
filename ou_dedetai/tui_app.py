@@ -62,6 +62,9 @@ class MenuModal(PromptModal):
                 yield Button("Cancel", variant="default", id="cancel")
 
     def on_mount(self) -> None:
+        from . import processes
+
+        processes.resume()
         self.query_one("#menu-list", OptionList).focus()
 
     @on(OptionList.OptionSelected)
@@ -254,7 +257,12 @@ class TextualUI(TextualApp[None]):
         self._populate_main_menu()
         self.query_one("#main-menu", OptionList).focus()
         self.set_interval(2.5, self._monitor_tick)
+        self._controller_timer = self.set_interval(1, self.domain.poll_controller_releases)
+        self.domain.poll_controller_releases()
         self.domain.status("TUI ready")
+        from . import updates
+
+        updates.confirm_startup()
 
     def _monitor_tick(self) -> None:
         try:
@@ -304,6 +312,13 @@ class TextualUI(TextualApp[None]):
         self.exit()
 
     def on_unmount(self):
+        if hasattr(self, "_controller_timer"):
+            self._controller_timer.stop()
+        if hasattr(self.domain, "_controller_checks"):
+            self.domain._controller_checks.close()
+        from . import processes
+
+        processes.shutdown()
         self.domain.cancel_pending_prompts()
 
     def write_status(self, message: str) -> None:
@@ -349,7 +364,23 @@ class TUI(App):
         self.console_log: list[str] = []
         self.tmp = ""
         self.ui = TextualUI(self)
+        from . import releases, updates
+
+        self._controller_checks = releases.ControllerChecks(self.conf._network, updates.eligible,
+                                                            self.conf.refresh_release_snapshots)
+        self._controller_rendered = None
         self.config_updated_hooks.append(self._config_update_hook)
+
+    def poll_controller_releases(self):
+        from . import releases
+
+        self._controller_checks.request(self.conf.app_release_channel)
+        result = self._controller_checks.result
+        current = result, self._controller_checks.revision
+        if current != self._controller_rendered:
+            self._controller_rendered = current
+            self.ui.query_one("#status-bar", Static).update(f"Controller releases: {releases.controller_state(result)}")
+            self.ui.action_refresh()
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
         if isinstance(options, str):
@@ -456,12 +487,12 @@ class TUI(App):
         labels: list[str] = []
 
         if constants.APP_SELF_UPDATES_ENABLED and getattr(constants, "RUNMODE", "") == "binary":
-            try:
-                status = utils.compare_logos_linux_installer_version(self)
-                if status == utils.VersionComparison.OUT_OF_DATE:
-                    labels.append(f"Update {constants.APP_NAME}")
-            except Exception:
-                pass
+            from . import releases
+
+            checks = self._controller_checks
+            if releases.controller_state(checks.result) == "available" and not checks.eligibility_message:
+                labels.append(f"Update {constants.APP_NAME}")
+            labels.append("Check controller releases now")
 
         if self.is_installed():
             product = self.conf.faithlife_product
@@ -475,7 +506,7 @@ class TUI(App):
             else:
                 labels.append("Run Indexing")
 
-            if not getattr(self.conf, "is_installed_faithlife_product_release_latest", True):
+            if getattr(self.conf, "is_installed_faithlife_product_release_latest", None) is False:
                 labels.append(f"Update {product}")
         else:
             labels.extend(["Install", "Advanced Install"])
@@ -494,7 +525,18 @@ class TUI(App):
     def _run_operation(self, operation):
         def run():
             try:
-                operation(self)
+                result = operation(self)
+                from . import updates
+
+                if isinstance(result, updates.PreparedUpdate):
+                    if self._closing.is_set():
+                        result.cancel()
+                    else:
+                        try:
+                            arguments = updates.resume_arguments(self.conf._overrides.config_path, "tui")
+                            self._ui_call(self._restart_controller, result, arguments)
+                        finally:
+                            result.cancel()
             except UserExitedFromAsk:
                 self.status("Operation cancelled")
             except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
@@ -503,6 +545,20 @@ class TUI(App):
             finally:
                 self._ui_call(self.ui.go_to_main_menu)
         self.start_thread(run, daemon_bool=False)
+
+    def _restart_controller(self, prepared, arguments):
+        from . import releases, updates
+
+        stopped = False
+        try:
+            self._controller_checks.close()
+            stopped = True
+            prepared.restart(arguments)
+        finally:
+            if stopped and not self._closing.is_set():
+                self._controller_checks = releases.ControllerChecks(
+                    self.conf._network, updates.eligible, self.conf.refresh_release_snapshots,
+                )
 
     def main_menu_select(self, choice: str) -> None:
         original_assume_yes = getattr(self.conf._overrides, "assume_yes", False)
@@ -535,7 +591,10 @@ class TUI(App):
             self.status("Starting installation…")
 
         elif choice.startswith(f"Update {constants.APP_NAME}"):
-            utils.update_to_latest_lli_release(self)
+            self._run_operation(utils.update_to_latest_lli_release)
+
+        elif choice == "Check controller releases now":
+            self._controller_checks.request(self.conf.app_release_channel, force=True)
 
         elif self.conf._raw.faithlife_product and choice == f"Update {self.conf.faithlife_product}":
             self._run_operation(utils.update_faithlife_product)

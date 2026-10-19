@@ -10,7 +10,7 @@ a = Analysis(
     hiddenimports=["tkinter"],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['scripts/frozen_identity.py'],
     excludes=[],
     noarchive=False,
 )

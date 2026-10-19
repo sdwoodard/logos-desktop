@@ -35,8 +35,11 @@ from . import control
 from . import gui
 from . import installer
 from . import maintenance
+from . import processes
+from . import releases
 from . import system
 from . import utils
+from . import updates
 from . import wine
 import ou_dedetai
 
@@ -194,9 +197,11 @@ class Root(Tk):
         closed = getattr(self, "_operation_closed", None)
         if closed is not None:
             closed.set()
+        processes.shutdown()
         super().destroy()
 
     def __init__(self, *args, **kwargs):
+        processes.resume()
         super().__init__(**kwargs)
         self.classname = kwargs.get('classname')
         # Set the theme.
@@ -474,10 +479,14 @@ class ControlWindow(GuiApp):
         ver = constants.LLI_CURRENT_VERSION
         self.gui.update_lli_label.config(text=f"Update {constants.APP_NAME}\ncurrent: v{ver}\nlatest: ...")
         self.gui.update_lli_button.state(['disabled'])
-        if constants.APP_SELF_UPDATES_ENABLED:
-            self.start_thread(self.update_controller_version)
-        else:
-            self.update_controller_version()
+        self._controller_checks = releases.ControllerChecks(
+            self.conf._network, updates.eligible, getattr(self.conf, "refresh_release_snapshots", None),
+        )
+        self._controller_timer = None
+        self._controller_closed = False
+        self.gui.check_controller_button.configure(command=self.check_controller_releases)
+        self.root.bind("<Destroy>", self._close_controller_checks, add="+")
+        self._poll_controller_checks()
 
         if self.conf._raw.faithlife_product:
             control_gui.update_product_labelvar.set(f"Update {self.conf._raw.faithlife_product}")
@@ -538,6 +547,32 @@ class ControlWindow(GuiApp):
         self._config_update_hook()
         # These can be expanded to change the UI based on config changes.
         self.config_updated_hooks += [self._config_update_hook]
+        self.root.after(0, updates.confirm_startup)
+
+    def _close_controller_checks(self, event):
+        if event.widget != self.root:
+            return
+        self._controller_closed = True
+        self._controller_checks.close()
+        if self._controller_timer is not None:
+            self.root.after_cancel(self._controller_timer)
+            self._controller_timer = None
+
+    def _poll_controller_checks(self):
+        if self._controller_closed:
+            return
+        self._controller_checks.request(self.conf.app_release_channel)
+        current = (self._controller_checks.result, self._controller_checks.eligibility_message,
+                   self._controller_checks.revision)
+        if current != getattr(self, "_controller_rendered", None):
+            self._controller_rendered = current
+            self.update_controller_version()
+            self.update_product_button()
+            self.update_latest_appimage_button()
+        self._controller_timer = self.root.after(250, self._poll_controller_checks)
+
+    def check_controller_releases(self):
+        self._controller_checks.request(self.conf.app_release_channel, force=True)
 
     def edit_config(self):
         control.edit_file(self.conf.config_file_path)
@@ -590,6 +625,10 @@ class ControlWindow(GuiApp):
                 "<Destroy>", lambda event: closed.set() if event.widget == self.root else None, add="+",
             )
         controls = [self.gui.app_button, self.gui.actions_button, self.gui.backup_button, self.gui.restore_button]
+        for name in ("update_lli_button", "update_product_button", "latest_appimage_button"):
+            widget = getattr(self.gui, name, None)
+            if widget is not None:
+                controls.append(widget)
         for widget in controls:
             widget.state(["disabled"])
 
@@ -598,10 +637,20 @@ class ControlWindow(GuiApp):
             for widget in controls:
                 widget.state(["!disabled"])
             self.update_app_button()
+            if hasattr(self, "_controller_checks"):
+                self.update_controller_version()
 
         def run():
             try:
-                operation(self)
+                result = operation(self)
+                if isinstance(result, updates.PreparedUpdate):
+                    if closed.is_set():
+                        result.cancel()
+                    else:
+                        try:
+                            self.root.after(0, lambda: self._restart_controller(result))
+                        except (TclError, RuntimeError):
+                            result.cancel()
             except UserExitedFromAsk:
                 if not closed.is_set():
                     self.status("Operation cancelled", 0)
@@ -677,7 +726,27 @@ class ControlWindow(GuiApp):
 
     def update_to_latest_lli_release(self, evt=None):
         self.status(f"Updating to latest {constants.APP_NAME} version…")
-        self.start_thread(utils.update_to_latest_lli_release, app=self)
+        self._run_operation(utils.update_to_latest_lli_release)
+
+    def _restart_controller(self, prepared):
+        if getattr(self.root, "_operation_closed", Event()).is_set():
+            prepared.cancel()
+            return
+        stopped = False
+        try:
+            self._controller_checks.close()
+            stopped = True
+            arguments = updates.resume_arguments(self.conf._overrides.config_path, "tk")
+            prepared.restart(arguments)
+        except (RuntimeError, OSError, ValueError) as error:
+            self.status(f"Controller update failed: {error}", 0)
+            self.pop_up("Controller update failed", str(error))
+        finally:
+            prepared.cancel()
+            if stopped and not self._controller_closed:
+                self._controller_checks = releases.ControllerChecks(
+                    self.conf._network, updates.eligible, getattr(self.conf, "refresh_release_snapshots", None),
+                )
 
     def set_appimage_symlink(self):
         utils.set_appimage_symlink(self)
@@ -745,6 +814,9 @@ class ControlWindow(GuiApp):
         elif self.conf.is_installed_faithlife_product_release_latest:
             state = 'disabled'
             msg = f"This button is disabled. {self.conf.faithlife_product} is up-to-date."
+        elif self.conf.is_installed_faithlife_product_release_latest is None:
+            state = 'disabled'
+            msg = "Product release information is unavailable or stale. Use Check now to retry."
         else:
             state = '!disabled'
         if msg:
@@ -753,14 +825,16 @@ class ControlWindow(GuiApp):
         self.gui.update_product_button.state([state])
 
     def update_controller_version(self):
-        current = constants.LLI_CURRENT_VERSION
+        current = constants.APP_RELEASE_VERSION or "private, unversioned"
         if not constants.APP_SELF_UPDATES_ENABLED:
             latest_text = constants.APP_SELF_UPDATE_DISABLED_MESSAGE
         else:
-            latest = self.conf.app_latest_version
-            latest_text = f"latest: v{latest}" if latest is not None else "latest: unavailable"
+            lookup = self._controller_checks.result
+            state = releases.controller_state(lookup)
+            latest = lookup.release.version if lookup.release else "unavailable"
+            latest_text = f"latest: {latest} ({state})"
 
-        self.gui.update_lli_label.config(text=f"Update {constants.APP_NAME}\ncurrent: v{current}\n{latest_text}")
+        self.gui.update_lli_label.config(text=f"Update {constants.APP_NAME}\ncurrent: {current}\n{latest_text}")
         self.update_latest_lli_release_button()
 
     def update_latest_lli_release_button(self, evt=None):
@@ -768,18 +842,22 @@ class ControlWindow(GuiApp):
         msg = None
         if not constants.APP_SELF_UPDATES_ENABLED:
             msg = constants.APP_SELF_UPDATE_DISABLED_MESSAGE
-        elif constants.RUNMODE != 'binary':
-            msg = f"This button is disabled. Can't run self-update from {constants.RUNMODE}."
+        elif getattr(self, "_operation_running", False):
+            msg = "Wait for the current operation to finish"
         else:
-            result = utils.compare_logos_linux_installer_version(self)
-            if result == utils.VersionComparison.OUT_OF_DATE:
+            lookup = self._controller_checks.result
+            result = releases.controller_state(lookup)
+            eligibility = self._controller_checks.eligibility_message
+            if eligibility:
+                msg = eligibility
+            elif result == "available":
                 state = '!disabled'
-            elif result == utils.VersionComparison.UP_TO_DATE:
+            elif result == "current":
                 msg = f"This button is disabled. {constants.APP_NAME} is up-to-date."
-            elif result == utils.VersionComparison.DEVELOPMENT:
+            elif result == "development":
                 msg = f"This button is disabled. {constants.APP_NAME} is newer than the latest release."
             else:
-                msg = "This button is disabled. No controller release information is available."
+                msg = lookup.message if result != "unversioned" else "This private build has no release version"
 
         if msg:
             gui.ToolTip(self.gui.update_lli_button, msg)
@@ -801,7 +879,7 @@ class ControlWindow(GuiApp):
                 "This button is disabled. The configured install was not created using an AppImage."
             )
         elif self.conf._raw.wine_binary is not None:
-            status, _ = utils.compare_recommended_appimage_version(self)
+            status, detail = getattr(self.conf, "recommended_wine_status", (-1, "Not checked"))
             if status == 0:
                 state = '!disabled'
             elif status == 1:
@@ -813,6 +891,7 @@ class ControlWindow(GuiApp):
             else:
                 # Failed to check
                 state = '!disabled'
+                msg = detail
         else:
             # Not enough context to figure out if this should be enabled or not
             state = '!disabled'

@@ -2,10 +2,8 @@ import queue
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from pathlib import Path
-
-from packaging.version import InvalidVersion
 
 import ou_dedetai.constants as constants
 import ou_dedetai.utils as utils
@@ -20,30 +18,26 @@ class TestAppUtils(unittest.TestCase):
         self.app.conf = Mock()
 
     def test_compare_logos_linux_installer_version_custom(self):
-        constants.LLI_CURRENT_VERSION = '4.0.1'
-        self.app.conf.app_latest_version = '4.0.0-alpha.1'
-        result = utils.compare_logos_linux_installer_version(self.app)
+        self.app.conf.app_latest_version = '1.0.0-alpha.1'
+        with patch.object(constants, "APP_RELEASE_VERSION", "1.0.1"):
+            result = utils.compare_logos_linux_installer_version(self.app)
         self.assertEqual(result, utils.VersionComparison.DEVELOPMENT)
 
     def test_compare_logos_linux_installer_version_notset(self):
-        constants.LLI_CURRENT_VERSION = None
-        self.app.conf.app_latest_version = '4.0.1'
-        self.assertRaises(
-            InvalidVersion,
-            utils.compare_logos_linux_installer_version,
-            self.app
-        )
+        self.app.conf.app_latest_version = '1.0.1'
+        with patch.object(constants, "APP_RELEASE_VERSION", None):
+            self.assertIsNone(utils.compare_logos_linux_installer_version(self.app))
 
     def test_compare_logos_linux_installer_version_uptodate(self):
-        constants.LLI_CURRENT_VERSION = '4.0.0-alpha.1'
-        self.app.conf.app_latest_version = '4.0.0-alpha.1'
-        result = utils.compare_logos_linux_installer_version(self.app)
+        self.app.conf.app_latest_version = '1.0.0-alpha.1'
+        with patch.object(constants, "APP_RELEASE_VERSION", "1.0.0-alpha.1"):
+            result = utils.compare_logos_linux_installer_version(self.app)
         self.assertEqual(result, utils.VersionComparison.UP_TO_DATE)
 
     def test_compare_logos_linux_installer_version_yes(self):
-        constants.LLI_CURRENT_VERSION = '4.0.0-alpha.1'
-        self.app.conf.app_latest_version = '4.0.1'
-        result = utils.compare_logos_linux_installer_version(self.app)
+        self.app.conf.app_latest_version = '1.0.1'
+        with patch.object(constants, "APP_RELEASE_VERSION", "1.0.0-alpha.1"):
+            result = utils.compare_logos_linux_installer_version(self.app)
         self.assertEqual(result, utils.VersionComparison.OUT_OF_DATE)
 
     @unittest.skip("Needs functional wine binary.")
