@@ -34,7 +34,6 @@ from . import constants
 from . import control
 from . import gui
 from . import installer
-from . import maintenance
 from . import processes
 from . import releases
 from . import system
@@ -709,7 +708,7 @@ class ControlWindow(GuiApp):
         self._run_operation(backup.restore)
 
     def install_deps(self, evt=None):
-        self.start_thread(utils.install_dependencies, self)
+        self._run_operation(utils.install_dependencies)
 
     def open_file_dialog(self, filetype_name, filetype_extension):
         file_path = fd.askopenfilename(
@@ -765,7 +764,6 @@ class ControlWindow(GuiApp):
         if not appimage_filename:
             return
 
-        @maintenance.uses_installation
         def change_runtime(app):
             utils.set_appimage_symlink(app, source=appimage_filename)
 

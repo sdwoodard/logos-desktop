@@ -221,7 +221,9 @@ def use(context: Context, *, exclusive=False, recovery=False):
             and (context.install is None or active[0].install == context.install)
             and (context.product is None or active[0].product == context.product)
         )
-        if not same_context or exclusive != active[1]:
+        installing = getattr(_local, "installing", None) == active[0]
+        borrowed = installing and active[1] and not exclusive
+        if not same_context or (exclusive != active[1] and not borrowed):
             raise MaintenanceBusy("Conflicting nested installation operation")
         yield active[0]
         return
@@ -354,3 +356,36 @@ def maintains_installation(function):
         with maintain(app):
             return function(app, *args, **kwargs)
     return admitted
+
+
+@contextmanager
+def installing(app):
+    """Own an idle prefix exclusively while permitting this owner's Wine commands."""
+    with configured(app) as context:
+        active = getattr(_local, "installing", None)
+        if active is not None:
+            if active != context:
+                raise MaintenanceBusy("Installation selection changed during the operation")
+            yield context
+            return
+
+        # Lock order is prefix admission, artifact use, runtime selection, config,
+        # then controller destination. Ordinary restore still rejects Wine calls.
+        with maintain(app, context), artifact_use():
+            _local.installing = context
+            try:
+                yield context
+            finally:
+                _local.installing = None
+
+
+def changes_installation(function):
+    @wraps(function)
+    def admitted(app, *args, **kwargs):
+        with installing(app):
+            return function(app, *args, **kwargs)
+    return admitted
+
+
+def installation_owned():
+    return getattr(_local, "installing", None) is not None

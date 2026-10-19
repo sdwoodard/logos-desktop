@@ -128,7 +128,7 @@ def detect_and_recover(ephemeral_config: EphemeralConfiguration):
 
     if detected_failure == FailureType.FailedUpgrade:
         def _run(app: App):
-            with maintenance.configured(app) as selected, maintenance.use(context):
+            with maintenance.installing(app) as selected:
                 if selected != context:
                     raise maintenance.MaintenanceError("Recovery selection changed before installation")
                 app.conf._raw.faithlife_product_release = None

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import logging
 import os
+import re
 import shutil
 import secrets
 import stat
@@ -20,43 +21,16 @@ from . import utils
 from . import paths
 
 def check_wineserver(app: App) -> bool:
-    # FIXME: if the wine version changes, we may need to restart the wineserver
-    # (or at least kill it). Gotten into several states in dev where this happend
-    # Normally when an msi install failed
-    try:
-        process = run_wine_during_install(app, app.conf.wineserver_binary)
-        if not process:
-            logging.debug("Failed to spawn wineserver to check it")
-            return False
-        # We already check the return code in run_wine_during_install.
-        # If there is a non-zero exit code subprocess.CalledProcessError will be raised
-        return True
-    except subprocess.CalledProcessError:
-        return False
+    run_wine_during_install(app, app.conf.wineserver_binary, timeout=30)
+    return True
 
 
 def wineserver_kill(app: App):
-    if check_wineserver(app):
-        process = run_wine_during_install(
-            app,
-            app.conf.wineserver_binary,
-            exe_args=["-k"]
-        )
-        if not process:
-            logging.debug("Failed to spawn wineserver to kill it")
-            return False
+    return run_wine_during_install(app, app.conf.wineserver_binary, exe_args=["-k"], timeout=30)
 
 
 def wineserver_wait(app: App):
-    if check_wineserver(app):
-        process = run_wine_during_install(
-            app,
-            app.conf.wineserver_binary,
-            exe_args=["-w"]
-        )
-        if not process:
-            logging.debug("Failed to spawn wineserver to wait for it")
-            return False
+    return run_wine_during_install(app, app.conf.wineserver_binary, exe_args=["-w"], timeout=60)
 
 
 @dataclass
@@ -88,30 +62,17 @@ def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
                 raise RuntimeError("Wine version probe failed")
             version_string = output.decode("utf-8").strip()
         logging.debug(f"Version string: {str(version_string)}")
-        branch: Optional[str]
-        try:
-            wine_version, branch = version_string.split()  # release = (Staging)
-            branch = branch.lstrip('(').rstrip(')').lower()  # remove parens
-        except ValueError:
-            # Neither "Devel" nor "Stable" release is noted in version output
-            wine_version = version_string
-            branch = get_devel_or_stable(wine_version)
-        version = wine_version.lstrip('wine-')
-        logging.debug(f"Wine branch of {binary}: {branch}")
-
-        ver_major = int(version.split('.')[0].lstrip('wine-'))  # remove 'wine-'
-        ver_minor_str = version.split('.')[1]
-        # In the case the version is an rc like wine-10.0-rc5
-        if '-' in ver_minor_str:
-            ver_minor_str = ver_minor_str.split("-")[0]
-        ver_minor = int(ver_minor_str)
-
-        wine_release = WineRelease(ver_major, ver_minor, branch)
-        logging.debug(f"Wine release of {binary}: {str(wine_release)}")
-        if ver_major == 0:
-            return None, "Couldn't determine wine version."
-        else:
-            return wine_release, "yes"
+        match = re.fullmatch(
+            r"wine-(\d+)\.(\d+)(?:\.\d+)*(?:-rc\d+)?(?: \((stable|devel|staging)\))?",
+            version_string, re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError("Unrecognized Wine version output")
+        major, minor = int(match[1]), int(match[2])
+        if major == 0:
+            raise ValueError("Wine major version must be positive")
+        branch = match[3].lower() if match[3] else ("stable" if minor == 0 else "devel")
+        return WineRelease(major, minor, branch), "yes"
 
     except subprocess.CalledProcessError as e:
         return None, f"Error running command: {e}"
@@ -123,13 +84,11 @@ def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
         return None, f"Error: {e}"
 
 
-@dataclass
-class WineRule:
-    major: int
-    proton: bool
-    minor_bad: list[int]
-    allowed_releases: list[str]
-    devel_allowed: Optional[int] = None
+def product_release(value: str) -> Version:
+    """Parse the four numeric fields used by the product installer feed."""
+    if not isinstance(value, str) or re.fullmatch(r"\d+\.\d+\.\d+\.\d+", value) is None:
+        raise maintenance.MaintenanceError(f"Invalid target product release: {value!r}")
+    return Version(value)
 
 
 def check_wine_rules(
@@ -137,86 +96,48 @@ def check_wine_rules(
     release_version: Optional[str],
     faithlife_product_version: str
 ):
-    # Does not check for Staging. Will not implement: expecting merging of
-    # commits in time.
     logging.debug(f"Checking {wine_release} for {release_version}.")
     if faithlife_product_version == "10":
-        if release_version is not None and Version(release_version) < Version("30.0.0.0"): 
-            required_wine_minimum = [7, 18]
+        if release_version is not None and product_release(release_version) < Version("30.0.0.0"):
+            minimum = (7, 18)
         else:
-            required_wine_minimum = [9, 10]
+            minimum = (9, 10)
     elif faithlife_product_version == "9":
-        required_wine_minimum = [7, 0]
+        minimum = (7, 0)
     else:
         raise ValueError(
             "Invalid target version, expecting 9 or 10 but got: "
             f"{faithlife_product_version} ({type(faithlife_product_version)})"
         )
 
-    rules: list[WineRule] = [
-        # Proton release tend to use the x.0 release, but can include changes found in devel/staging
-        # exceptions to minimum
-        WineRule(major=7, proton=True, minor_bad=[], allowed_releases=["staging"]),
-        # devel permissible at this point
-        WineRule(major=8, proton=False, minor_bad=[0], allowed_releases=["staging"], devel_allowed=16), 
-        WineRule(major=9, proton=False, minor_bad=[], allowed_releases=["devel", "staging"]),  
-        WineRule(major=10, proton=False, minor_bad=[], allowed_releases=["stable", "devel", "staging"]) 
-    ]
+    if wine_release is None:
+        return False, "Could not identify the selected Wine version"
 
-    major_min, minor_min = required_wine_minimum
-    if wine_release:
-        major = wine_release.major
-        minor = wine_release.minor
-        release_type = wine_release.release
-        result = True, "None"  # Whether the release is allowed; error message
-        for rule in rules:
-            if major == rule.major:
-                # Verify release is allowed
-                if release_type not in rule.allowed_releases:
-                    if minor >= (rule.devel_allowed or float('inf')):
-                        if release_type not in ["staging", "devel"]:
-                            result = (
-                                False,
-                                (
-                                    f"Wine release needs to be devel or staging. "
-                                    f"Current release: {release_type}."
-                                )
-                            )
-                            break
-                    else:
-                        result = (
-                            False,
-                            (
-                                f"Wine release needs to be {rule.allowed_releases}. "
-                                f"Current release: {release_type}."
-                            )
-                        )
-                        break
-                # Verify version is allowed
-                if minor in rule.minor_bad:
-                    result = False, f"Wine version {major}.{minor} will not work."
-                    break
-                if major < major_min:
-                    result = (
-                        False,
-                        (
-                            f"Wine version {major}.{minor} is "
-                            f"below minimum required ({major_min}.{minor_min}).")
-                    )
-                    break
-                elif major == major_min and minor < minor_min:
-                    if not rule.proton:
-                        result = (
-                            False,
-                            (
-                                f"Wine version {major}.{minor} is "
-                                f"below minimum required ({major_min}.{minor_min}).")
-                        )
-                        break
-        logging.debug(f"Result: {result}")
-        return result
-    else:
-        return True, "Default to trusting user override"
+    major, minor, branch = wine_release.major, wine_release.minor, wine_release.release
+    if (major, minor) < minimum:
+        return False, f"Wine {major}.{minor} is below minimum required ({minimum[0]}.{minimum[1]})"
+    if branch not in ("stable", "devel", "staging"):
+        return False, f"Unrecognized Wine branch: {branch}"
+    if major == 8 and minor == 0:
+        return False, "Wine 8.0 will not work"
+    if major == 7 and branch != "staging":
+        return False, "Wine 7 requires staging"
+    if major == 8 and branch != "staging" and not (minor >= 16 and branch == "devel"):
+        return False, "Wine 8 requires staging or devel 8.16 or later"
+    if major == 9 and branch not in ("devel", "staging"):
+        return False, "Wine 9 requires devel or staging"
+    return True, "Compatible with the configured Wine version rules"
+
+
+def require_compatible(app: App, binary: str | Path):
+    release, reason = get_wine_release(str(binary))
+    if release is None:
+        raise maintenance.MaintenanceError(f"Cannot use the selected Wine runtime: {reason}")
+    compatible, reason = check_wine_rules(
+        release, app.conf.faithlife_product_release, app.conf.faithlife_product_version,
+    )
+    if not compatible:
+        raise maintenance.MaintenanceError(reason)
 
 
 def check_wine_version_and_branch(release_version: Optional[str], test_binary,
@@ -241,9 +162,6 @@ def check_wine_version_and_branch(release_version: Optional[str], test_binary,
     )
     if not result:
         return result, message
-
-    if wine_release.major > 9:
-        pass
 
     return True, "None"
 
@@ -291,7 +209,7 @@ def set_win_version(app: App, exe: str, windows_version: str):
             exe_args=exe_args
         )
         if process is None:
-            app.exit("Failed to spawn command to set windows version for indexer")
+            raise maintenance.MaintenanceError("Failed to set the indexer's Windows version")
 
 
 def wine_reg_query(app: App, key_name: str, value_name: str) -> Optional[str]:
@@ -318,6 +236,8 @@ def wine_reg_query(app: App, key_name: str, value_name: str) -> Optional[str]:
             value_name
         ]
     )
+    if process is None:
+        raise maintenance.MaintenanceError("Registry query could not be started")
     if process.returncode == 1:
         # Key not found
         return None
@@ -338,7 +258,7 @@ def wine_reg_query(app: App, key_name: str, value_name: str) -> Optional[str]:
         # Unknown exit code
         failed = f"Failed to query the registry: Unknown Exit code {process.returncode}"
         logging.debug(f"{failed}. {process=}")
-        app.exit(f"{failed}: {key_name} {value_name}")
+        raise maintenance.MaintenanceError(f"{failed}: {key_name} {value_name}")
 
 
 def wine_reg_install(app: App, name: str, reg_text: str, wine64_binary: str):
@@ -346,23 +266,12 @@ def wine_reg_install(app: App, name: str, reg_text: str, wine64_binary: str):
         reg_file = Path(tempdir) / name
         reg_file.write_text(reg_text)
         app.status(f"Installing registry file: {reg_file}")  
-        try:
-            process = run_wine_during_install(
-                app=app,
-                wine_binary=wine64_binary,
-                exe="regedit.exe",
-                exe_args=[str(reg_file)]
-            )
-            if process is None:
-                app.exit("Failed to spawn command to install reg file")
-            logging.info(f"{reg_file} installed.")
-            wineserver_wait(app)
-        except subprocess.CalledProcessError:
-            failed = "Failed to install reg file"
-            logging.exception(f"{failed}. {process=}")
-            app.exit(f"{failed}: {reg_file}")
-        finally:
-            reg_file.unlink()
+        run_wine_during_install(
+            app=app, wine_binary=wine64_binary, exe="regedit.exe",
+            exe_args=[str(reg_file)], timeout=60,
+        )
+        wineserver_wait(app)
+        logging.info("Registry file installed: %s", name)
 
 
 def disable_winemenubuilder(app: App, wine64_binary: str):
@@ -406,9 +315,10 @@ def set_fontsmoothing_to_rgb(app: App, wine64_binary: str):
     wine_reg_install(app, name, reg_text, wine64_binary)
 
 
-@maintenance.uses_installation
-def install_msi(app: App, accepted: artifacts.AcceptedArtifact):
-    app.status(f"Running MSI installer: {app.conf.faithlife_installer_name}.")
+@maintenance.changes_installation
+def install_msi(app: App, accepted: artifacts.AcceptedArtifact, *, target_release: str):
+    target_version = product_release(target_release)
+    app.status(f"Running MSI installer: {accepted.spec.name}.")
     # Define the Wine executable and initial arguments for msiexec
     wine_binary = app.conf.wine64_binary
     if accepted.spec.kind != "msi":
@@ -428,28 +338,37 @@ def install_msi(app: App, accepted: artifacts.AcceptedArtifact):
     ):
         exe_args.append("/passive")
 
-    # Add MST transform if needed
-    release_version = app.conf.installed_faithlife_product_release or app.conf.faithlife_product_release
-    if release_version is not None and Version(release_version) > Version("39.0.0.0"): 
-        # Define MST path and transform to windows path.
+    if target_version > Version("39.0.0.0"):
         mst_path = constants.APP_ASSETS_DIR / "LogosStubFailOK.mst"
-        transform_winpath = run_wine_completed_process(
-            app=app,
-            wine_binary=wine_binary,
-            exe_args=['winepath', '-w', mst_path]
-        ).stdout.rstrip()
+        if not mst_path.is_file() or mst_path.stat().st_size == 0:
+            raise maintenance.MaintenanceError(f"Required MSI transform is missing: {mst_path}")
+        with mst_path.open("rb") as transform:
+            transform.read(1)
+        transform_winpath = windows_path(app, wine_binary, mst_path)
         exe_args.append(f'TRANSFORMS={transform_winpath}')
         logging.debug(f"TRANSFORMS windows path added: {transform_winpath}")
 
-    # Log the msiexec command and run the process
+    exe_args[1] = windows_path(app, wine_binary, accepted.check())
     logging.info(f"Running: {wine_binary} msiexec {' '.join(exe_args)}")
-    result = run_wine_during_install(app, wine_binary, exe="msiexec", exe_args=exe_args)
+    result = run_wine_during_install(app, wine_binary, exe="msiexec", exe_args=exe_args, timeout=None)
     if result is not None:
-        # Wait in order to get the exit status.
         result.wait()
     if result is None or result.returncode != 0:
-        app.exit("Logos Installer failed.") 
+        raise maintenance.MaintenanceError("Logos MSI installation failed")
     return result
+
+
+def windows_path(app: App, wine_binary: str, source: Path) -> str:
+    """Use an extended Windows name so MSI can read long immutable store paths."""
+    converted = run_wine_completed_process(app, wine_binary, exe_args=["winepath", "-w", str(source)])
+    if converted is None or converted.returncode != 0 or not isinstance(converted.stdout, str):
+        raise maintenance.MaintenanceError(f"winepath failed to convert installer input: {source.name}")
+    pathname = converted.stdout.strip()
+    if pathname.startswith("\\\\?\\"):
+        pathname = pathname[4:]
+    if re.fullmatch(r"[A-Za-z]:\\[^\r\n\x00]+", pathname) is None:
+        raise maintenance.MaintenanceError(f"winepath returned an invalid installer path: {source.name}")
+    return "\\\\?\\" + pathname
 
 
 def run_winetricks(app: App, *args):
@@ -457,13 +376,7 @@ def run_winetricks(app: App, *args):
     if "-q" not in args and app.conf.winetricks_binary:
         cmd.insert(0, "-q")
     logging.info(f"running \"winetricks {' '.join(cmd)}\"")
-    try:
-        process = run_wine_during_install(app, app.conf.winetricks_binary, exe_args=cmd)
-        if process is None:
-            app.exit("Failed to spawn winetricks")
-    except subprocess.CalledProcessError:
-        logging.exception(f"\"winetricks {' '.join(cmd)}\" Failed!")
-        app.exit(f"\"winetricks {' '.join(cmd)}\" Failed!")
+    run_wine_during_install(app, app.conf.winetricks_binary, exe_args=cmd, timeout=None)
     logging.info(f"\"winetricks {' '.join(cmd)}\" DONE!")
     logging.debug(f"procs using {app.conf.wine_prefix}:")
     for proc in utils.get_procs_using_file(app.conf.wine_prefix):
@@ -536,12 +449,13 @@ def run_wine_completed_process(
         command.append(exe)
     if exe_args:
         command.extend(exe_args)
-    return subprocess.run(
-        command,
-        env=system.fix_ld_library_path(env),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            command, env=system.fix_ld_library_path(env), capture_output=True,
+            text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise maintenance.MaintenanceError(f"Wine helper failed: {command!r}: {error}") from error
 
 
 @maintenance.uses_installation
@@ -575,46 +489,48 @@ def run_wine_process(
 
     cmd = f"Running wine cmd: '{' '.join(command)}'"
     logging.debug(cmd)
+    stdout.write(f"{utils.get_timestamp()}: {cmd}\n")
+    prefix_lease = None
+    if not maintenance.installation_owned():
+        prefix_lease = maintenance.Lease(maintenance.Context.from_app(app))
+    lease = maintenance.artifact_use()
     try:
-        stdout.write(f"{utils.get_timestamp()}: {cmd}\n")
-        # FIXME: consider calling Popen directly here so we can remove the
-        # run_wine_proc_completed_process function - as it is nearly a duplicate
-        # of this one, but with a different arg to Popen.
-        lease = maintenance.artifact_use()
         lease.__enter__()
+    except BaseException:
+        if prefix_lease is not None:
+            prefix_lease.close()
+        raise
+    transferred = False
+    process = None
+
+    def release():
         try:
-            process = system.popen_command(
-                command,
-                stdout=stdout,
-                stderr=stderr,
-                stdin=stdin,
-                env=env,
-                start_new_session=True,
-                encoding='utf-8'
-            )
-            if process is None:
-                lease.__exit__(None, None, None)
-                return None
-
-            def release():
-                try:
-                    process.wait()
-                finally:
-                    lease.__exit__(None, None, None)
-
-            try:
-                threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
-            except BaseException:
-                process.wait()
-                raise
-            return process
-        except BaseException:
+            process.wait()
+        finally:
+            if prefix_lease is not None:
+                prefix_lease.close()
             lease.__exit__(None, None, None)
-            raise
 
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Exception running '{' '.join(command)}': {e}")
-    return None
+    try:
+        process = system.popen_command(
+            command, stdout=stdout, stderr=stderr, stdin=stdin, env=env,
+            start_new_session=True, encoding='utf-8',
+        )
+        if process is None:
+            return None
+        threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
+        transferred = True
+        return process
+    except BaseException:
+        if process is not None:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        if not transferred:
+            if prefix_lease is not None:
+                prefix_lease.close()
+            lease.__exit__(None, None, None)
 
 
 @maintenance.uses_installation
@@ -650,9 +566,10 @@ def run_wine_during_install(
     app: App,
     wine_binary: str | Path,
     exe=None,
-    exe_args=list(),
+    exe_args=None,
     init=False,
     additional_wine_dll_overrides: Optional[str] = None,
+    timeout: float | None = 120,
 ) -> Optional[subprocess.Popen[bytes]]:
     """Wait for Wine and raise a domain error if spawn or execution fails."""
     with tempfile.NamedTemporaryFile(mode="w+") as temp_file:
@@ -667,23 +584,21 @@ def run_wine_during_install(
         )
         if process is None:
             raise maintenance.MaintenanceError("Wine command could not be started")
-        if process:
-            if exe:
-                full_command_string = f"{wine_binary} {exe} {" ".join(exe_args)}"
-            else:
-                full_command_string = f"{wine_binary} {" ".join(exe_args)}"
-            logging.debug(f"Waiting on: {full_command_string}")
+        command = [str(wine_binary), *([exe] if exe else []), *map(str, exe_args or [])]
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            process.kill()
             process.wait()
-            logging.debug(f"Wine process {full_command_string} "
-                          f"completed with: {process.returncode}. "
-                          "Dumping log:")
-            # Now read from the tempfile and echo into our application log.
-            with open(temp_file.name, "r") as temp_log_file:
-                while line := temp_log_file.readline():
-                    logging.debug(f"> {line.rstrip()}")
-            logging.debug(f"Finished dumping log {full_command_string}")
-            if process.returncode != 0:
-                raise maintenance.MaintenanceError(f"Wine command failed with exit code {process.returncode}")
+            raise maintenance.MaintenanceError(f"Wine command timed out: {command!r}") from error
+        finally:
+            temp_file.seek(0)
+            for line in temp_file:
+                logging.debug("> %s", line.rstrip())
+        if process.returncode != 0:
+            raise maintenance.MaintenanceError(
+                f"Wine command failed with exit code {process.returncode}: {command!r}"
+            )
     return process
 
 
@@ -813,16 +728,16 @@ def _get_registry_value(reg_path, name, app: App):
     if encoding is None:
         encoding = 'UTF-8'
     try:
-        result = system.run_command(
-            cmd,
-            encoding=encoding,
-            env=env
-        )
-    except subprocess.CalledProcessError as e:
-        if 'non-zero exit status' in str(e):
-            logging.warning(err_msg)
-            return None
-    if result is not None and result.stdout is not None:
+        result = system.run_command(cmd, encoding=encoding, env=env, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise maintenance.MaintenanceError(err_msg) from error
+    if result is None:
+        raise maintenance.MaintenanceError(err_msg)
+    if result.returncode == 1:
+        return None
+    if result.returncode != 0:
+        raise maintenance.MaintenanceError(f"{err_msg}, exit code {result.returncode}")
+    if result.stdout is not None:
         for line in result.stdout.splitlines():
             if line.strip().startswith(name):
                 value = line.split()[-1].strip()

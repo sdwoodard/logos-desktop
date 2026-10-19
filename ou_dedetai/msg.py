@@ -136,7 +136,19 @@ def update_log_path(app_log_path: str | Path):
     for h in logging.getLogger().handlers:
         if type(h) is GzippedRotatingFileHandler and h.name == "logfile":
             new_base_filename = os.path.abspath(os.fspath(app_log_path))
-            if new_base_filename != h.baseFilename:
-                # One last message on the old log to let them know it moved
-                logging.debug(f"Installer log file changed to: {app_log_path}")
+            with h.lock:
+                if new_base_filename == h.baseFilename:
+                    continue
+                Path(new_base_filename).parent.mkdir(parents=True, exist_ok=True)
+                incoming = open(new_base_filename, h.mode, encoding=h.encoding, errors=h.errors)
+                previous = h.stream
+                try:
+                    if previous is not None:
+                        previous.flush()
+                except BaseException:
+                    incoming.close()
+                    raise
+                h.stream = incoming
                 h.baseFilename = new_base_filename
+                if previous is not None:
+                    previous.close()

@@ -2,6 +2,7 @@
 
 from base64 import b64decode, b64encode
 from contextlib import contextmanager
+import copy
 from functools import wraps
 import fcntl
 import hashlib
@@ -209,13 +210,19 @@ def recover_startup(overrides, persistent):
     return conf._raw
 
 
-@maintenance.uses_installation
+@maintenance.changes_installation
 def activate(app, accepted):
     """Select a prepared immutable runtime without replacing old runtime bytes."""
     if accepted.spec.kind != "appimage":
         raise artifacts.ArtifactError("Runtime activation requires an accepted AppImage")
     accepted.check()
     conf = app.conf
+    from . import wine
+
+    store = Path(conf.install_dir) / "data/bin/.artifacts"
+    if not accepted.path.is_relative_to(store):
+        accepted = artifacts.import_local(accepted.path, store.parent, accepted.spec)
+    wine.require_compatible(app, accepted.path)
     with activation_guard(app, exclusive=True) as context, configuration_lock():
         _recover_locked(app, context)
         links, configs = _targets(app)
@@ -232,9 +239,19 @@ def activate(app, accepted):
         fields = ("_wine64_path", "_wine64_identity", "_wine_binary_files", "_wine_appimage_files")
         old_cache = {name: getattr(conf, name, None) for name in fields}
         old_override = conf._overrides.wine_appimage_path
-        proposed = conf._raw._as_dict().copy()
-        proposed["wine_binary"] = paths.relative_to_install(accepted.path, conf.install_dir)
-        proposed["wine_binary_code"] = "AppImage"
+        from .config import LegacyConfiguration
+
+        proposed_raw = copy.deepcopy(conf._raw)
+        proposed_raw.wine_binary = paths.relative_to_install(accepted.path, conf.install_dir)
+        proposed_raw.wine_binary_code = "AppImage"
+        legacy = proposed_raw._legacy or LegacyConfiguration()
+        legacy.WINE_EXE = proposed_raw.wine_binary
+        legacy.WINEBIN_CODE = "AppImage"
+        legacy.SELECTED_APPIMAGE_FILENAME = None
+        legacy.WINEPREFIX = str(context.prefix)
+        legacy.APPDIR_BINDIR = str(conf.installer_binary_dir)
+        proposed_raw._legacy = legacy
+        proposed = proposed_raw._as_dict()
         content = (json.dumps(proposed, indent=4, sort_keys=True) + "\n").encode()
         _replace_bytes(journal, json.dumps(record).encode())
         try:
@@ -259,8 +276,7 @@ def activate(app, accepted):
             conf._overrides.wine_appimage_path = old_override
             for name, value in old_cache.items():
                 setattr(conf, name, value)
-        conf._raw.wine_binary = proposed["wine_binary"]
-        conf._raw.wine_binary_code = "AppImage"
+        conf._raw = proposed_raw
         conf._overrides.wine_appimage_path = None
         for name in fields:
             setattr(conf, name, None)
@@ -272,7 +288,7 @@ def executable(binary, app=None, *, destination=None):
     """Resolve mutable aliases once, preserving companion argv0 within a generation."""
     if app is not None:
         with activation_guard(app):
-            return executable(binary, destination=Path(app.conf.installer_binary_dir))
+            return executable(binary, destination=Path(app.conf.install_dir) / "data/bin")
     requested = Path(binary)
     if not requested.is_absolute():
         raise ValueError("Runtime executable must be absolute")
@@ -282,12 +298,16 @@ def executable(binary, app=None, *, destination=None):
     if concrete.name.lower().endswith(".appimage"):
         artifacts.validate_format(concrete, "appimage")
         if concrete.parent.parent.parent.name == ".artifacts":
-            artifacts.installed(concrete, "appimage")
+            accepted = artifacts.installed(concrete, "appimage")
             if requested.name in artifacts.COMPANIONS:
                 companion = concrete.parent / requested.name
                 if not companion.is_symlink() or companion.resolve() != concrete:
                     raise artifacts.ArtifactError("Runtime companion does not match the accepted generation")
-                return str(companion)
+            if destination is not None and not concrete.is_relative_to(destination / ".artifacts"):
+                accepted = artifacts.import_local(concrete, destination, accepted.spec)
+                concrete = accepted.path
+            if requested.name in artifacts.COMPANIONS:
+                return str(concrete.parent / requested.name)
             return str(concrete)
         if destination is None:
             destination = paths.ensure_cache_directory(Path(constants.CACHE_DIR), constants.CACHE_BASE) / "runtimes"

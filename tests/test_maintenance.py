@@ -27,6 +27,7 @@ class TestMaintenance(unittest.TestCase):
         patch.object(constants, "STATE_DIR", str(self.root / "state/FaithLife-Community")).start()
         self.app = fixture_app(self.root)
         self.context = maintenance.Context.from_app(self.app)
+        self.app.conf.install_dir = str(self.context.install)
         self.app.conf.installer_binary_dir = str(self.context.install / "data/bin")
 
     def child(self, program, *arguments, env=None):

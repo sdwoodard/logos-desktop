@@ -1,4 +1,5 @@
 import copy
+from contextlib import ExitStack
 import os
 import subprocess
 from typing import Any, Optional
@@ -385,10 +386,18 @@ class PersistentConfiguration:
             "faithlife_product_release_channel": legacy_env.logos_release_channel,
         }
         for k, v in config_env.__dict__.items():
+            if k == "_legacy":
+                continue
             if k in channel_overrides and channel_overrides[k] is None:
                 continue
             if v is not None:
                 config_dict[k] = v
+
+        retained_legacy = config_dict.get("_legacy") or LegacyConfiguration()
+        for name, value in legacy_env.__dict__.items():
+            if value is not None:
+                setattr(retained_legacy, name, value)
+        config_dict["_legacy"] = retained_legacy
 
         return PersistentConfiguration(**config_dict)
 
@@ -435,10 +444,12 @@ class PersistentConfiguration:
                 del output[k]
         if self.install_dir is not None:
             path_fields = {
-                "wine_binary", "backup_dir", "WINE_EXE", "BACKUPDIR", "APPDIR_BINDIR",
-                "LOGOS_LOG", "wine_log", "WINEPREFIX", "WINESERVER_EXE", "CUSTOMBINPATH",
+                "wine_binary", "backup_dir", "WINE_EXE", "BACKUPDIR",
+                "LOGOS_LOG", "wine_log", "WINESERVER_EXE", "CUSTOMBINPATH",
                 "SELECTED_APPIMAGE_FILENAME",
             }
+            # Startup consumes prefix and binary-directory overrides as absolute
+            # paths before it can resolve installation-relative runtime values.
             for k, v in output.items():
                 if k in ["install_dir", "INSTALLDIR"]:
                     if v is not None:
@@ -718,6 +729,8 @@ class Config:
 
     @property
     def faithlife_product_release(self) -> str:
+        if self._raw.faithlife_product_release is not None:
+            return self._raw.faithlife_product_release
         question = (
             f"Which version of {self.faithlife_product} {self.faithlife_product_version} do you want to install?: "
         )
@@ -774,11 +787,20 @@ class Config:
 
     @faithlife_product_release.setter
     def faithlife_product_release(self, value: Optional[str]):
-        if self._raw.faithlife_product_release != value:
+        if self._raw.faithlife_product_release == value:
+            return
+        with ExitStack() as admission:
+            if self._overrides.install_dir or self._raw.install_dir:
+                context = admission.enter_context(maintenance.configured(self.app))
+                admission.enter_context(maintenance.use(context))
+            previous = self._raw.faithlife_product_release
             self._raw.faithlife_product_release = value
-            # Reset dependents
+            try:
+                self._write(checked=True)
+            except maintenance.MaintenanceError:
+                self._raw.faithlife_product_release = previous
+                raise
             self._wine_binary_files = None
-            self._write()
 
     @property
     def faithlife_product_icon_path(self) -> str:

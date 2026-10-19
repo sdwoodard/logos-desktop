@@ -17,6 +17,7 @@ def fixture_config(install):
     config._raw = PersistentConfiguration(
         install_dir=str(install), wine_binary="data/bin/runtime.AppImage",
         faithlife_product="Logos", faithlife_product_version="10",
+        faithlife_product_release="38.0.0.0",
     )
     config._overrides = SimpleNamespace(
         install_dir=None, installer_binary_dir=None, wine_appimage_path=None, faithlife_product_version=None,
@@ -151,6 +152,7 @@ class TestRuntimePaths(unittest.TestCase):
                 with (
                     patch.object(installer, "ensure_sys_deps"),
                     patch.object(installer, "check_system_compatibility"),
+                    patch.object(wine, "require_compatible"),
                     patch.object(installer.network, "logos_reuse_download", side_effect=transfer) as download,
                     patch.multiple(constants, CACHE_BASE=cache_base, CACHE_DIR=str(cache)),
                 ):
@@ -187,7 +189,8 @@ class TestRuntimePaths(unittest.TestCase):
             absent = str(root / "absent")
             conf = SimpleNamespace(
                 _raw=SimpleNamespace(wine_binary="runtime", install_dir=str(root), faithlife_product="Logos",
-                                     _as_dict=lambda: {}), wine_binary=str(runtime),
+                                      _as_dict=lambda: {}), wine_binary=str(runtime),
+                install_dir=str(root),
                 installer_binary_dir=str(root / "data/bin"),
                 config_file_path=absent, app_log_path=absent, app_wine_log_path=absent,
                 app_wine_log_previous_path=absent, _faithlife_crash_log=None,

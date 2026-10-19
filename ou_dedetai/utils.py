@@ -103,6 +103,9 @@ def delete_symlink(symlink_path):
 
 # FIXME: should this be in control?
 def install_dependencies(app: App):
+    if app.conf.skip_install_system_dependencies:
+        app.status("System dependency installation skipped")
+        return
     if app.conf.faithlife_product_version:
         targetversion = int(app.conf.faithlife_product_version)
     else:
@@ -112,10 +115,9 @@ def install_dependencies(app: App):
     if targetversion == 10:
         system.install_dependencies(app, target_version=10)
     elif targetversion == 9:
-        app.status("Logos 9 not supported.", 100)
-        app.exit("Logos 9 not supported.", False)
+        raise maintenance.MaintenanceError("Logos 9 installation is not supported")
     else:
-        logging.error(f"Unknown Target version, expecting 10 but got: {app.conf.faithlife_product_version}.") 
+        raise maintenance.MaintenanceError(f"Unsupported product version: {targetversion}")
 
     app.status("Installed dependencies.", 100)
 
@@ -477,14 +479,14 @@ def find_wine_binary_files(app: App, release_version: Optional[str]) -> list[str
     return binaries
 
 
-@maintenance.uses_installation
+@maintenance.changes_installation
 def set_appimage_symlink(app: App, source=None):
     from . import artifacts, runtime
 
     selected = source if source is not None else app.conf.wine_appimage_path
     if selected is None:
         return
-    local = Path(selected)
+    local = Path(selected).resolve(strict=True)
     if local.parent.parent.parent.name == ".artifacts":
         accepted = artifacts.installed(local, "appimage")
     else:
@@ -503,13 +505,14 @@ def update_to_latest_lli_release(app: App):
     return network.update_lli_binary(app=app)
 
 
-@maintenance.uses_installation
+@maintenance.changes_installation
 def update_faithlife_product(app: App):
     from ou_dedetai import installer  # local import to avoid circular dependency
     releases = app.conf.faithlife_product_releases
     if not releases:
-        app.status(f"No releases were found for {app.conf.faithlife_product}. Refusing to update.")
-        return
+        raise maintenance.MaintenanceError(
+            f"No usable release was found for {app.conf.faithlife_product}. Check the connection and retry"
+        )
     latest = releases[0]  # feed is ordered newest-first
     app.status(f"Updating {app.conf.faithlife_product} to {latest}…")
     app.conf.faithlife_product_release = latest
@@ -517,7 +520,7 @@ def update_faithlife_product(app: App):
 
 
 # FIXME: consider moving this to control
-@maintenance.uses_installation
+@maintenance.changes_installation
 def update_to_latest_recommended_appimage(app: App):
     if app.conf.wine_binary_code not in ["AppImage", "Recommended"]:
         logging.debug("AppImage commands disabled since we're not using an appimage")
@@ -623,5 +626,9 @@ def get_timestamp():
     return datetime.today().strftime('%Y-%m-%dT%H%M%S')
 
 
-def parse_bool(string: str) -> bool:
-    return string.lower() in ['true', '1', 'y', 'yes']
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ValueError("Boolean settings must be strings or JSON booleans")
+    return value.lower() in ['true', '1', 'y', 'yes']

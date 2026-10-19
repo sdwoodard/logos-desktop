@@ -256,6 +256,7 @@ class TestUninstallBoundaries(unittest.TestCase):
         with (
             patch.object(installer, "ensure_sys_deps"),
             patch.object(installer, "check_system_compatibility"),
+            patch.object(wine, "require_compatible"),
             patch.object(installer.network, "logos_reuse_download", side_effect=transfer),
         ):
             self.app.installer_step = self.app.installer_step_count = 0
@@ -492,11 +493,15 @@ class TestRemovedCleanup(unittest.TestCase):
                     installer_step_count=0, installer_step=0, status=Mock(),
                     is_installed=lambda: True,
                     conf=SimpleNamespace(
-                        installed_faithlife_product_release="1", logos_exe=None, faithlife_product="Logos",
-                        _raw=SimpleNamespace(faithlife_product_release="1"),
+                        installed_faithlife_product_release="1.0.0.0", logos_exe=None, faithlife_product="Logos",
+                        _raw=SimpleNamespace(faithlife_product_release="1.0.0.0", install_dir=str(root / "install"),
+                                             faithlife_product="Logos"),
+                        _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
                     ),
                 )
-                with patch.object(installer, "ensure_icu_data_files"), patch.object(utils.os, "system") as shell:
+                with (patch.object(installer, "ensure_icu_data_files",
+                                   return_value=installer.ProductInstaller("1.0.0.0", None)),
+                      patch.object(utils.os, "system") as shell):
                     installer.ensure_product_installed(app)
                 shell.assert_not_called()
                 self.assertTrue(all(file.read_bytes() == b"unrelated" for file in sentinels))

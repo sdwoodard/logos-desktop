@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,14 @@ from . import utils
 from . import wine
 
 from ou_dedetai.system import OpenGLIncompatible
+
+
+@dataclass(frozen=True)
+class ProductInstaller:
+    """Keep the target release attached to the exact accepted MSI generation."""
+    release: str
+    artifact: artifacts.AcceptedArtifact
+
 
 # This step doesn't do anything per-say, but "collects" all the choices in one step
 # The app would continue to work without this function
@@ -40,9 +49,6 @@ def ensure_choices(app: App):
     logging.debug(f"> {app.conf.wine_binary=}")
     logging.debug(f"> {app.conf.faithlife_product_icon_path}")
     logging.debug(f"> {app.conf.faithlife_installer_download_url}")
-    # Debug print the entire config
-    logging.debug(f"> Config={app.conf.__dict__}")
-
     app.status("Install is running…")
 
 def ensure_install_dirs(app: App):
@@ -50,8 +56,6 @@ def ensure_install_dirs(app: App):
     ensure_choices(app=app)
     app.installer_step += 1
     app.status("Ensuring installation directories…")
-    wine_dir = Path("")
-
     bin_dir = Path(app.conf.installer_binary_dir)
     bin_dir.mkdir(parents=True, exist_ok=True)
     logging.debug(f"> {bin_dir} exists?: {bin_dir.is_dir()}")
@@ -59,10 +63,6 @@ def ensure_install_dirs(app: App):
     logging.debug(f"> {app.conf.install_dir=}")
     logging.debug(f"> {app.conf.installer_binary_dir=}")
 
-    wine_dir = Path(f"{app.conf.wine_prefix}")
-    wine_dir.mkdir(parents=True, exist_ok=True)
-
-    logging.debug(f"> {wine_dir} exists: {wine_dir.is_dir()}")
     logging.debug(f"> {app.conf.wine_prefix=}")
 
 
@@ -175,8 +175,9 @@ def check_opengl(app: App):
         if app.approve(question):
             logging.debug("> User continuing with incompatible OpenGL.")
         else:
-            app.status("Exiting install…")
-            sys.exit()  # Exits the install thread.
+            from .app import UserExitedFromAsk
+
+            raise UserExitedFromAsk
 
     logging.debug("> Done.")
 
@@ -241,6 +242,7 @@ def ensure_wine_executables(app: App):
     app.status("Ensuring wine executables are available…")
 
     create_wine_appimage_symlinks(app=app)
+    wine.require_compatible(app, app.conf.wine64_binary)
 
     # PATH is modified if wine appimage isn't found, but it's not modified
     # during a restarted installation, so shutil.which doesn't find the
@@ -267,13 +269,24 @@ def ensure_product_installer_download(app: App):
     app.installer_step += 1
     app.status(f"Ensuring {app.conf.faithlife_product} installer is downloaded…")
 
-    return network.logos_reuse_download(
-        app.conf.faithlife_installer_download_url,
-        app.conf.faithlife_installer_name,
+    release = app.conf.faithlife_product_release
+    wine.product_release(release)
+    product = app.conf.faithlife_product
+    major = app.conf.faithlife_product_version
+    overrides = app.conf._overrides
+    name = getattr(overrides, "faithlife_installer_name", None) or f"{product}_v{release}-x64.msi"
+    product_path = "/Verbum/" if product == "Verbum" else "/"
+    url = getattr(overrides, "faithlife_installer_download_url", None) or (
+        f"https://downloads.logoscdn.com/LBS{major}{product_path}Installer/{release}/{product}-x64.msi"
+    )
+    accepted = network.logos_reuse_download(
+        url,
+        name,
         str(Path(app.conf.install_dir) / "data"),
         app=app,
         kind="msi",
     )
+    return ProductInstaller(release, accepted)
 
 
 def ensure_wineprefix_init(app: App):
@@ -285,6 +298,7 @@ def ensure_wineprefix_init(app: App):
     init_file = Path(f"{app.conf.wine_prefix}/system.reg")
     logging.debug(f"{init_file=}")
     if not init_file.is_file():
+        init_file.parent.mkdir(parents=True, exist_ok=True)
         logging.debug(f"{init_file} does not exist")
         logging.debug("Initializing wineprefix.")
         wine.initializeWineBottle(app.conf.wine64_binary, app)
@@ -338,6 +352,7 @@ def ensure_icu_data_files(app: App):
     return accepted
 
 
+@maintenance.changes_installation
 def ensure_product_installed(app: App):
     app.installer_step_count += 1
     accepted = ensure_icu_data_files(app=app)
@@ -350,16 +365,12 @@ def ensure_product_installed(app: App):
         logging.warning("Failed to determine the installed version. Proceeding with install.", exc_info=True)
         installed_release = None
 
-    target_release = app.conf._raw.faithlife_product_release
+    target_release = accepted.release
 
     if not app.is_installed() or (
         target_release is not None and installed_release != target_release
     ):
-        # FIXME: Should we try to cleanup on a failed msi?
-        # Like terminating msiexec if already running for Logos
-        process = wine.install_msi(app, accepted)
-        if process:
-            process.wait()
+        wine.install_msi(app, accepted.artifact, target_release=target_release)
 
     # Clear installed version cache
     app.conf._installed_faithlife_product_release = None
@@ -372,9 +383,6 @@ def ensure_config_file(app: App):
     ensure_product_installed(app=app)
     app.installer_step += 1
     app.status("Ensuring config file is up-to-date…")
-
-    app.status("Install has finished.", 100)
-
 
 def ensure_launcher_executable(app: App):
     app.installer_step_count += 1
@@ -419,12 +427,15 @@ def install(app: App):
         app.conf.faithlife_product_version
     if not (getattr(app.conf._overrides, "install_dir", None) or app.conf._raw.install_dir):
         app.conf.install_dir
-    with maintenance.configured(app) as context, maintenance.use(context):
+    with maintenance.installing(app):
         return _install(app)
 
 
 def _install(app: App):
     """Entrypoint for installing"""
+    app.installer_step = 1
+    app.installer_step_count = 0
+    wine.product_release(app.conf.faithlife_product_release)
     app.status('Installing…')
     ensure_launcher_shortcuts(app)
     app.status("Install Complete!", 100)
@@ -436,18 +447,18 @@ def get_progress_pct(current, total):
     return round(current * 100 / total)
 
 
-@maintenance.uses_installation
+@maintenance.changes_installation
 def create_wine_appimage_symlinks(app: App):
     if app.conf.wine_appimage_path is None:
         return
-    source = Path(app.conf.wine_appimage_path)
+    source = Path(app.conf.wine_appimage_path).resolve(strict=True)
     if source.parent.parent.parent.name == ".artifacts":
-        artifacts.installed(source, "appimage")
-        return
-    accepted = artifacts.import_local(
-        source, Path(app.conf.installer_binary_dir),
-        artifacts.ArtifactSpec("local:" + str(source), source.name, "appimage"),
-    )
+        accepted = artifacts.installed(source, "appimage")
+    else:
+        accepted = artifacts.import_local(
+            source, Path(app.conf.installer_binary_dir),
+            artifacts.ArtifactSpec("local:" + str(source), source.name, "appimage"),
+        )
     runtime.activate(app, accepted)
 
 

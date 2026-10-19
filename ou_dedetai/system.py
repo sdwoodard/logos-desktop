@@ -43,7 +43,7 @@ def fix_ld_library_path(env: Optional[MutableMapping[str, str]]) -> dict[str, st
     if constants.RUNMODE == 'binary':
         # *BSD uses LD_LIBRARY_PATH, AIX uses LIBPATH
         for lp_key in ["LD_LIBRARY_PATH", "LIBPATH"]:
-            lp_orig = env.pop(lp_key + '_ORIG', None)
+            lp_orig = env.get(lp_key + '_ORIG')
             if lp_orig is not None:
                 env[lp_key] = lp_orig  # restore the original, unmodified value
             else:
@@ -367,7 +367,7 @@ def get_os() -> Tuple[str, str]:
     return os_name, os_release
 
 
-class SuperuserCommandNotFound(Exception):
+class SuperuserCommandNotFound(maintenance.MaintenanceError):
     """Superuser command not found. Install pkexec or sudo or doas"""
 
 
@@ -625,14 +625,9 @@ def query_packages(package_manager: PackageManager, packages, mode="install") ->
 
     command = package_manager.query
 
-    try:
-        result = run_command(command)
-    except Exception as e:
-        logging.error(f"Error occurred while executing command: {e}")
-    # FIXME: consider raising an exception
-    if result is None:
-        logging.error("Failed to query packages")
-        return []
+    result = dependency_command(command, "query packages")
+    if not isinstance(result.stdout, str):
+        raise maintenance.MaintenanceError("Package query did not return readable output")
     package_list = result.stdout
 
     logging.debug(f"packages to check: {packages}")
@@ -781,9 +776,9 @@ def remove_appimagelauncher(app: App):
 def preinstall_dependencies_steamos(superuser_command: str):
     logging.debug("Disabling read only, updating pacman keys…")
     command = [
-        superuser_command, "steamos-readonly", "disable", "&&",
-        superuser_command, "pacman-key", "--init", "&&",
-        superuser_command, "pacman-key", "--populate", "archlinux",
+        [superuser_command, "steamos-readonly", "disable"],
+        [superuser_command, "pacman-key", "--init"],
+        [superuser_command, "pacman-key", "--populate", "archlinux"],
     ]
     return command
 
@@ -791,13 +786,12 @@ def preinstall_dependencies_steamos(superuser_command: str):
 def postinstall_dependencies_steamos(superuser_command: str):
     logging.debug("Updating DNS settings & locales, enabling services & read-only system…")
     command = [
-        superuser_command, "sed", '-i',
-        's/mymachines resolve/mymachines mdns_minimal [NOTFOUND=return] resolve/',
-        '/etc/nsswitch.conf', '&&',
-        superuser_command, "locale-gen", '&&',
-        superuser_command, "systemctl", "enable", "--now", "avahi-daemon", "&&",
-        superuser_command, "systemctl", "enable", "--now", "cups", "&&",
-        superuser_command, "steamos-readonly", "enable",
+        [superuser_command, "sed", '-i',
+         's/mymachines resolve/mymachines mdns_minimal [NOTFOUND=return] resolve/', '/etc/nsswitch.conf'],
+        [superuser_command, "locale-gen"],
+        [superuser_command, "systemctl", "enable", "--now", "avahi-daemon"],
+        [superuser_command, "systemctl", "enable", "--now", "cups"],
+        [superuser_command, "steamos-readonly", "enable"],
     ]
     return command
 
@@ -839,140 +833,58 @@ def postinstall_dependencies(superuser_command: str):
     return command
 
 
+def dependency_command(arguments: list[str], stage: str):
+    """Check both raised failures and missing results from the system adapter."""
+    try:
+        result = run_command(arguments)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise maintenance.MaintenanceError(f"Could not {stage}: {arguments!r}: {error}") from error
+    if result is None or result.returncode != 0:
+        code = result.returncode if result is not None else "no result"
+        raise maintenance.MaintenanceError(f"Could not {stage} ({code}): {arguments!r}")
+    return result
+
+
 def install_dependencies(app: App, target_version=10):
     if app.conf.skip_install_system_dependencies:
         return
 
-    install_deps_failed = False
-    reboot_required = False
-    message: Optional[str] = None
-    secondary: Optional[str] = None
-    command = []
-    preinstall_command = []
-    install_command = []
-    remove_command = []
-    postinstall_command = []
-    missing_packages = []
-    conflicting_packages = []
-    package_list = []
-    bad_package_list = []
-
-    package_manager = get_package_manager()
-
-    os_name, _ = get_os()
-
-    if not package_manager:
-        app.exit(
-            f"The script could not determine your {os_name} install's package manager or it is unsupported."
-        )
-
-    package_list = package_manager.packages.split()
-
-    bad_package_list = package_manager.incompatible_packages.split()
-
-    logging.debug("Querying packages…")
-    missing_packages = query_packages(
-        package_manager,
-        package_list,
-    )
-    conflicting_packages = query_packages(
-        package_manager,
-        bad_package_list,
-        mode="remove",
-    )
-
-    if missing_packages and conflicting_packages:
-        message = f"Your {os_name} computer requires installing and removing some software.\nProceed?"
-        secondary = (
-            "To continue, the program will attempt to install the following package(s) by using "
-            f"'{package_manager.install}':\n{missing_packages}\nand will remove the following package(s) by using "
-            f"'{package_manager.remove}':\n{conflicting_packages}"
-        )
-    elif missing_packages:
-        message = f"Your {os_name} computer requires installing some software.\nProceed?"
-        secondary = ("To continue, the program will attempt to install the following package(s) by using "
-                     f"'{package_manager.install}':\n{missing_packages}")
-    elif conflicting_packages:
-        message = f"Your {os_name} computer requires removing some software.\nProceed?"
-        secondary = ("To continue, the program will attempt to remove the following package(s) by using "
-                     f"'{package_manager.remove}':\n{conflicting_packages}")
-    else:
-        message = None
-        secondary = None
-
-    if message is None:
-        logging.debug("No missing or conflicting dependencies found.")
-    else:
-        app.approve_or_exit(message, secondary)
-
-    preinstall_command = preinstall_dependencies(app.superuser_command)
-
-    if missing_packages:
-        install_command = package_manager.install + missing_packages
-    else:
-        logging.debug("No missing packages detected.")
-
-    if conflicting_packages:
-        # TODO: Verify with user before executing
-        # AppImage Launcher is the only known conflicting package.
-        remove_command = package_manager.remove + conflicting_packages
-        reboot_required = True
-        logging.info("System reboot required.")
-    else:
-        logging.debug("No conflicting packages detected.")
-
-    postinstall_command = postinstall_dependencies(app.superuser_command)
-
-    if preinstall_command:
-        command.extend(preinstall_command)
-    if install_command:
-        if command:
-            command.append('&&')
-        command.extend(install_command)
-    if remove_command:
-        if command:
-            command.append('&&')
-        command.extend(remove_command)
-    if postinstall_command:
-        if command:
-            command.append('&&')
-        command.extend(postinstall_command)
-    if not command:  # nothing to run; avoid running empty pkexec command
-        if app:
-            app.status("All dependencies are met.", 100)
+    manager = get_package_manager()
+    if manager is None:
+        raise maintenance.MaintenanceError("This system's package manager is unsupported")
+    required = manager.packages.split()
+    incompatible = manager.incompatible_packages.split()
+    missing = query_packages(manager, required)
+    conflicts = query_packages(manager, incompatible, mode="remove")
+    if not missing and not conflicts:
+        app.status("All dependencies are met.", 100)
         return
 
+    details = f"Install: {missing}\nRemove: {conflicts}"
+    if not app.approve("Apply these system dependency changes?", details):
+        from .app import UserExitedFromAsk
+
+        raise UserExitedFromAsk
+
+    elevation = app.superuser_command
+    steps = list(preinstall_dependencies(elevation))
+    if missing:
+        steps.append([elevation, *manager.install, *missing])
+    if conflicts:
+        steps.append([elevation, *manager.remove, *conflicts])
+    steps.extend(postinstall_dependencies(elevation))
     app.status("Installing dependencies…")
-    final_command = [
-        # FIXME: Consider switching this back to single quotes
-        # (the sed line in alpine post will need to change to double if so)
-        f"{app.superuser_command}", 'sh', '-c', '"', *command, '"'
-    ]
-    command_str = ' '.join(final_command)
-    # FIXME: consider how to tell the user which command we're running.
-    # When we install on the terminal the user doesn't know what they're sudo'ing
-    # logging.info(f"Running command: {command_str}")
+    for arguments in steps:
+        dependency_command(arguments, "apply dependency changes")
 
-    if not install_deps_failed:
-        try:
-            logging.debug(f"Attempting to run this command: {command_str}")
-            run_command(command_str, shell=True)
-        except subprocess.CalledProcessError as e:
-            if e.returncode == 127:
-                logging.error("User cancelled dependency installation.")
-            else:
-                logging.error(f"An error occurred in install_dependencies(): {e}")
-                logging.error(f"Command output: {e.output}")
-            install_deps_failed = True
-
-
-    if reboot_required:
-        question = "The system has installed or removed a package that requires a reboot. Do you want to restart now?"
-        if app.approve_or_exit(question):
-            reboot(app.superuser_command)
-        else:
-            logging.error("Please reboot then launch the installer again.")
-            sys.exit(1)
+    remaining = query_packages(manager, required)
+    conflicts_left = query_packages(manager, incompatible, mode="remove")
+    if remaining or conflicts_left:
+        raise maintenance.MaintenanceError(
+            f"Dependencies remain unmet. Missing: {remaining}. Conflicting: {conflicts_left}"
+        )
+    if conflicts:
+        raise maintenance.MaintenanceError("Dependency removal completed. Reboot before retrying installation")
 
 
 @maintenance.uses_installation

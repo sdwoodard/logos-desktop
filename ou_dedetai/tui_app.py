@@ -655,6 +655,7 @@ class TUI(App):
             "Uninstall": control.uninstall,
             "Install ICU": wine.enforce_icu_data_files,
             "Update to Latest AppImage": utils.update_to_latest_recommended_appimage,
+            "Install Dependencies": utils.install_dependencies,
         }
         if choice in operations:
             self._run_operation(operations[choice])
@@ -671,8 +672,6 @@ class TUI(App):
                 self.conf.toggle_faithlife_product_release_channel()
             elif choice == f"Change {constants.APP_NAME} Release Channel":
                 self.conf.toggle_installer_release_channel()
-            elif choice == "Install Dependencies":
-                utils.install_dependencies(self)
             elif choice == "Check OpenGL":
                 _, reason = system.check_opengl_version(self)
                 self.status(reason)

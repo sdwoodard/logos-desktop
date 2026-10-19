@@ -29,6 +29,7 @@ def fixture_app(root):
     overrides = SimpleNamespace(
         install_dir=None, wine_prefix=None, wine_appimage_path=None, config_path=str(root / "selected.json"),
         agreed_to_faithlife_terms=True,
+        faithlife_installer_name="Logos.msi", faithlife_installer_download_url="https://example.invalid/Logos.msi",
     )
     conf = SimpleNamespace(
         _raw=raw, _overrides=overrides, install_dir=str(install), installer_binary_dir=str(bindir),
@@ -67,6 +68,14 @@ class TestArtifactConsumers(unittest.TestCase):
         state.start()
         self.addCleanup(state.stop)
         self.app = fixture_app(self.root)
+        # These are format-only AppImages. Compatibility has dedicated tests.
+        compatibility = patch.object(wine, "require_compatible")
+        compatibility.start()
+        self.addCleanup(compatibility.stop)
+        # The consumer fixture is a Linux reader, not a Windows MSI process.
+        windows_view = patch.object(wine, "windows_path", side_effect=lambda app, binary, path: str(path))
+        windows_view.start()
+        self.addCleanup(windows_view.stop)
 
     def accepted(self, kind, content, name):
         source = self.root / ("source-" + name)
@@ -396,7 +405,7 @@ class TestArtifactConsumers(unittest.TestCase):
 
         def consume():
             try:
-                wine.install_msi(self.app, accepted)
+                wine.install_msi(self.app, accepted, target_release="38.0.0.0")
             except BaseException as error:
                 errors.append(error)
 
