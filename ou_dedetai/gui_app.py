@@ -3,16 +3,14 @@
 #   - https://tkdocs.com/
 #   - https://github.com/thw26/LogosLinuxInstaller/blob/master/LogosLinuxInstaller.sh
 
-import copy
 import logging
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 
 import shutil
 import subprocess
 from threading import Event
 import threading
-import time
 from tkinter import PhotoImage, messagebox
 from tkinter import Tk, TclError
 from tkinter import Toplevel as TkToplevel
@@ -51,18 +49,44 @@ class GuiApp(App):
         super().__init__(ephemeral_config)
         self.root = root
         self._status_gui = gui
+        root.owner = self
+
+    def dispatch_config(self, callback):
+        self.root.post(callback)
+
+    def _ui_call(self, callback, *args):
+        if threading.current_thread() is threading.main_thread():
+            return callback(*args)
+        done = Event()
+        result = []
+
+        def invoke():
+            try:
+                result.append((True, callback(*args)))
+            except BaseException as error:
+                result.append((False, error))
+            finally:
+                done.set()
+
+        self.root.post(invoke)
+        while not done.wait(0.1):
+            if self._closing.is_set():
+                raise UserExitedFromAsk
+        success, value = result[0]
+        if not success:
+            raise value
+        return value
 
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
-        # This cannot be run from the main thread as the dialog will never appear
-        # since the tinker mainloop hasn't started and we block on a response
+        if threading.current_thread() is not threading.main_thread():
+            return self._ui_call(self._ask, question, options)
 
         if isinstance(options, list):
             answer_q: Queue[Optional[str]] = Queue()
             answer_event = Event()
-            ChoicePopUp(question, options, answer_q, answer_event)
-
-            answer_event.wait()
+            popup = ChoicePopUp(question, options, answer_q, answer_event)
+            self.root.wait_window(popup.root)
             answer: Optional[str] = answer_q.get()
         elif isinstance(options, str):
             answer = options
@@ -89,15 +113,24 @@ class GuiApp(App):
 
     def _info(self, message):
         """Display information to the user"""
-        InfoPopUp(message)
+        if not self._closing.is_set():
+            self.root.post(lambda: InfoPopUp(message))
 
     def _pop_up(self, title, message):
+        if threading.current_thread() is not threading.main_thread():
+            self.root.post(lambda: self._pop_up(title, message))
+            return
         messagebox.showinfo(
             title=title,
             message=message
         )
 
     def _status(self, message, percent = None):
+        if threading.current_thread() is not threading.main_thread():
+            self.root.post(lambda: self._status(message, percent))
+            return
+        if getattr(self, "_closing", Event()).is_set():
+            return
         message = message.strip()
         if percent is not None:
             self._status_gui.progress.stop()
@@ -115,16 +148,21 @@ class GuiApp(App):
         self._status('', 0)
 
     def approve(self, question: str, context: str | None = None) -> bool:
+        if threading.current_thread() is not threading.main_thread():
+            return self._ui_call(self.approve, question, context)
         if context is None:
             context = ""
         message = f"{question}\n\n{context}"
         return messagebox.askquestion(question, message.strip()) == 'yes'
 
     def _schedule_exit_on_main_thread(self, reason: str, intended: bool) -> None:
-        # root.after is the supported way to run work on the mainloop (main)
-        # thread from another thread. The callback re-invokes exit() there, so
-        # _exit() (and root.destroy()) run on the main thread.
-        self.root.after(0, lambda: self.exit(reason, intended))
+        self.root.post(lambda: self._exit(reason, intended))
+
+    def exit(self, reason, intended=False):
+        self.request_close(reason, intended)
+        self._schedule_exit_on_main_thread(reason, intended)
+        if threading.current_thread() is not threading.main_thread():
+            raise SystemExit
 
     def _exit(self, reason: str, intended: bool = False):
         # Create a little dialog before we die so the user can see why this happened
@@ -170,16 +208,62 @@ class GuiApp(App):
                 self.conf.wine_binary = wine_choices[0]
 
 class Root(Tk):
+    def post(self, callback):
+        self._callbacks.put(callback)
+
+    def _drain_callbacks(self):
+        try:
+            for _ in range(100):
+                try:
+                    callback = self._callbacks.get_nowait()
+                except Empty:
+                    break
+                try:
+                    callback()
+                except Exception:
+                    logging.exception("Controller callback failed")
+                if self._destroyed:
+                    return
+        finally:
+            if not self._destroyed:
+                self.after(50, self._drain_callbacks)
+
     def destroy(self):
+        if threading.current_thread() is not threading.main_thread():
+            self.post(self.destroy)
+            return
+        if self._destroyed:
+            return
         closed = getattr(self, "_operation_closed", None)
         if closed is not None:
             closed.set()
+        owner = getattr(self, "owner", None)
+        if owner is not None:
+            owner.request_close()
+            for child in self.winfo_children():
+                if isinstance(child, TkToplevel):
+                    child.destroy()
+            if not owner.close(timeout=0):
+                if not self._close_pending:
+                    self._close_pending = True
+                    self.after(100, self._retry_close)
+                return
+        self._destroyed = True
         processes.shutdown()
         super().destroy()
+
+    def _retry_close(self):
+        self._close_pending = False
+        self.destroy()
 
     def __init__(self, *args, **kwargs):
         processes.resume()
         super().__init__(**kwargs)
+        self._callbacks = Queue()
+        self._destroyed = False
+        self._close_pending = False
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.after(50, self._drain_callbacks)
         self.classname = kwargs.get('classname')
         # Set the theme.
         set_style(self)
@@ -327,7 +411,8 @@ class InstallerWindow:
         )
 
         # Run commands.
-        self.app.config_updated_hooks += [self._config_updated_hook]
+        self._unsubscribe = self.app.subscribe_config(self._config_updated_hook)
+        self.win.bind("<Destroy>", lambda event: self._unsubscribe() if event.widget == self.win else None, add="+")
         # Start out enforcing this
         self._config_updated_hook()
 
@@ -410,7 +495,7 @@ class InstallerWindow:
         self.start_install_thread()
 
     def close(self):
-        self.app.config_updated_hooks.remove(self._config_updated_hook)
+        self._unsubscribe()
         # Reset status
         self.app.clear_status()
         self.win.destroy()
@@ -465,21 +550,8 @@ class ControlWindow(GuiApp):
         if self.conf._raw.faithlife_product:
             control_gui.update_product_labelvar.set(f"Update {self.conf._raw.faithlife_product}")
 
-        # Spawn a thread to ensure our logos state stays up to date
-        def _monitor_faithlife_product_pids():
-            last_state = copy.copy(self.logos.logos_state)
-            while True:
-                if self.is_installed():
-                    self.logos.monitor()
-                    time.sleep(1)
-                else:
-                    # Will probably be some time before we need to monitor.
-                    time.sleep(30)
-                # If our state changed, we need to update our button.
-                if last_state != self.logos.logos_state:
-                    self.update_app_button()
-                last_state = copy.copy(self.logos.logos_state)
-        self.start_thread(_monitor_faithlife_product_pids)
+        self.logos.start_monitoring()
+        self._state_timer = self.root.after(250, self._poll_state)
         self.gui.run_indexing_radio.config(
             command=self.on_action_radio_clicked
         )
@@ -520,8 +592,17 @@ class ControlWindow(GuiApp):
 
         self._config_update_hook()
         # These can be expanded to change the UI based on config changes.
-        self.config_updated_hooks += [self._config_update_hook]
+        self.subscribe_config(self._config_update_hook)
         self.root.after(0, updates.confirm_startup)
+
+    def _poll_state(self):
+        if self._closing.is_set():
+            return
+        state = (self.logos.logos_state, self.logos.indexing_state)
+        if state != getattr(self, "_rendered_state", None):
+            self._rendered_state = state
+            self.update_app_button()
+        self._state_timer = self.root.after(250, self._poll_state)
 
     def _close_controller_checks(self, event):
         if event.widget != self.root:
@@ -581,7 +662,7 @@ class ControlWindow(GuiApp):
         InstallerWindow(installer_window_top, self.root, app=self, class_=classname) 
 
     def stop_logos(self):
-        self.start_thread(self.logos.stop)
+        self._run_operation(lambda app: app.logos.stop())
 
     def run_logos(self, evt=None):
         self._run_operation(lambda app: app.logos.start())
@@ -622,7 +703,7 @@ class ControlWindow(GuiApp):
                         result.cancel()
                     else:
                         try:
-                            self.root.after(0, lambda: self._restart_controller(result))
+                            self.root.post(lambda: self._restart_controller(result))
                         except (TclError, RuntimeError):
                             result.cancel()
             except UserExitedFromAsk:
@@ -632,11 +713,11 @@ class ControlWindow(GuiApp):
                 message = str(error)
                 if not closed.is_set():
                     self.status(f"Operation failed: {message}", 0)
-                    self.root.after(0, lambda: self.pop_up("Operation failed", message))
+                    self.root.post(lambda: self.pop_up("Operation failed", message))
             finally:
                 if not closed.is_set():
                     try:
-                        self.root.after(0, finished)
+                        self.root.post(finished)
                     except (TclError, RuntimeError):
                         pass
 
@@ -761,7 +842,10 @@ class ControlWindow(GuiApp):
             return
         self.gui.app_button.state(['!disabled'])
         if self.is_installed():
-            if self.logos.logos_state == ou_dedetai.logos.State.RUNNING:
+            if self.logos.logos_state in (ou_dedetai.logos.State.STARTING, ou_dedetai.logos.State.STOPPING):
+                self.gui.app_buttonvar.set(self.logos.logos_state.name.title())
+                self.gui.app_button.state(['disabled'])
+            elif self.logos.logos_state == ou_dedetai.logos.State.RUNNING:
                 self.gui.app_buttonvar.set(f"Stop {self.conf.faithlife_product}")
                 self.gui.app_button.config(command=self.stop_logos)
             else:
@@ -966,46 +1050,30 @@ def start_gui_app(
     root.title(f"{constants.APP_NAME} Control Panel")
     root.resizable(False, False)
 
-    def _start_install() -> Callable[[], None]:
-        # This needs to be created before root.mainloop is called
-        installer_gui = gui.StatusWithLabelGui(root, "Installing FaithLife app")
-        def _run():
-            app = GuiApp(root, installer_gui, ephemeral_config)
-            # This may take a minute to run, as it may need to reach out to the internet
-            app.populate_defaults()
+    if install_only:
+        app = GuiApp(root, gui.StatusWithLabelGui(root, "Installing FaithLife app"), ephemeral_config)
+
+        def install():
             try:
+                app.populate_defaults()
                 installer.install(app)
+            except UserExitedFromAsk:
+                return
             except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
                 app.status(f"Install failed: {error}", 0)
                 app.pop_up("Install failed", str(error))
                 return
-            # Wait for a couple seconds so user can understand they're done.
-            time.sleep(3)
-            root.destroy()
-        return _run
+            root.post(root.destroy)
 
-    def _start_control_panel() -> Callable[[], None]:
-        # This needs to be created before root.mainloop is called
-        control_gui = gui.ControlGui(root)
-        def _run():
-            if recovery:
-                recovery_gui = gui.StatusWithLabelGui(root, "Recovering FaithLife app")
-                recovery(GuiApp(root, recovery_gui, ephemeral_config))
-                recovery_gui.destroy()
-            ControlWindow(root, control_gui, ephemeral_config, class_=classname)
-        return _run
-
-    if install_only:
-        target=_start_install()
+        root.after(0, lambda: app.start_thread(install))
     else:
-        target=_start_control_panel()
-
-    # Start the control panel on a new thread so it can open dialogs
-    # as a part of it's constructor
-    threading.Thread(
-        name=f"{constants.APP_NAME} GUI main loop",
-        target=target,
-        daemon=True
-    ).start()
-
-    root.mainloop()
+        app = ControlWindow(root, gui.ControlGui(root), ephemeral_config, class_=classname)
+        if recovery:
+            root.after(0, lambda: app._run_operation(recovery))
+    try:
+        root.mainloop()
+    finally:
+        if not app.close():
+            raise RuntimeError("Controller closed with an operation still finishing")
+    if app._pending_exit is not None and not app._pending_exit[1]:
+        raise SystemExit(1)

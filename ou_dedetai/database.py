@@ -1,11 +1,13 @@
 import abc
 import contextlib
+from dataclasses import dataclass, field
 import logging
 import os
 import select
 import sqlite3
 import struct
 import threading
+import time
 import inotify.calls
 import inotify.constants
 from pathlib import Path
@@ -69,7 +71,7 @@ class FaithlifeDatabase(contextlib.AbstractContextManager):
             self._db = None
 
     def __enter__(self):
-        self._db = self._connect()
+        self.database
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -103,49 +105,106 @@ class LocalUserPreferencesManager(FaithlifeDatabase):
         return self
 
 
-# FIXME: refactor into FaithlifeDatabase class
-def watch_db(path: str, sql_statements: list[str], stop: threading.Event):
-    """Apply preferences while owned, releasing every database and watch on stop."""
+@dataclass
+class WatcherHealth:
+    ready: threading.Event = field(default_factory=threading.Event)
+    error: str = ""
+
+
+def watch_db(path: str, sql_statements: list[str], stop: threading.Event, health=None):
+    try:
+        _watch_db(path, sql_statements, stop, health)
+    except Exception as error:
+        if health is None:
+            raise
+        health.error = str(error)
+        health.ready.set()
+
+
+def _watch_db(path, sql_statements, stop, health):
+    """Reconcile conditional SQL after events without guessing which writer sent them."""
+    path = Path(path).absolute()
     descriptor = inotify.calls.inotify_init()
-    os.set_blocking(descriptor, False)
     connection = None
     try:
+        os.set_blocking(descriptor, False)
         if stop.is_set():
             return
-        mask = inotify.constants.IN_MODIFY | inotify.constants.IN_CLOSE_WRITE
-        inotify.calls.inotify_add_watch(descriptor, os.fsencode(Path(path).parent), mask)
-        connection = sqlite3.connect(Path(path).as_uri() + "?mode=rw", uri=True, autocommit=True, timeout=0.2)
+        flags = inotify.constants
+        mask = (flags.IN_MODIFY | flags.IN_CLOSE_WRITE | flags.IN_CREATE | flags.IN_DELETE
+                | flags.IN_MOVED_TO | flags.IN_MOVED_FROM | flags.IN_DELETE_SELF | flags.IN_MOVE_SELF)
+        inotify.calls.inotify_add_watch(descriptor, os.fsencode(path.parent), mask)
+        names = {path.name, path.name + "-wal", path.name + "-shm"}
+        identity = None
+        next_check = 0
+        last_error = None
 
-        def execute_sql():
-            for statement in sql_statements:
-                if stop.is_set():
-                    return
-                try:
-                    cursor = connection.execute(statement)
-                    cursor.close()
-                except sqlite3.OperationalError:
-                    logging.exception("Best-effort db update failed")
-
-        execute_sql()
-        swallow_one = True
-        names = {Path(path).name, Path(path).name + "-wal", Path(path).name + "-shm"}
         while not stop.is_set():
+            if time.monotonic() >= next_check:
+                next_check = time.monotonic() + 5
+                try:
+                    info = path.stat()
+                    current = (info.st_dev, info.st_ino)
+                    if identity != current:
+                        if connection is not None:
+                            connection.close()
+                            connection = None
+                        connection = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
+                                                     isolation_level=None, timeout=0.2)
+                        identity = current
+                    connection.execute("BEGIN IMMEDIATE").close()
+                    try:
+                        for statement in sql_statements:
+                            if stop.is_set():
+                                break
+                            connection.execute(statement).close()
+                        fresh = path.stat()
+                        if stop.is_set() or (fresh.st_dev, fresh.st_ino) != identity:
+                            connection.execute("ROLLBACK").close()
+                            identity = None
+                            next_check = 0
+                            continue
+                        else:
+                            connection.execute("COMMIT").close()
+                    except BaseException:
+                        if connection.in_transaction:
+                            connection.execute("ROLLBACK").close()
+                        raise
+                    last_error = None
+                    if health is not None:
+                        health.error = ""
+                        health.ready.set()
+                except (OSError, sqlite3.Error) as error:
+                    if connection is not None:
+                        connection.close()
+                        connection = None
+                    identity = None
+                    key = (type(error), str(error))
+                    if key != last_error:
+                        logging.warning("Database enforcement will retry: %s", error)
+                        last_error = key
+                    next_check = time.monotonic() + 1
+                    if health is not None:
+                        health.error = str(error)
+
             ready, _, _ = select.select([descriptor], [], [], 0.2)
-            if not ready:
-                continue
-            events = os.read(descriptor, 65536)
-            offset = 0
-            changed = False
-            while offset < len(events):
-                _, _, _, length = struct.unpack_from("iIII", events, offset)
-                name = os.fsdecode(events[offset + 16:offset + 16 + length].rstrip(b"\0"))
-                changed |= name in names
-                offset += 16 + length
-            if changed:
-                if not swallow_one:
-                    execute_sql()
-                swallow_one = not swallow_one
+            if ready:
+                events = os.read(descriptor, 65536)
+                offset = 0
+                changed = False
+                while offset < len(events):
+                    _, event_mask, _, length = struct.unpack_from("iIII", events, offset)
+                    name = os.fsdecode(events[offset + 16:offset + 16 + length].rstrip(b"\0"))
+                    if event_mask & (flags.IN_IGNORED | flags.IN_DELETE_SELF | flags.IN_MOVE_SELF):
+                        raise RuntimeError("Database directory changed. Restart the managed application")
+                    changed |= name in names or bool(event_mask & flags.IN_Q_OVERFLOW)
+                    offset += 16 + length
+                if changed:
+                    # A fixed debounce bounds work during both external bursts and self-events.
+                    next_check = min(next_check, time.monotonic() + 0.2)
     finally:
-        if connection is not None:
-            connection.close()
-        os.close(descriptor)
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            os.close(descriptor)

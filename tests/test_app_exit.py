@@ -1,116 +1,99 @@
 import threading
+from queue import Queue
 import unittest
 from unittest.mock import Mock, patch
 
 from ou_dedetai.app import App
 
 
-class _TestApp(App):
-    """Minimal concrete App that skips the heavy real __init__.
-
-    exit() only needs _threads, _pending_exit, _exit, logos and
-    _schedule_exit_on_main_thread, so we wire just those up.
-    """
-
-    def __init__(self):
-        self._threads = []
-        self._pending_exit = None
-        self.logos = Mock()
-        self._exit = Mock()
-        self._schedule_exit_on_main_thread = Mock()
-
-    # Abstract methods — never exercised here, but required to instantiate.
+class TestApp(App):
     def _ask(self, question, options):
-        raise NotImplementedError
+        return None
 
     def _info(self, message):
-        raise NotImplementedError
+        pass
 
     def _status(self, message, percent=None):
-        raise NotImplementedError
-    
-    def _pop_up(self, title: str, message: str):
-        raise NotImplementedError
+        pass
+
+    def _pop_up(self, title, message):
+        pass
 
 
 class TestAppExit(unittest.TestCase):
-    def test_off_main_thread_marshals_and_does_not_tear_down(self):
-        app = _TestApp()
+    def app(self):
+        with patch("ou_dedetai.config.Config", return_value=Mock()):
+            app = TestApp(None)
+        self.addCleanup(app.close)
+        return app
 
-        def worker():
-            # raises SystemExit internally; the thread swallows it
-            app.exit("mem cap", intended=False)
+    def test_instances_own_callbacks_and_closed_callbacks_do_not_run(self):
+        first, second = self.app(), self.app()
+        seen, other = threading.Event(), threading.Event()
+        unsubscribe = first.subscribe_config(seen.set)
+        second.subscribe_config(other.set)
+        first._config_updated_event.set()
+        self.assertTrue(seen.wait(2))
+        self.assertFalse(other.is_set())
+        unsubscribe()
+        seen.clear()
+        self.assertTrue(first.close())
+        first._config_updated_event.set()
+        self.assertFalse(seen.wait(0.05))
+        self.assertEqual(first._threads, [])
 
-        t = threading.Thread(target=worker)
-        t.start()
-        t.join()
+    def test_close_keeps_mutation_owned_until_it_finishes(self):
+        app = self.app()
+        started, release = threading.Event(), threading.Event()
 
-        self.assertEqual(app._pending_exit, ("mem cap", False))
-        app._schedule_exit_on_main_thread.assert_called_once_with("mem cap", False)
-        # The real teardown must NOT have run on the worker.
-        app._exit.assert_not_called()
-        app.logos.end_processes.assert_not_called()
+        def mutation():
+            started.set()
+            release.wait(3)
 
-    @patch("ou_dedetai.app.os.remove")
-    @patch("ou_dedetai.app.sys.exit", side_effect=SystemExit)
-    def test_on_main_thread_intended_exits_zero(self, mock_exit, mock_remove):
-        app = _TestApp()
-        # Record ordering of _exit vs logos.end_processes.
-        manager = Mock()
-        app._exit = manager._exit
-        app.logos.end_processes = manager.end_processes
+        worker = app.start_thread(mutation)
+        self.assertTrue(started.wait(2))
+        try:
+            self.assertFalse(app.close(timeout=0))
+            self.assertTrue(worker.is_alive())
+            with self.assertRaisesRegex(RuntimeError, "closing"):
+                app.start_thread(lambda: None)
+        finally:
+            release.set()
+        self.assertTrue(app.close())
+        self.assertEqual(app._threads, [])
+        self.assertTrue(app.close())
 
-        with self.assertRaises(SystemExit):
-            app.exit("done", intended=True)
+    def test_worker_exit_preserves_failure_for_owner_without_signaling_logos(self):
+        app = self.app()
+        app._schedule_exit_on_main_thread = Mock()
+        app.logos.stop = Mock()
+        worker = app.start_thread(lambda: app.exit("fixture failure"))
+        worker.join(2)
+        self.assertEqual(app._pending_exit, ("fixture failure", False))
+        app._schedule_exit_on_main_thread.assert_called_once_with("fixture failure", False)
+        self.assertTrue(app.close())
+        app.logos.stop.assert_not_called()
 
-        mock_exit.assert_called_once_with(0)
-        # _exit must run before processes are ended.
-        self.assertEqual(
-            [c[0] for c in manager.mock_calls],
-            ["_exit", "end_processes"],
-        )
-        app._schedule_exit_on_main_thread.assert_not_called()
+    def test_main_exit_status_and_disposal_are_consistent(self):
+        for intended, code in ((True, 0), (False, 1)):
+            app = self.app()
+            with self.assertRaises(SystemExit) as result:
+                app.exit("fixture", intended=intended)
+            self.assertEqual(result.exception.code, code)
+            self.assertEqual(app._threads, [])
 
-    @patch("ou_dedetai.app.os.remove")
-    @patch("ou_dedetai.app.sys.exit", side_effect=SystemExit)
-    def test_on_main_thread_unintended_exits_one(self, mock_exit, mock_remove):
-        app = _TestApp()
-        with self.assertRaises(SystemExit):
-            app.exit("boom", intended=False)
-        mock_exit.assert_called_once_with(1)
-
-    @patch("ou_dedetai.app.os.remove")
-    @patch("ou_dedetai.app.sys.exit", side_effect=SystemExit)
-    def test_on_main_thread_joins_only_non_daemon_threads(self, mock_exit, mock_remove):
-        app = _TestApp()
-        daemon = Mock(daemon=True)
-        worker = Mock(daemon=False)
-        app._threads = [daemon, worker]
-        with self.assertRaises(SystemExit):
-            app.exit("done", intended=True)
-        worker.join.assert_called_once()
-        daemon.join.assert_not_called()
-
-    def test_default_schedule_interrupts_main(self):
-        # The base default must poke the main thread.
-        app = _TestApp()
-        del app._schedule_exit_on_main_thread  # fall back to the real method
-        with patch("_thread.interrupt_main") as mock_interrupt:
-            App._schedule_exit_on_main_thread(app, "r", False)
-            mock_interrupt.assert_called_once()
-
-
-class TestGuiScheduleExit(unittest.TestCase):
-    def test_gui_uses_root_after(self):
-        from ou_dedetai.gui_app import GuiApp
-
-        gui = GuiApp.__new__(GuiApp)  # skip __init__ (needs a real Tk root)
-        gui.root = Mock()
-        gui._schedule_exit_on_main_thread("reason", False)
-        # Scheduled onto the mainloop with delay 0.
-        self.assertEqual(gui.root.after.call_count, 1)
-        self.assertEqual(gui.root.after.call_args[0][0], 0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_tk_callback_failure_does_not_disable_following_work_or_rescheduling(self):
+        try:
+            from ou_dedetai.gui_app import Root
+        except ImportError as error:
+            self.skipTest(str(error))
+        root = Mock(_destroyed=False)
+        root._callbacks = Queue()
+        root._callbacks.put(Mock(side_effect=ValueError("intended callback failure")))
+        following = Mock()
+        root._callbacks.put(following)
+        with patch("ou_dedetai.gui_app.logging.exception") as report:
+            Root._drain_callbacks(root)
+        report.assert_called_once()
+        following.assert_called_once()
+        root.after.assert_called_once_with(50, root._drain_callbacks)

@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 import tempfile
-from threading import Event, Timer
+from threading import Event, RLock, Timer
 import time
 from types import SimpleNamespace
 import unittest
@@ -39,9 +39,18 @@ class TestReleaseRendering(unittest.IsolatedAsyncioTestCase):
                 domain = object.__new__(tui_app.TUI)
                 domain.conf, domain.is_running, domain.console_log = config, True, []
                 domain._closing = Event()
+                domain._closed = False
+                domain._thread_lock = RLock()
+                domain._hook_lock = RLock()
+                domain._threads = []
+                domain.config_updated_hooks = []
+                domain._config_updated_event = Event()
                 domain.cancel_pending_prompts = Mock()
                 domain.is_installed = lambda: True
-                domain.logos = SimpleNamespace(logos_state=State.STOPPED, indexing_state=State.STOPPED, monitor=Mock())
+                domain.logos = SimpleNamespace(
+                    logos_state=State.STOPPED, indexing_state=State.STOPPED,
+                    start_monitoring=Mock(), close=Mock(return_value=True),
+                )
                 domain._controller_checks = releases.ControllerChecks(client)
                 domain._controller_rendered = None
                 domain.ui = tui_app.TextualUI(domain)

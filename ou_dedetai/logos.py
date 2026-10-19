@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
-import signal
 import subprocess
 import time
+from dataclasses import dataclass, field
 from enum import Enum
 import logging
 import psutil
@@ -12,8 +12,12 @@ from ou_dedetai import constants, database, maintenance, runtime
 from ou_dedetai.app import App
 from ou_dedetai.config import get_logos_user_id
 
-from . import system
 from . import wine
+
+
+# Linux comm exposes at most 15 bytes of a Windows executable's process name.
+INDEXER_PROCESS_NAMES = {"logosindexer.exe", "verbumindexer.exe"}
+INDEXER_PROCESS_NAMES |= {name[:15] for name in INDEXER_PROCESS_NAMES}
 
 
 class State(Enum):
@@ -21,6 +25,27 @@ class State(Enum):
     STOPPED = 2
     STARTING = 3
     STOPPING = 4
+
+
+@dataclass
+class RunResult:
+    outcome: str
+    message: str
+    returncode: int | None = None
+
+
+@dataclass
+class ManagedRun:
+    context: maintenance.Context
+    process: subprocess.Popen
+    lease: maintenance.Lease
+    started: float = field(default_factory=time.monotonic)
+    empty_since: float | None = None
+    stopped: bool = False
+    handed_off: bool = False
+    members: dict = field(default_factory=dict)
+    direct_worker: bool = False
+    result: RunResult | None = None
 
 
 class LogosManager:
@@ -34,86 +59,193 @@ class LogosManager:
         """These are processes we discovered already running"""
         self._watchers = {}
         self._watcher_lock = threading.Lock()
+        self._watcher_stopping = False
+        self._watcher_policies = {}
+        self._watcher_health = {}
+        self.enforcement_error = ""
+        self._transition = threading.RLock()
+        self._closed = threading.Event()
+        self._monitor_thread = None
+        self._runs = {}
+        self._context = None
+        self._expected = ()
+        self._next_scan = 0
+        self._login_checked = False
+        self._login_notice = False
+        self._snapshot = []
 
-    def stop_watchers(self):
+    def start_monitoring(self):
+        with self._transition:
+            if self._closed.is_set():
+                raise maintenance.MaintenanceBusy("Controller is closing")
+            if self._monitor_thread is not None and self._monitor_thread.is_alive():
+                return
+
+            def observe():
+                while not self._closed.wait(1):
+                    try:
+                        self.monitor()
+                    except Exception:
+                        logging.exception("Could not refresh the selected installation state")
+
+            self._monitor_thread = self.app.start_thread(observe, daemon_bool=True)
+
+    def close(self, timeout=3):
+        """Detach observations without signaling Logos or its indexer."""
+        self._closed.set()
+        thread = self._monitor_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                return False
+        if not self._transition.acquire(blocking=False):
+            return False
+        try:
+            try:
+                self.stop_watchers(timeout=timeout)
+            except maintenance.MaintenanceBusy as error:
+                self.enforcement_error = str(error)
+                return False
+            for run in self._runs.values():
+                run.lease.close()
+            self._runs.clear()
+            self.processes.clear()
+            self.existing_processes.clear()
+            return True
+        finally:
+            self._transition.release()
+
+    def stop_watchers(self, timeout=3):
         with self._watcher_lock:
+            self._watcher_stopping = True
             handles = list(self._watchers.values())
             for stop, thread in handles:
                 stop.set()
-            for stop, thread in handles:
-                thread.join(timeout=3)
-                if thread.is_alive():
-                    raise maintenance.MaintenanceBusy("A database watcher has not stopped")
-            self._watchers.clear()
+        deadline = time.monotonic() + timeout
+        for stop, thread in handles:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+            if thread.is_alive():
+                raise maintenance.MaintenanceBusy("A database watcher has not stopped")
+        with self._watcher_lock:
+            for path, handle in list(self._watchers.items()):
+                if handle in handles:
+                    del self._watchers[path]
+                    self._watcher_policies.pop(path, None)
+                    self._watcher_health.pop(path, None)
+            self._watcher_stopping = False
 
     @maintenance.uses_owner
     def _watch_database(self, path, sql):
+        path = Path(path).resolve()
         with self._watcher_lock:
+            if self._closed.is_set() or self._watcher_stopping:
+                raise maintenance.MaintenanceBusy("Controller is closing")
             old = self._watchers.get(path)
             if old and old[1].is_alive():
+                if self._watcher_policies.get(path) != tuple(sql):
+                    raise maintenance.MaintenanceBusy("Stop the current database policy before replacing it")
                 return
             stop = threading.Event()
-            thread = maintenance.spawn(self.app, database.watch_db, str(path), sql, stop)
+            health = database.WatcherHealth()
+            thread = maintenance.spawn(self.app, database.watch_db, str(path), sql, stop, health)
             self._watchers[path] = (stop, thread)
-
-    def monitor_indexing(self):
-        if self.app.conf.logos_indexer_exe_windows_path in self.existing_processes:
-            indexer = self.existing_processes.get(self.app.conf.logos_indexer_exe_windows_path)
-            if indexer and isinstance(indexer[0], psutil.Process) and indexer[0].is_running():
-                self.indexing_state = State.RUNNING
-            else:
-                self.indexing_state = State.STOPPED
-
-    def monitor_logos(self):
-        splash = []
-        login = []
-        cef = []
-        if self.app.conf.logos_exe:
-            splash = self.existing_processes.get(self.app.conf.logos_exe, [])
-        if self.app.conf.logos_system_exe_windows_path:
-            login = self.existing_processes.get(self.app.conf.logos_system_exe_windows_path, [])
-        if self.app.conf.logos_cef_exe_windows_path:
-            cef = self.existing_processes.get(self.app.conf.logos_cef_exe_windows_path, [])
-
-        splash_running = splash[0].is_running() if splash else False
-        login_running = login[0].is_running() if login else False
-        cef_running = cef[0].is_running() if cef else False
-        # logging.debug(f"{self.logos_state=}")
-        # logging.debug(f"{splash_running=}; {login_running=}; {cef_running=}")
-
-        if self.logos_state == State.STARTING:
-            if login_running or cef_running:
-                self.logos_state = State.RUNNING
-        elif self.logos_state == State.RUNNING:
-            if not any((splash_running, login_running, cef_running)):
-                self.stop()
-        elif self.logos_state == State.STOPPING:
-            pass
-        elif self.logos_state == State.STOPPED:
-            if splash_running:
-                self.logos_state = State.STARTING
-            if login_running:
-                self.logos_state = State.RUNNING
-            if cef_running:
-                self.logos_state = State.RUNNING
+            self._watcher_policies[path] = tuple(sql)
+            self._watcher_health[path] = health
+        deadline = time.monotonic() + 3
+        while not health.ready.wait(0.1):
+            if self._closed.is_set() or time.monotonic() >= deadline:
+                stop.set()
+                raise maintenance.MaintenanceBusy("Database protection was not ready. Launch cancelled")
+        if health.error:
+            raise maintenance.MaintenanceError(f"Database protection failed: {health.error}")
 
     def get_logos_pids(self, context=None):
-        app = self.app
-        # FIXME: consider refactoring to make one call to get a system pids
-        # Currently this gets all system pids 4 times
-        for exe_path in [
-            app.conf.logos_exe,
-            app.conf.logos_system_exe_windows_path,
-            app.conf.logos_indexer_exe_windows_path,
-            app.conf.logos_cef_exe_windows_path
-        ]:
-            if exe_path:
-                candidates = system.get_pids(exe_path)
-                if context is not None:
-                    candidates = [process for process in candidates if self._matches_selection(process, context)]
-                self.existing_processes[exe_path] = candidates
+        context = context or maintenance.Context.from_app(self.app, prompt=False)
+        conf = self.app.conf
+        expected = (conf.logos_exe, conf.logos_system_exe_windows_path,
+                    conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path)
+        groups = {exe: [] for exe in expected if exe}
+        snapshot = list(psutil.process_iter(["pid", "ppid", "name", "cmdline", "uids"]))
+        for process in snapshot:
+            command = process.info.get("cmdline") or []
+            matches = set(groups).intersection(command)
+            if matches and self._matches_selection(process, context, expected, strict=True):
+                for exe in matches:
+                    groups[exe].append(process)
+        self._context, self._expected = context, expected
+        self.existing_processes = groups
+        self._snapshot = snapshot
+        return groups
 
-    def _matches_selection(self, process, context):
+    def _prefix_member(self, process, context):
+        try:
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                return False
+            prefix = process.environ().get("WINEPREFIX")
+            return (process.uids().real == os.geteuid() and prefix is not None
+                    and Path(prefix).is_absolute() and Path(prefix).resolve() == context.prefix)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return False
+
+    def _role_members(self, role):
+        indexer = self.app.conf.logos_indexer_exe_windows_path
+        members = []
+        for exe, group in self.existing_processes.items():
+            if role == "index" and exe == indexer:
+                members.extend(group)
+            elif role == "logos" and exe != indexer:
+                members.extend(group)
+        return members
+
+    def _exclusive_member(self, process, role, context):
+        if not self._prefix_member(process, context):
+            return False
+        try:
+            name = process.name().lower()
+            if name in {"wineserver", "wineboot.exe", "services.exe", "winedevice.exe", "explorer.exe",
+                        "rpcss.exe", "svchost.exe", "plugplay.exe", "conhost.exe"}:
+                return False
+            command = process.cmdline()
+            if role == "index":
+                other = (self.app.conf.logos_exe, self.app.conf.logos_system_exe_windows_path,
+                         self.app.conf.logos_cef_exe_windows_path)
+                if name in {"logos.exe", "verbum.exe", "logoscef.exe", "verbumcef.exe"}:
+                    return False
+            else:
+                other = (self.app.conf.logos_indexer_exe_windows_path,)
+                if name in INDEXER_PROCESS_NAMES:
+                    return False
+            return not (set(other) - {None}).intersection(command)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return False
+
+    def _run_members(self, role, run):
+        known = {pid: process for pid, process in run.members.items()
+                 if self._exclusive_member(process, role, run.context)}
+        for process in self._role_members(role):
+            known[process.pid] = process
+        # Preserve identities after reparenting. Discover children before their
+        # parent exits rather than treating an arbitrary prefix process as owned.
+        changed = True
+        while changed:
+            changed = False
+            for process in self._snapshot:
+                if process.pid not in known and process.info.get("ppid") in known:
+                    if self._exclusive_member(process, role, run.context):
+                        known[process.pid] = process
+                        changed = True
+        run.members = known
+        for process in known.values():
+            try:
+                name = process.name().lower()
+                if (role == "index" and process.pid == run.process.pid
+                        and name in INDEXER_PROCESS_NAMES):
+                    run.direct_worker = True
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                pass
+        return list(known.values())
+
+    def _matches_selection(self, process, context, expected=None, *, strict=False):
         """A Windows argv match alone does not identify a Wine installation."""
         try:
             if not process.is_running() or process.uids().real != os.geteuid():
@@ -121,83 +253,112 @@ class LogosManager:
             prefix = process.environ().get("WINEPREFIX")
             if not prefix or not Path(prefix).is_absolute() or Path(prefix).resolve() != context.prefix:
                 return False
-            conf = self.app.conf
-            expected = {
-                conf.logos_exe, conf.logos_system_exe_windows_path,
-                conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path,
-            } - {None}
-            return bool(expected.intersection(process.cmdline())) and process.is_running()
-        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+            if expected is None:
+                conf = self.app.conf
+                expected = (conf.logos_exe, conf.logos_system_exe_windows_path,
+                            conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path)
+            return (bool((set(expected) - {None}).intersection(process.cmdline()))
+                    and process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
+        except psutil.AccessDenied as error:
+            if strict:
+                raise maintenance.MaintenanceBusy("Cannot verify a selected program's process identity") from error
+            return False
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             logging.warning("Skipped a Stop candidate whose selected-prefix identity could not be verified")
             return False
 
     def monitor(self):
-        if self.app.is_installed():
+        notifications = []
+        with self._transition:
+            if self._closed.is_set() or time.monotonic() < self._next_scan:
+                return
+            self._next_scan = time.monotonic() + 1
+            if not self.app.is_installed() and not self._runs:
+                return
             self.get_logos_pids()
-            try:
-                self.monitor_indexing()
-                self.monitor_logos()
-            except Exception as e:
-                # pass
-                logging.error(e)
-        else:
-            # Useful if the install directory got deleted while executing
-            self.logos_state = State.STOPPED
+            for role, attribute in (("logos", "logos_state"), ("index", "indexing_state")):
+                run = self._runs.get(role)
+                members = self._role_members(role) if run is None else self._run_members(role, run)
+                if run is not None:
+                    code = run.process.poll()
+                    if code is not None and members:
+                        run.handed_off = True
+                    if members or code is None:
+                        run.empty_since = None
+                        continue
+                    if run.empty_since is None:
+                        run.empty_since = time.monotonic()
+                        continue
+                    if time.monotonic() - run.empty_since < 2:
+                        continue
+                    run.lease.close()
+                    del self._runs[role]
+                    self.processes = {key: value for key, value in self.processes.items() if value is not run.process}
+                    if role == "logos":
+                        self.stop_watchers()
+                    elif not run.stopped:
+                        if code != 0:
+                            run.result = RunResult("failed", f"Indexing process failed with exit code {code}", code)
+                        elif run.handed_off or not run.direct_worker:
+                            run.result = RunResult("unknown", "Indexing stopped. The worker exit status is unavailable")
+                        else:
+                            run.result = RunResult("succeeded", "Indexing process has finished", code)
+                        notifications.append((run.result.message, 100 if run.result.outcome == "succeeded" else 0))
+                setattr(self, attribute, State.RUNNING if members else State.STOPPED)
+            login_notice = self.monitor_for_potential_issues()
+            if login_notice:
+                notifications.append((login_notice, None))
+            error = next((health.error for health in self._watcher_health.values() if health.error), "")
+            if error != self.enforcement_error:
+                self.enforcement_error = error
+                message = f"Database protection unavailable: {error}" if error else "Database protection restored"
+                notifications.append((message, 0))
+        for message, percent in notifications:
+            self.app.status(message, percent)
 
     def monitor_for_potential_issues(self):
-        """A function to be run in parallel with running Logos to detect common issues and suggest workarounds"""
-        # Make sure we have a logos appdata, without it we can't reliably do any checks
-        logos_appdata_dir = self.app.conf._logos_appdata_dir
-        if logos_appdata_dir is None:
-            logging.warning("The user should have installed the Logos application by now and have this populated."
-                            " Waiting until that is resolved…")
-            while logos_appdata_dir is None:
-                time.sleep(1)
-                logos_appdata_dir = self.app.conf._logos_appdata_dir
-        
-        # See if the user is logged in, this may change which things we look for
-        is_user_logged_in: bool = False
-        if get_logos_user_id(logos_appdata_dir) is not None:
-            is_user_logged_in = True
-
-        sent_trouble_signing_in_message: bool = False
-
-        time_logos_started = time.time()
-
-        while True:
-            # Now we wait...
-            time.sleep(10)
-
-            if not is_user_logged_in:
-                if get_logos_user_id(logos_appdata_dir) is not None:
-                    # User's now logged in - no fuss.
-                    is_user_logged_in = True
-                else:
-                    # Took me about ~1.5 minutes to sign on while simulating a little dilly-dallying and a couple
-                    # incorrect password attempts. Should still be longer than most people take to sign on, but not SO
-                    # long that people close OD in frustration to try again - fine line of balance.
-                    if not sent_trouble_signing_in_message and time.time() - time_logos_started > 60 * 1.75:
-                        # It's been five minutes since the user launched Logos and yet they haven't logged in yet.
-                        # Are they having trouble?
-                        self.app.pop_up(
-                            "Trouble Signing In?",
-                            "If you're having trouble signing in, try these workarounds:\n\n" \
-                            "If the browser isn't launching after you hit \"Sign In\" in the Logos application "
-                            "consider installing firefox from your system's package manager and temporarily setting "
-                            "that as your default browser.\n\n"
-                            "If the browser opens and entering your credentials is successful but nothing happens: "
-                            "on the Logos browser page try hitting the button for not being redirected automatically "
-                            "then click on the link that shows up that suggests to click it if you're still having "
-                            "trouble. That should cause you to sign in on the Logos application.\n\n"
-                            f"If you still need help use \"Get Support\" on the main page of {constants.APP_NAME}"
-                        )
-                        # We only want to send this message once
-                        sent_trouble_signing_in_message = True
+        """Check login from the owned observer without creating a per-launch worker."""
+        run = self._runs.get("logos")
+        if run is None or self._login_checked or self._login_notice:
+            return
+        directory = self.app.conf._logos_appdata_dir
+        if directory is None:
+            return
+        self._login_checked = get_logos_user_id(directory) is not None
+        if not self._login_checked and time.monotonic() - run.started > 105:
+            self._login_notice = True
+            return f"Trouble signing in? Use Get Support in {constants.APP_NAME} for browser handoff help"
 
 
     @maintenance.uses_owner
     def start(self):
-        self.logos_state = State.STARTING
+        return self._start("logos")
+
+    def _start(self, role):
+        with self._transition:
+            if self._closed.is_set():
+                raise maintenance.MaintenanceBusy("Controller is closing")
+            attribute = "logos_state" if role == "logos" else "indexing_state"
+            if role in self._runs or getattr(self, attribute) != State.STOPPED:
+                raise maintenance.MaintenanceBusy("The requested program is already starting or running")
+            lease = maintenance.Lease(maintenance.current_context(), role=role)
+            try:
+                self.get_logos_pids()
+                if self._role_members(role):
+                    raise maintenance.MaintenanceBusy("The requested program is already running")
+                setattr(self, attribute, State.STARTING)
+                self._launch(role, lease)
+                setattr(self, attribute, State.RUNNING)
+                return self._runs[role]
+            except BaseException:
+                lease.close()
+                setattr(self, attribute, State.STOPPED)
+                if role == "logos":
+                    self.stop_watchers()
+                raise
+
+    def _launch(self, role, lease):
+        context = lease.context
         try:
             from . import repair
 
@@ -212,29 +373,38 @@ class LogosManager:
             )
             if not good_wine:
                 raise maintenance.MaintenanceError(reason or "The selected Wine runtime is incompatible")
-            wine.wineserver_kill(self.app)
-            self.prevent_logos_updates()
-            self.set_auto_updates(False)
-            if not self.app.conf.logos_exe:
-                raise ValueError("Could not find installed Logos EXE to run")
+            self.start_monitoring()
+            exe = self.app.conf.logos_exe if role == "logos" else self.app.conf.logos_indexer_exe_windows_path
+            if not exe:
+                raise ValueError("Could not find the installed program")
+            if role == "logos":
+                self.prevent_logos_updates()
+                self.set_auto_updates(False)
+            if self._closed.is_set():
+                raise maintenance.MaintenanceBusy("Launch cancelled because the controller is closing")
             process = wine.run_wine_application(
                 self.app,
                 selected_runtime,
-                exe=self.app.conf.logos_exe
+                exe=exe
             )
             if process is None:
                 raise maintenance.MaintenanceError("Wine did not start Logos")
-            self.processes[self.app.conf.logos_exe] = process
+            self.processes[exe] = process
+            run = self._runs[role] = ManagedRun(context, process, lease)
+            try:
+                parent = psutil.Process(process.pid)
+                pending = [parent]
+                while pending:
+                    member = pending.pop()
+                    if self._exclusive_member(member, role, context):
+                        run.members[member.pid] = member
+                        pending.extend(member.children())
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                pass
         except BaseException:
-            self.logos_state = State.STOPPED
-            self.stop_watchers()
+            lease.close()
             raise
-        self.logos_state = State.RUNNING
-        def finished(returncode):
-            self.logos_state = State.STOPPED
-
-        maintenance.hold_process(self.app, process, finished)
-        self.app.start_thread(self.monitor_for_potential_issues, daemon_bool=False)
+        self._login_checked = self._login_notice = False
 
     # For now enforce this all the time, ideally we wouldn't override the user's choice
     # But risks as they are, setting it to false is safer for now.
@@ -255,8 +425,11 @@ class LogosManager:
             """UPDATE Preferences SET Data='<data """ +
             ('OptIn="true"' if val else 'OptIn="false"') +
             """ StartDownloadHour="0" StopDownloadHour="0" MarkNewResourcesAsCloud="true" />' """
-            """ WHERE Type='UpdateManagerPreferences'""" 
+            """ WHERE Type='UpdateManagerPreferences'"""
         )
+        desired = ('<data ' + ('OptIn="true"' if val else 'OptIn="false"')
+                   + ' StartDownloadHour="0" StopDownloadHour="0" MarkNewResourcesAsCloud="true" />')
+        sql += " AND Data IS NOT '" + desired + "'"
         self._watch_database(db_path, [sql])
 
     @maintenance.uses_owner
@@ -303,94 +476,99 @@ class LogosManager:
     # alone for now. Only found it when manually modifying the database.
 
     def stop(self):
-        context = maintenance.Context.from_app(self.app, prompt=False)
-        previous = self.logos_state
-        self.logos_state = State.STOPPING
-        try:
-            self.get_logos_pids(context)
-            candidates = {process.pid: process for group in self.existing_processes.values() for process in group}
-            for child in self.processes.values():
-                if child.poll() is None:
-                    try:
-                        candidates[child.pid] = psutil.Process(child.pid)
-                    except psutil.NoSuchProcess:
-                        pass
-            for process in candidates.values():
-                if self._matches_selection(process, context):
-                    try:
-                        process.kill()
-                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                        pass
-            self.logos_state = State.STOPPED
-        except BaseException:
-            self.logos_state = previous
-            raise
+        self._stop(index_only=False)
+
+    def _stop(self, *, index_only):
+        with self._transition:
+            context = maintenance.Context.from_app(self.app, prompt=False)
+            roles = ("index",) if index_only else ("logos", "index")
+            attributes = ["indexing_state" if role == "index" else "logos_state" for role in roles]
+            previous = [getattr(self, attribute) for attribute in attributes]
+            for attribute in attributes:
+                setattr(self, attribute, State.STOPPING)
+            try:
+                self.get_logos_pids(context)
+                expected = (self.app.conf.logos_indexer_exe_windows_path,) if index_only else self._expected
+                candidates = {p.pid: p for exe, group in self.existing_processes.items()
+                              if exe in expected for p in group}
+                owned = {}
+                for role in roles:
+                    run = self._runs.get(role)
+                    if run is not None:
+                        owned.update({p.pid: p for p in self._run_members(role, run)})
+                candidates.update(owned)
+                for process in candidates.values():
+                    verified = (any(self._exclusive_member(process, role, context) for role in roles)
+                                if process.pid in owned
+                                else self._matches_selection(process, context, expected, strict=True))
+                    if verified:
+                        try:
+                            process.terminate()
+                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                            pass
+                alive = self._wait_selected(list(candidates.values()), 2)
+                for process in alive:
+                    verified = (any(self._exclusive_member(process, role, context) for role in roles)
+                                if process.pid in owned
+                                else self._matches_selection(process, context, expected, strict=True))
+                    if verified:
+                        try:
+                            process.kill()
+                        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                            pass
+                alive = self._wait_selected(alive, 1)
+                if alive:
+                    raise maintenance.MaintenanceBusy("Selected processes have not stopped")
+                self.get_logos_pids(context)
+                if any(group for exe, group in self.existing_processes.items() if exe in expected):
+                    raise maintenance.MaintenanceBusy("A selected process is still running. Retry Stop")
+                for role in roles:
+                    run = self._runs.get(role)
+                    if run is not None:
+                        run.stopped = True
+                        run.result = RunResult("cancelled", "Indexing stopped by request")
+                        if run.process.poll() is None:
+                            raise maintenance.MaintenanceBusy("The launch process is still running")
+                        run.lease.close()
+                        del self._runs[role]
+                self.processes = {name: p for name, p in self.processes.items() if p.poll() is None}
+                if not index_only:
+                    self.stop_watchers()
+                for attribute in attributes:
+                    setattr(self, attribute, State.STOPPED)
+            except BaseException:
+                for attribute, state in zip(attributes, previous):
+                    setattr(self, attribute, state)
+                raise
+
+    def _wait_selected(self, candidates, timeout):
+        """Observe exit without stealing a Popen child's wait status."""
+        deadline = time.monotonic() + timeout
+        while candidates:
+            alive = []
+            for process in candidates:
+                try:
+                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                        alive.append(process)
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    pass
+            candidates = alive
+            if not candidates or time.monotonic() >= deadline:
+                return candidates
+            time.sleep(0.05)
+        return []
 
     def end_processes(self):
-        for process_name, process in self.processes.items():
-            if isinstance(process, subprocess.Popen):
-                logging.debug(f"Found {process_name} in Processes. Attempting to close {process}.")
-                try:
-                    process.terminate()
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    os.waitpid(-process.pid, 0)
+        self.close()
 
     @maintenance.uses_owner
     def index(self):
-        self.indexing_state = State.STARTING
-        try:
-            if not self.app.conf.logos_indexer_exe_windows_path:
-                raise ValueError("Cannot find installed indexer")
-            wine.wineserver_kill(self.app)
-            process = wine.run_wine_application(
-                app=self.app,
-                wine_binary=self.app.conf.wine_binary,
-                exe=self.app.conf.logos_indexer_exe_windows_path
-            )
-            if process is None:
-                raise maintenance.MaintenanceError("Wine did not start the indexer")
-            self.processes[self.app.conf.logos_indexer_exe_windows_path] = process
-        except BaseException:
-            self.indexing_state = State.STOPPED
-            raise
-
-        def wait_on_indexing(returncode):
-            self.indexing_state = State.STOPPED
-            if returncode == 0:
-                self.app.status("Indexing process has finished", 100)
-            else:
-                self.app.status(f"Indexing process failed with exit code {returncode}", 0)
-
-        self.indexing_state = State.RUNNING
+        run = self._start("index")
         self.app.status("Indexing has begun", 0)
-        maintenance.hold_process(self.app, process, wait_on_indexing)
+        return run
 
     def stop_indexing(self):
-        self.indexing_state = State.STOPPING
-        if self.app:
-            pids = []
-            for process_name in [self.app.conf.logos_indexer_exe_windows_path]:
-                if process_name is None:
-                    continue
-                process = self.processes.get(process_name)
-                if process:
-                    pids.append(str(process.pid))
-                else:
-                    logging.debug(f"No LogosIndexer processes found for {process_name}.")
-
-            if pids:
-                try:
-                    system.run_command(['kill', '-9'] + pids)
-                    self.indexing_state = State.STOPPED
-                    self.app.status(f"Stopped LogosIndexer processes at PIDs {', '.join(pids)}.")
-                except Exception as e:
-                    logging.debug(f"Error while stopping LogosIndexer processes: {e}.")
-            else:
-                logging.debug("No LogosIndexer processes to stop.")
-                self.indexing_state = State.STOPPED
-        wine.wineserver_wait(app=self.app)
+        self._stop(index_only=True)
 
     @maintenance.uses_owner
     def get_app_logging_state(self, init=False):

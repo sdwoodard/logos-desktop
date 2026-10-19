@@ -1,10 +1,10 @@
 import math
 import os
 import queue
+import select
 import shutil
 import sys
 import threading
-import time
 from typing import Optional, Tuple
 
 from ou_dedetai import constants
@@ -29,7 +29,7 @@ class CLI(App):
         self.input_q: queue.Queue[Tuple[str, list[str]] | None] = queue.Queue()
         self.input_event = threading.Event()
         self.choice_event = threading.Event()
-        self.start_thread(self.user_input_processor)
+        self.start_thread(self.user_input_processor, daemon_bool=True)
 
     def backup(self):
         backup.backup(app=self)
@@ -87,7 +87,12 @@ class CLI(App):
         backup.restore(app=self)
 
     def run_indexing(self):
-        self.logos.index()
+        run = self.logos.index()
+        while run.result is None:
+            if self._closing.wait(0.2):
+                raise maintenance.MaintenanceError("Indexing observation cancelled")
+        if run.result.outcome != "succeeded":
+            raise maintenance.MaintenanceError(run.result.message)
 
     def run_installed_app(self):
         self.logos.start()
@@ -97,8 +102,8 @@ class CLI(App):
             # exit; run it here on the main thread so the process truly stops.
             if self._pending_exit is not None:
                 self.exit(*self._pending_exit)
-            time.sleep(3)
-            self.logos.monitor()
+            if self._closing.wait(0.2):
+                break
 
     def stop_installed_app(self):
         self.logos.stop()
@@ -208,6 +213,14 @@ class CLI(App):
         # We always want this to return regardless of level
         self.print(f"Closing {constants.APP_NAME} due to: {reason}")
         return super().exit(reason, intended)
+
+    def request_close(self, reason="Controller closed", intended=True):
+        super().request_close(reason, intended)
+        self.running = False
+        self.input_q.put(None)
+        self.input_event.set()
+        self.choice_q.put(None)
+        self.choice_event.set()
     
     def _status(self, message: str, percent: Optional[int] = None):
         """Implementation for updating status pre-front end
@@ -266,7 +279,18 @@ class CLI(App):
                 # Convert options list to string.
                 default = options[0]
                 optstr = f"{options[0]} [default], " + ', '.join(options[1:])
-                choice = input(f"{question}: {optstr}: ")
+                print(f"{question}: {optstr}: ", end="", flush=True)
+                while self.running:
+                    if select.select([sys.stdin], [], [], 0.1)[0]:
+                        choice = sys.stdin.readline()
+                        if not choice:
+                            self.choice_q.put(None)
+                            self.choice_event.set()
+                            return
+                        choice = choice.rstrip("\n")
+                        break
+                if not self.running:
+                    return
                 if len(choice) == 0:
                     choice = default
             if choice is not None and choice == self._exit_option:

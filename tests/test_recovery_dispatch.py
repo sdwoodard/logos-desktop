@@ -135,7 +135,7 @@ class TestRecoveryDispatch(unittest.TestCase):
             before = manifest(self.root)
             with self.forbidden_mutations():
                 self.dispatch("--stop-installed-app")
-            self.assertEqual(selected.wait(timeout=5), -9)
+            self.assertEqual(selected.wait(timeout=5), -15)
             self.assertIsNone(other.poll())
             self.assertIsNone(sentinel.poll())
             self.assertEqual(manifest(self.root), before)

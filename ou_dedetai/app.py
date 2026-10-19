@@ -3,9 +3,9 @@ import abc
 import logging
 import os
 from pathlib import Path
-import sys
 import threading
-from typing import Callable, NoReturn, Optional
+import time
+from typing import NoReturn, Optional
 
 from ou_dedetai import constants
 from ou_dedetai.constants import (
@@ -39,29 +39,90 @@ class App(abc.ABC):
     """
     _last_status: Optional[str] = None
     """The last status we had"""
-    config_updated_hooks: list[Callable[[], None]] = []
-    _config_updated_event: threading.Event = threading.Event()
-
     def __init__(self, config, **kwargs) -> None:
         # This lazy load is required otherwise these would be circular imports
         from ou_dedetai.config import Config
         from ou_dedetai.logos import LogosManager
 
-        self.conf = Config(config, self)
-        self.logos = LogosManager(app=self)
+        self._closing = threading.Event()
+        self._closed = False
+        self._thread_lock = threading.RLock()
+        self._hook_lock = threading.RLock()
+        self.config_updated_hooks = []
+        self._config_updated_event = threading.Event()
         self._threads = []
         self._pending_exit: Optional[tuple[str, bool]] = None
+        self.conf = Config(config, self)
+        self.logos = LogosManager(app=self)
+
         def _config_updated_hook_runner():
-            while True:
+            while not self._closing.is_set():
                 self._config_updated_event.wait()
                 self._config_updated_event.clear()
-                for hook in self.config_updated_hooks:
+                with self._hook_lock:
+                    hooks = tuple(self.config_updated_hooks)
+                for hook in hooks:
+                    if self._closing.is_set():
+                        return
                     try:
-                        hook()
+                        self.dispatch_config(hook)
                     except Exception:
                         logging.exception("Failed to run config update hook")
         _config_updated_hook_runner.__name__ = "Config Update Hook"
         self.start_thread(_config_updated_hook_runner, daemon_bool=True)
+
+    def dispatch_config(self, callback):
+        callback()
+
+    def subscribe_config(self, callback):
+        """Return a removable subscription owned by this application."""
+        def guarded():
+            with self._hook_lock:
+                active = guarded in self.config_updated_hooks and not self._closing.is_set()
+            if active:
+                callback()
+
+        with self._hook_lock:
+            if self._closing.is_set():
+                raise RuntimeError("Application is closing")
+            self.config_updated_hooks.append(guarded)
+
+        def unsubscribe():
+            with self._hook_lock:
+                if guarded in self.config_updated_hooks:
+                    self.config_updated_hooks.remove(guarded)
+        return unsubscribe
+
+    def request_close(self, reason="Controller closed", intended=True):
+        if self._pending_exit is None or not intended:
+            self._pending_exit = (reason, intended)
+        self._closing.set()
+        self._config_updated_event.set()
+
+    def close(self, timeout=5):
+        """Detach the application after its workers reach a safe boundary.
+
+        False means a worker still owns work. Frontends keep their event loop
+        alive and retry instead of abandoning an active mutation.
+        """
+        if self._closed:
+            return True
+        self.request_close()
+        deadline = time.monotonic() + timeout
+        if not self.logos.close(timeout=max(0, deadline - time.monotonic())):
+            return False
+        with self._hook_lock:
+            self.config_updated_hooks.clear()
+        with self._thread_lock:
+            workers = tuple(self._threads)
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(max(0, deadline - time.monotonic()))
+        with self._thread_lock:
+            if any(worker.is_alive() for worker in self._threads):
+                return False
+        self._closed = True
+        return True
 
     def ask(self, question: str, options: list[str]) -> str:
         """Asks the user a question with a list of supplied options
@@ -166,42 +227,15 @@ class App(abc.ABC):
         _thread.interrupt_main()
 
     def exit(self, reason: str, intended: bool = False) -> NoReturn:
-        """Exits the application cleanly with a reason.
-
-        If called from a worker thread, marshals the real exit onto the main
-        thread (so per-frontend _exit() cleanup runs there and the process
-        actually terminates), then lets this worker die.
-        """
+        """Request frontend shutdown and unwind the current operation."""
+        self.request_close(reason, intended)
         if threading.current_thread() is not threading.main_thread():
-            self._pending_exit = (reason, intended)
             self._schedule_exit_on_main_thread(reason, intended)
-            # Kills only this worker (CPython swallows SystemExit off the main
-            # thread); also frees any join() the main-thread exit waits on.
             raise SystemExit
-        logging.debug(f"Closing {constants.APP_NAME}.")
         self._exit(reason, intended)
-        # Shutdown logos/indexer if we spawned it
-        self.logos.end_processes()
-        # Join threads
-        for thread in self._threads:
-            # Only wait on non-daemon threads.
-            if not thread.daemon:
-                try:
-                    thread.join()
-                except RuntimeError:
-                    # Will happen if we try to join the current thread
-                    pass
-        # Remove pid file if exists
-        try:
-            os.remove(constants.PID_FILE)
-        except FileNotFoundError:  # no pid file when testing functions
-            pass
-        # exit from the process
-        if intended:
-            sys.exit(0)
-        else:
-            logging.critical(f"Cannot continue because {reason}\n{constants.SUPPORT_MESSAGE}") 
-            sys.exit(1)
+        if not self.close():
+            raise RuntimeError("Application workers are still finishing")
+        raise SystemExit(0 if intended else 1)
 
     _exit_option: Optional[str] = "Exit"
 
@@ -342,17 +376,31 @@ class App(abc.ABC):
         from ou_dedetai.system import get_superuser_command
         return get_superuser_command()
 
-    def start_thread(self, task, *args, daemon_bool: bool = True, **kwargs):
-        """Starts a new thread
-        
-        Non-daemon threads be joined before shutdown"""
+    def start_thread(self, task, *args, daemon_bool: bool = False, **kwargs):
+        """Own a worker until its final cleanup, including failure."""
+        # Some lightweight frontend adapters supply their own configuration.
+        lock = self.__dict__.setdefault("_thread_lock", threading.RLock())
+
+        def run():
+            try:
+                task(*args, **kwargs)
+            finally:
+                with lock:
+                    self._threads.remove(thread)
+
         thread = threading.Thread(
-            name=f"{constants.APP_NAME} {task}",
-            target=task,
+            name=f"{constants.APP_NAME} {getattr(task, '__name__', 'worker')}",
+            target=run,
             daemon=daemon_bool,
-            args=args,
-            kwargs=kwargs
         )
-        self._threads.append(thread)
-        thread.start()
+        with lock:
+            closing = getattr(self, "_closing", None)
+            if closing is not None and closing.is_set() and threading.current_thread() not in self._threads:
+                raise RuntimeError("Application is closing")
+            self._threads.append(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._threads.remove(thread)
+                raise
         return thread

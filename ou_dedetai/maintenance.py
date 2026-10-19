@@ -175,11 +175,12 @@ def current_context() -> Context | None:
 
 
 class Lease:
-    def __init__(self, context: Context, *, exclusive=False, recovery=False):
+    def __init__(self, context: Context, *, exclusive=False, recovery=False, role=None):
         self.context = context
         self.exclusive = exclusive
         self.descriptor = None
         self.artifacts = None
+        self.role_descriptor = None
         with _admission:
             owner = _reservations.get(context.prefix)
             if owner is not None and owner != threading.get_ident():
@@ -215,7 +216,28 @@ class Lease:
                     self.descriptor = None
                     raise
 
+            if role is not None:
+                try:
+                    if role not in ("logos", "index"):
+                        raise ValueError("Unknown managed program role")
+                    self.role_descriptor = os.open(
+                        context.state / f"{role}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+                    )
+                    info = os.fstat(self.role_descriptor)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                        raise MaintenanceError("Unsafe program launch lock")
+                    fcntl.flock(self.role_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    self.close()
+                    raise MaintenanceBusy("Another controller owns this program run") from error
+                except BaseException:
+                    self.close()
+                    raise
+
     def close(self):
+        if self.role_descriptor is not None:
+            os.close(self.role_descriptor)
+            self.role_descriptor = None
         if self.artifacts is not None:
             self.artifacts.__exit__(None, None, None)
             self.artifacts = None

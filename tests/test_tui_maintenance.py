@@ -15,6 +15,7 @@ from tests.test_runtime_paths import fixture_config
 
 class PromptUI(TextualApp):
     action_quit = tui_app.TextualUI.action_quit
+    _finish_close = tui_app.TextualUI._finish_close
     on_unmount = tui_app.TextualUI.on_unmount
 
     def __init__(self, domain):
@@ -58,7 +59,12 @@ class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
                 domain._last_status = None
                 domain._config_updated_event = Mock()
                 domain.console_log = []
-                domain.logos = None
+                from ou_dedetai.logos import LogosManager
+                domain.logos = LogosManager(domain)
+                domain._closed = False
+                domain._thread_lock = threading.RLock()
+                domain._hook_lock = threading.RLock()
+                domain.config_updated_hooks = []
                 domain.is_running = True
                 domain.ui = PromptUI(domain)
                 with patch.object(constants, "STATE_DIR", str(root / "state/FaithLife-Community")):

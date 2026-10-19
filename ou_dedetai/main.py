@@ -275,7 +275,12 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         
         Lazily instantiates CLI at call-time"""
         def _run(config: EphemeralConfiguration):
-            getattr(cli.CLI(config), action)()
+            app = cli.CLI(config)
+            try:
+                getattr(app, action)()
+            finally:
+                if not app.close():
+                    raise RuntimeError("An application operation is still finishing")
         output = _run
         output.__name__ = action
         return output
@@ -369,7 +374,12 @@ def install_app(ephemeral_config: EphemeralConfiguration):
 
         gui_app.start_gui_app(ephemeral_config, install_only=True)
     else:
-        cli.CLI(ephemeral_config).install_app()
+        app = cli.CLI(ephemeral_config)
+        try:
+            app.install_app()
+        finally:
+            if not app.close():
+                raise RuntimeError("An installation operation is still finishing")
 
 
 def setup_config(cli_args=None) -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]:

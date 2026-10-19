@@ -505,7 +505,14 @@ def run_wine_process(
 
     def release():
         try:
-            process.wait()
+            closing = getattr(app, "_closing", None)
+            while process.poll() is None:
+                if isinstance(closing, threading.Event) and closing.wait(0.1):
+                    return
+                try:
+                    process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             if prefix_lease is not None:
                 prefix_lease.close()
@@ -518,7 +525,10 @@ def run_wine_process(
         )
         if process is None:
             return None
-        threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
+        if isinstance(app, App):
+            app.start_thread(release, daemon_bool=True)
+        else:
+            threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
         transferred = True
         return process
     except BaseException:

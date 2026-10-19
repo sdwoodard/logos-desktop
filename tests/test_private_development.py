@@ -2,6 +2,7 @@ import importlib
 import json
 import stat
 import tempfile
+from threading import Event, RLock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,6 +267,10 @@ class TestPrivateGuiUpdates(unittest.TestCase):
         def initialize_fixture(window, *args, **kwargs):
             window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None), _network=Mock(),
                                           app_release_channel="stable")
+            window.logos = Mock()
+            window._closing = Event()
+            window._hook_lock = RLock()
+            window.config_updated_hooks = []
 
         with (
             patch.object(constants, "RUNMODE", "binary"),
@@ -275,16 +280,15 @@ class TestPrivateGuiUpdates(unittest.TestCase):
             patch.object(gui_app.ControlWindow, "_config_update_hook"),
             patch.object(gui_app.ControlWindow, "update_product_button"),
             patch.object(gui_app.ControlWindow, "update_latest_appimage_button"),
-            patch.object(gui_app.ControlWindow, "config_updated_hooks", []),
             patch.object(gui_app.gui, "ToolTip"),
             patch.object(utils, "compare_logos_linux_installer_version") as compare,
         ):
             widgets = Mock()
-            gui_app.ControlWindow(Mock(), widgets, Mock())
+            window = gui_app.ControlWindow(Mock(), widgets, Mock())
 
         compare.assert_not_called()
-        callbacks = [call.args[0].__name__ for call in start_thread.call_args_list]
-        self.assertEqual(callbacks, ["_monitor_faithlife_product_pids"])
+        start_thread.assert_not_called()
+        window.logos.start_monitoring.assert_called_once()
         label_text = widgets.update_lli_label.config.call_args.kwargs["text"]
         self.assertIn(constants.APP_SELF_UPDATE_DISABLED_MESSAGE, label_text)
         widgets.update_lli_button.state.assert_called_with(["disabled"])

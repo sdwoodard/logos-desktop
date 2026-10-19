@@ -337,13 +337,17 @@ time.sleep(20)
         self.app.conf.faithlife_product_version = "10"
         self.app.conf.logos_exe = "Logos.exe"
         self.app.conf.logos_indexer_exe_windows_path = "LogosIndexer.exe"
+        self.app.conf.logos_system_exe_windows_path = "System/Logos.exe"
+        self.app.conf.logos_cef_exe_windows_path = "System/LogosCEF.exe"
+        self.app.conf._logos_user_id = None
+        self.app.start_thread = Mock()
         manager = logos.LogosManager(self.app)
         self.app.logos = manager
         for action in (manager.start, manager.index):
             with (
                 patch.object(wine, "get_wine_release", return_value=(None, None)),
                 patch.object(wine, "check_wine_rules", return_value=(True, None)),
-                patch.object(wine, "wineserver_kill", side_effect=ValueError("missing wineserver")),
+                patch.object(wine, "run_wine_application", side_effect=ValueError("failed launch")),
                 self.assertRaises(ValueError),
             ):
                 action()
@@ -441,11 +445,16 @@ time.sleep(20)
         self.app.conf.wine_binary = "neutral-runtime"
         windows_path = r"C:\users\fixture\AppData\Local\Logos\System\LogosIndexer.exe"
         self.app.conf.logos_indexer_exe_windows_path = windows_path
+        self.app.conf.logos_exe = "Logos.exe"
+        self.app.conf.logos_system_exe_windows_path = "System/Logos.exe"
+        self.app.conf.logos_cef_exe_windows_path = "System/LogosCEF.exe"
+        self.app.conf.installed_faithlife_product_release = "40.0.0.0"
+        self.app.conf.faithlife_product_version = "10"
         manager = logos.LogosManager(self.app)
         self.app.logos = manager
         threads = []
 
-        def start(task):
+        def start(task, **kwargs):
             thread = threading.Thread(target=task)
             threads.append(thread)
             thread.start()
@@ -459,7 +468,11 @@ time.sleep(20)
             env=dict(os.environ, WINEPREFIX=str(alias)),
         )
         self.assertEqual(process.stdout.readline().strip(), "ready")
-        with patch.object(wine, "wineserver_kill"), patch.object(wine, "run_wine_application", return_value=process):
+        with (patch.object(manager, "get_logos_pids"),
+              patch("ou_dedetai.runtime.executable", return_value="fixture-runtime"),
+              patch.object(wine, "get_wine_release", return_value=(None, None)),
+              patch.object(wine, "check_wine_rules", return_value=(True, None)),
+              patch.object(wine, "run_wine_application", return_value=process)):
             manager.index()
         try:
             with self.assertRaises(maintenance.MaintenanceBusy), maintenance.use(self.context, exclusive=True):
@@ -483,6 +496,7 @@ except maintenance.MaintenanceBusy:
         finally:
             process.terminate()
             process.wait(timeout=5)
+            manager.close()
             for thread in threads:
                 thread.join(timeout=5)
                 self.assertFalse(thread.is_alive())

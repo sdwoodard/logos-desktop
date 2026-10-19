@@ -256,7 +256,8 @@ class TextualUI(TextualApp[None]):
         self.domain.set_title()
         self._populate_main_menu()
         self.query_one("#main-menu", OptionList).focus()
-        self.set_interval(2.5, self._monitor_tick)
+        self.domain.logos.start_monitoring()
+        self._monitor_timer = self.set_interval(0.5, self._monitor_tick)
         self._controller_timer = self.set_interval(1, self.domain.poll_controller_releases)
         self.domain.poll_controller_releases()
         self.domain.status("TUI ready")
@@ -267,7 +268,6 @@ class TextualUI(TextualApp[None]):
     def _monitor_tick(self) -> None:
         try:
             if self.domain.logos:
-                self.domain.logos.monitor()
                 self._populate_main_menu()
         except Exception as exc:
             logging.debug("monitor tick failed: %s", exc)
@@ -309,9 +309,18 @@ class TextualUI(TextualApp[None]):
     def action_quit(self) -> None:
         self.domain.is_running = False
         self.domain.cancel_pending_prompts()
-        self.exit()
+        self.domain.request_close()
+        self._finish_close()
+
+    def _finish_close(self):
+        if self.domain.close(timeout=0):
+            self.exit()
+        else:
+            self.set_timer(0.1, self._finish_close)
 
     def on_unmount(self):
+        if hasattr(self, "_monitor_timer"):
+            self._monitor_timer.stop()
         if hasattr(self, "_controller_timer"):
             self._controller_timer.stop()
         if hasattr(self.domain, "_controller_checks"):
@@ -369,7 +378,21 @@ class TUI(App):
         self._controller_checks = releases.ControllerChecks(self.conf._network, updates.eligible,
                                                             self.conf.refresh_release_snapshots)
         self._controller_rendered = None
-        self.config_updated_hooks.append(self._config_update_hook)
+        self.subscribe_config(self._config_update_hook)
+
+    def dispatch_config(self, callback):
+        self._ui_call(callback)
+
+    def _schedule_exit_on_main_thread(self, reason, intended):
+        self.ui.call_from_thread(self.ui.action_quit)
+
+    def exit(self, reason, intended=False):
+        self.request_close(reason, intended)
+        if threading.get_ident() == self.ui._thread_id:
+            self.ui.action_quit()
+        else:
+            self._schedule_exit_on_main_thread(reason, intended)
+            raise SystemExit
 
     def poll_controller_releases(self):
         from . import releases
@@ -576,8 +599,7 @@ class TUI(App):
                 self.go_to_main_menu()
 
         if choice in (None, "Exit"):
-            self.is_running = False
-            self.ui.exit()
+            self.ui.action_quit()
             return
 
         if choice in ("Install", "Advanced Install"):
@@ -586,8 +608,7 @@ class TUI(App):
                 return
             if choice == "Install":
                 self.conf._overrides.assume_yes = True
-            self._installer_thread = threading.Thread(target=_install, daemon=True)
-            self._installer_thread.start()
+            self._installer_thread = self.start_thread(_install)
             self.status("Starting installation…")
 
         elif choice.startswith(f"Update {constants.APP_NAME}"):
@@ -603,7 +624,7 @@ class TUI(App):
             self._run_operation(lambda app: app.logos.start())
 
         elif self.conf._raw.faithlife_product and choice == f"Stop {self.conf.faithlife_product}":
-            self.logos.stop()
+            self._run_operation(lambda app: app.logos.stop())
             self.ui._populate_main_menu()
 
         elif choice == "Run Indexing":
@@ -737,7 +758,8 @@ def control_panel_app(ephemeral_config: EphemeralConfiguration) -> None:
         tui.ui.run()
     finally:
         tui.cancel_pending_prompts()
-        for thread in tui._threads:
-            if not thread.daemon:
-                thread.join(timeout=5)
+        if not tui.close():
+            raise RuntimeError("Controller closed with an operation still finishing")
         print()
+    if tui._pending_exit is not None and not tui._pending_exit[1]:
+        raise SystemExit(1)
