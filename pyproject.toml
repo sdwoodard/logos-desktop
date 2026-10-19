@@ -28,6 +28,7 @@ requires-python = ">=3.12"
 [project.optional-dependencies]
 build = ["pyinstaller"]
 dev = ["mypy", "ruff"]
+gui = ["PySide6-Essentials>=6.12,<6.13"]
 
 [project.scripts]
 logos-desktop = "ou_dedetai.main:main"

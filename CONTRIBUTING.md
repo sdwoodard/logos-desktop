@@ -40,6 +40,12 @@ discovery, including the retained utility tests:
 Tk availability is required for the GUI-specific fixture checks. A skipped GUI
 check is not a native GUI pass.
 
+The optional Qt frontend components use the official PySide6 Essentials package.
+Install `'.[dev,gui]'` for Qt development. The inherited default frontend still
+uses Tk while the Qt prototype is evaluated. CLI and TUI use does not require Qt.
+Run the Qt adapter checks with `QT_QPA_PLATFORM=offscreen` when no display is
+available. A native Wayland check is still needed for desktop integration.
+
 Tests use local response and filesystem fixtures. They should run without public
 network access or a particular checkout name, home setup or directory block size.
 Use a disposable HOME and XDG paths when running the suite. `tests/integration.py`
