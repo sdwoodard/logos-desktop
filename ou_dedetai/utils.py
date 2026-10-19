@@ -2,6 +2,7 @@ import atexit
 from datetime import datetime
 import enum
 import gzip
+import glob
 import inspect
 import json
 import logging
@@ -217,12 +218,7 @@ def get_wine_options(app: App) -> List[str]:
     sorted_binaries = sorted(list(set(binaries)))
     logging.debug(f"{sorted_binaries=}")
 
-    for wine_binary_path in sorted_binaries:
-        # FIXME: The results of this function aren't used [anymore?].
-        code, description = get_winebin_code_and_desc(app, wine_binary_path)
-
-        # Create wine binary option array
-        wine_binary_options.append(wine_binary_path)
+    wine_binary_options.extend(sorted_binaries)
     logging.debug(f"{wine_binary_options=}")
     return wine_binary_options
 
@@ -441,41 +437,50 @@ def find_appimage_files(app: App) -> list[str]:
 
 
 def find_wine_binary_files(app: App, release_version: Optional[str]) -> list[str]:
-    wine_binary_path_list = [
+    directories = [path for path in os.get_exec_path() if path and Path(path).is_absolute()]
+    patterns = [
         "/usr/local/bin",
         os.path.expanduser("~") + "/bin",
         os.path.expanduser("~") + "/PlayOnLinux/wine/linux-amd64/*/bin",
         os.path.expanduser("~") + "/.steam/steam/steamapps/common/Proton*/files/bin",
     ]
 
-    if app.conf._overrides.custom_binary_path is not None:
-        wine_binary_path_list.append(app.conf._overrides.custom_binary_path)
+    custom = app.conf._overrides.custom_binary_path
+    if custom is not None:
+        directories.insert(0, str(Path(custom).absolute()))
+    for pattern in patterns:
+        directories.extend(sorted(glob.glob(pattern)))
 
-    # Temporarily modify PATH for additional WINE64 binaries.
-    for p in wine_binary_path_list:
-        if p not in os.environ['PATH'] and os.path.isdir(p):
-            os.environ['PATH'] = os.environ['PATH'] + os.pathsep + p
-
-    # Check each directory in PATH for wine64; add to list
     binaries = []
-    paths = os.environ["PATH"].split(":")
-    for path in paths:
-        binary_path = os.path.join(path, "wine64")
-        if os.path.exists(binary_path) and os.access(binary_path, os.X_OK):
-            binaries.append(binary_path)
-
-    for binary in binaries[:]:
-        output1, output2 = wine.check_wine_version_and_branch(
-            release_version,
-            binary,
-            app.conf.faithlife_product_version
-        )
-        if output1 is not None and output1:
-            continue
-        else:
-            binaries.remove(binary)
-            logging.info(f"Removing binary: {binary} because: {output2}")
-
+    seen = set()
+    for directory in dict.fromkeys(directories):
+        for name in ("wine64", "wine"):
+            candidate = Path(directory) / name
+            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            try:
+                selected = wine.native_launcher(candidate)
+                override = getattr(app.conf._overrides, "wineserver_binary", None)
+                server = Path(selected).parent / "wineserver"
+                if isinstance(override, str):
+                    server = Path(app.conf._absolute_from_install_dir(override))
+                paths.executable(server)
+                identity = Path(selected).stat()
+                server_identity = server.stat()
+                key = (identity.st_dev, identity.st_ino, server_identity.st_dev, server_identity.st_ino,
+                       str(Path(selected).parent.resolve()))
+                if key in seen:
+                    continue
+                compatible, reason = wine.check_wine_version_and_branch(
+                    release_version, selected, app.conf.faithlife_product_version, server=str(server),
+                )
+                if compatible:
+                    seen.add(key)
+                    binaries.append(selected)
+                else:
+                    logging.info("Ignoring Wine candidate %s: %s", candidate, reason)
+            except (OSError, ValueError, maintenance.MaintenanceError) as error:
+                logging.info("Ignoring Wine candidate %s: %s", candidate, error)
     return binaries
 
 

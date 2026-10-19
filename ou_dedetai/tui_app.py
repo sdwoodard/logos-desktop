@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -77,6 +76,8 @@ class MenuModal(PromptModal):
 
 
 class InfoModal(PromptModal):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
     def __init__(self, message: str, title: str = "Information") -> None:
         super().__init__()
         self.message = message
@@ -92,8 +93,16 @@ class InfoModal(PromptModal):
     def ok(self) -> None:
         self.dismiss()
 
+    def action_cancel(self) -> None:
+        cancel = getattr(self, "cancel_waiter", None)
+        if cancel is not None:
+            cancel()
+        self.dismiss()
+
 
 class InputModal(PromptModal):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
     def __init__(self, question: str, default: str = "") -> None:
         super().__init__()
         self.question = question
@@ -115,8 +124,8 @@ class InputModal(PromptModal):
         self.dismiss(self.query_one("#input-field", Input).value)
 
     @on(Button.Pressed, "#cancel")
-    def cancel(self) -> None:
-        self.dismiss("")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     @on(Input.Submitted)
     def on_submit(self, event: Input.Submitted) -> None:
@@ -225,7 +234,7 @@ class TextualUI(TextualApp[None]):
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
-        Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
     ]
 
     title_text: reactive[str] = reactive("")
@@ -294,7 +303,7 @@ class TextualUI(TextualApp[None]):
         current = menu.highlighted
         menu.clear_options()
         for i, label in enumerate(options):
-            menu.add_option(Option(label, id=f"main-{i}"))
+            menu.add_option(Option(label, id=f"main-{i}", disabled=label.startswith("Stopping ")))
         if current is not None and options:
             menu.highlighted = min(current, len(options) - 1)
 
@@ -370,8 +379,9 @@ class TUI(App):
         super().__init__(ephemeral_config)
         self.is_running = True
         self._installer_thread: Optional[threading.Thread] = None
-        self.console_log: list[str] = []
-        self.tmp = ""
+        self._operation_lock = threading.Lock()
+        self._operation_active = False
+        self._last_console_message: str | None = None
         self.ui = TextualUI(self)
         from . import releases, updates
 
@@ -406,17 +416,24 @@ class TUI(App):
             self.ui.action_refresh()
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
+        screen: PromptModal
         if isinstance(options, str):
-            screen = InputModal(question, default=str(Path.home()))
+            default = str(Path.home()) if options == constants.PROMPT_OPTION_DIRECTORY else ""
+            screen = InputModal(question, default=default)
         else:
             screen = MenuModal(question, list(options) + ["Return to Main Menu"])
         answer = self._wait_for_prompt(screen)
+        if answer in constants.PROMPT_OPTION_SIGILS:
+            default = str(Path.home()) if answer == constants.PROMPT_OPTION_DIRECTORY else ""
+            answer = self._wait_for_prompt(InputModal(question, default=default))
         return None if answer == "Return to Main Menu" else answer or None
 
     def _info(self, message: str) -> None:
         self._wait_for_prompt(InfoModal(message))
 
     def _wait_for_prompt(self, screen):
+        if threading.get_ident() == self.ui._thread_id:
+            raise RuntimeError("Blocking prompts must run outside the Textual event thread")
         event = threading.Event()
         result = [None, False]
         with self._prompt_lock:
@@ -459,18 +476,17 @@ class TUI(App):
 
     def _status(self, message: str, percent: Optional[int] = None) -> None:
         message = message.strip()
-        if self.console_log and self.console_log[-1] == message:
+        if self._last_console_message == message:
             return
-        self.console_log.append(message)
+        self._last_console_message = message
         try:
             self._ui_call(self.ui.write_status, message)
         except Exception:
             pass
 
     def _pop_up(self, title: str, message: str) -> None:
-        self.console_log.append(message)
         try:
-            self.ui.call_from_thread(self.ui.push_screen, InfoModal(message, title=title))
+            self._ui_call(self.ui.push_screen, InfoModal(message, title=title))
         except Exception:
             pass
 
@@ -521,11 +537,15 @@ class TUI(App):
             product = self.conf.faithlife_product
             if self.logos.logos_state in (logos.State.STARTING, logos.State.RUNNING):
                 labels.append(f"Stop {product}")
+            elif self.logos.logos_state == logos.State.STOPPING:
+                labels.append(f"Stopping {product}")
             else:
                 labels.append(f"Run {product}")
 
-            if self.logos.indexing_state == logos.State.RUNNING:
+            if self.logos.indexing_state in (logos.State.STARTING, logos.State.RUNNING):
                 labels.append("Stop Indexing")
+            elif self.logos.indexing_state == logos.State.STOPPING:
+                labels.append("Stopping Indexing")
             else:
                 labels.append("Run Indexing")
 
@@ -537,17 +557,21 @@ class TUI(App):
         labels.extend(["Utilities →", "Wine Config →", "Change Color Scheme", "Get Support", "Exit"])
         return labels
 
-    def _get_support(self) -> None:
-        try:
-            control.get_support(self)
-        except Exception as exc:
-            self._pop_up(str(exc), "Error")
-        finally:
-            self._ui_call(self.ui.go_to_main_menu)
+    def _run_operation(self, operation, *, assume_yes=None):
+        with self._operation_lock:
+            if self._closing.is_set():
+                return None
+            if self._operation_active:
+                self.status("Another operation is still running")
+                return None
+            self._operation_active = True
 
-    def _run_operation(self, operation):
         def run():
+            original_assume_yes = self.conf._overrides.assume_yes
+            failure = None
             try:
+                if assume_yes is not None:
+                    self.conf._overrides.assume_yes = assume_yes
                 result = operation(self)
                 from . import updates
 
@@ -562,12 +586,28 @@ class TUI(App):
                             result.cancel()
             except UserExitedFromAsk:
                 self.status("Operation cancelled")
-            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            except Exception as error:
+                logging.exception("TUI operation failed")
+                failure = str(error) or type(error).__name__
                 self.status(f"Operation failed: {error}")
-                self._pop_up("Operation failed", str(error))
             finally:
-                self._ui_call(self.ui.go_to_main_menu)
-        self.start_thread(run, daemon_bool=False)
+                if assume_yes is not None:
+                    self.conf._overrides.assume_yes = original_assume_yes
+                with self._operation_lock:
+                    self._operation_active = False
+                self._ui_call(self._operation_finished, failure)
+
+        try:
+            return self.start_thread(run, daemon_bool=False)
+        except BaseException:
+            with self._operation_lock:
+                self._operation_active = False
+            raise
+
+    def _operation_finished(self, failure):
+        self.ui.go_to_main_menu()
+        if failure:
+            self.ui.push_screen(InfoModal(failure, title="Operation failed"))
 
     def _restart_controller(self, prepared, arguments):
         from . import releases, updates
@@ -584,31 +624,12 @@ class TUI(App):
                 )
 
     def main_menu_select(self, choice: str) -> None:
-        original_assume_yes = getattr(self.conf._overrides, "assume_yes", False)
-
-        def _install() -> None:
-            try:
-                installer.install(app=self)
-            except UserExitedFromAsk:
-                pass
-            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-                self.status(f"Install failed: {error}")
-                self._pop_up("Install failed", str(error))
-            finally:
-                self.conf._overrides.assume_yes = original_assume_yes
-                self.go_to_main_menu()
-
         if choice in (None, "Exit"):
             self.ui.action_quit()
             return
 
         if choice in ("Install", "Advanced Install"):
-            if self._installer_thread and self._installer_thread.is_alive():
-                self.status("A previous install is still running")
-                return
-            if choice == "Install":
-                self.conf._overrides.assume_yes = True
-            self._installer_thread = self.start_thread(_install)
+            self._installer_thread = self._run_operation(installer.install, assume_yes=choice == "Install")
             self.status("Starting installation…")
 
         elif choice.startswith(f"Update {constants.APP_NAME}"):
@@ -630,6 +651,9 @@ class TUI(App):
         elif choice == "Run Indexing":
             self._run_operation(lambda app: app.logos.index())
 
+        elif choice == "Stop Indexing":
+            self._run_operation(lambda app: app.logos.stop_indexing())
+
         elif choice == "Remove Library Catalog":
             self._run_operation(control.remove_library_catalog)
 
@@ -649,7 +673,7 @@ class TUI(App):
             self.status(f"Color scheme: {scheme}")
 
         elif choice == "Get Support":
-            self.start_thread(self._get_support)
+            self._run_operation(control.get_support)
 
     def wineconfig_menu_select(self, choice: str | None) -> None:
         if not choice or choice == "Return to Main Menu":
@@ -677,30 +701,19 @@ class TUI(App):
             "Install ICU": wine.enforce_icu_data_files,
             "Update to Latest AppImage": utils.update_to_latest_recommended_appimage,
             "Install Dependencies": utils.install_dependencies,
+            "Edit Config": lambda app: control.edit_file(app.conf.config_file_path),
+            "Reload Config": lambda app: app.conf.reload(),
+            "Change Logos Release Channel": lambda app: app.conf.toggle_faithlife_product_release_channel(),
+            f"Change {constants.APP_NAME} Release Channel": lambda app: app.conf.toggle_installer_release_channel(),
+            "Check OpenGL": lambda app: app.status(system.check_opengl_version(app)[1]),
         }
         if choice in operations:
             self._run_operation(operations[choice])
             return
-        if choice.endswith("Logging"):
-            self._run_operation(lambda app: app.logos.switch_logging())
+        if choice in ("Enable Logging", "Disable Logging"):
+            action = "enable" if choice == "Enable Logging" else "disable"
+            self._run_operation(lambda app: app.logos.switch_logging(action))
             return
-        try:
-            if choice == "Edit Config":
-                control.edit_file(self.conf.config_file_path)
-            elif choice == "Reload Config":
-                self.conf.reload()
-            elif choice == "Change Logos Release Channel":
-                self.conf.toggle_faithlife_product_release_channel()
-            elif choice == f"Change {constants.APP_NAME} Release Channel":
-                self.conf.toggle_installer_release_channel()
-            elif choice == "Check OpenGL":
-                _, reason = system.check_opengl_version(self)
-                self.status(reason)
-        except UserExitedFromAsk:
-            pass
-        except maintenance.MaintenanceError as error:
-            self.status(f"Operation failed: {error}")
-            self._pop_up("Operation failed", str(error))
         self.go_to_main_menu()
 
     def renderer_select(self, choice: str | None) -> None:
@@ -743,10 +756,8 @@ class TUI(App):
                 "Change Logos Release Channel",
                 f"Change {constants.APP_NAME} Release Channel",
             ])
-        labels.append(
-            "Enable Logging" if getattr(self.conf, "faithlife_product_logging", False)
-            else "Disable Logging"
-        )
+        if self.is_installed():
+            labels.append("Disable Logging" if self.conf.faithlife_product_logging else "Enable Logging")
         labels.append("Check OpenGL")
         labels.append("Return to Main Menu")
         return labels

@@ -104,6 +104,7 @@ class TestRuntimePaths(unittest.TestCase):
                 bindir.mkdir(parents=True)
                 (bindir / "wine").touch()
                 (bindir / "wine64").touch()
+                (bindir / "wine64").chmod(0o700)
             config._raw.wine_binary = "data/bin/wine"
             self.assertEqual(config.wine64_binary, str(root / "first/data/bin/wine64"))
             config._raw.install_dir = str(root / "second")

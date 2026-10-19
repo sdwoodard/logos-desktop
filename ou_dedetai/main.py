@@ -216,6 +216,9 @@ def get_parser():
 
 
 def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[EphemeralConfiguration], None]]: 
+    if args.dirlink or args.check_resources:
+        parser.error("--dirlink and --check-resources have no implemented action. "
+                     "Use --status for installation details")
     if args.config is not None:
         ephemeral_config = EphemeralConfiguration.load_from_path(args.config)
     else:
@@ -317,10 +320,10 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
             if arg == "set_appimage":
                 if not utils.file_exists(ephemeral_config.wine_appimage_path):
                     e = f"Invalid file path: '{ephemeral_config.wine_appimage_path}'. File does not exist."
-                    raise argparse.ArgumentTypeError(e)
+                    parser.error(e)
                 if not utils.check_appimage(ephemeral_config.wine_appimage_path):
                     e = f"{ephemeral_config.wine_appimage_path} is not an AppImage."
-                    raise argparse.ArgumentTypeError(e)
+                    parser.error(e)
             # Re-use this variable for either wine or winetricks execution
             elif arg == 'wine' or arg == 'winetricks':
                 ephemeral_config.wine_args = getattr(args, arg)
@@ -511,13 +514,10 @@ def main():
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from error
     except UserExitedFromAsk:
-        # This isn't a critical failure, the user doesn't need a traceback,
-        # they are the ones who told us to exit.
-        pass
+        print("Operation cancelled", file=sys.stderr)
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
+    main()

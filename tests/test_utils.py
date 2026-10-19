@@ -1,5 +1,5 @@
 import queue
-import subprocess
+import os
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -12,8 +12,12 @@ from . import TESTDATADIR
 
 class TestAppUtils(unittest.TestCase):
     def setUp(self):
-        self.pidfile = TESTDATADIR / 'temp.pid'
-        constants.PID_FILE = str(self.pidfile)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.pidfile = Path(temporary.name) / 'temp.pid'
+        for item in (patch.object(constants, "PID_FILE", str(self.pidfile)), patch.object(utils, "atexit", Mock())):
+            item.start()
+            self.addCleanup(item.stop)
         self.app = Mock()
         self.app.conf = Mock()
 
@@ -122,6 +126,9 @@ class TestAppUtils(unittest.TestCase):
 
 class TestGeneralUtils(unittest.TestCase):
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
         self.grepfile = TESTDATADIR / 'legacy_config.json'
         self.tiny_appimage = TESTDATADIR / 'wine_tiny_v2.AppImage'
 
@@ -140,11 +147,15 @@ class TestGeneralUtils(unittest.TestCase):
         self.assertEqual(len(nums), 4)
 
     def test_check_appimage(self):
-        # TODO: Need to add test for v1 appimage.
-        self.assertTrue(utils.check_appimage(self.tiny_appimage))
+        from tests.artifact_fixtures import appimage
+
+        complete = self.root / "complete.AppImage"
+        complete.write_bytes(appimage())
+        self.assertTrue(utils.check_appimage(complete))
+        self.assertFalse(utils.check_appimage(self.tiny_appimage))
 
     def test_delete_symlink_exists(self):
-        new_symlink = Path('symlink')
+        new_symlink = self.root / 'symlink'
         if new_symlink.is_symlink():
             new_symlink.unlink()
         new_symlink.symlink_to(self.grepfile)
@@ -153,7 +164,7 @@ class TestGeneralUtils(unittest.TestCase):
             self.assertFalse(new_symlink.is_symlink())
 
     def test_delete_symlink_notexists(self):
-        new_symlink = Path('symlink')
+        new_symlink = self.root / 'symlink'
         utils.delete_symlink(new_symlink)
         self.assertFalse(new_symlink.is_symlink())
 
@@ -174,7 +185,9 @@ class TestGeneralUtils(unittest.TestCase):
         self.assertFalse(utils.file_exists(None))
 
     def test_file_exists_true(self):
-        self.assertTrue(utils.file_exists('~/.bashrc'))
+        (self.root / "fixture").touch()
+        with patch.dict(os.environ, HOME=str(self.root)):
+            self.assertTrue(utils.file_exists('~/fixture'))
 
 
     def test_find_installed_product_exists(self):
@@ -206,7 +219,7 @@ class TestGeneralUtils(unittest.TestCase):
 
     def test_get_downloaded_file_path_found(self):
         p = Path(utils.get_downloaded_file_path(REPODIR, 'README.md'))
-        self.assertEqual(p.parent.name, constants.REPO_NAME)
+        self.assertEqual(p.resolve(), (REPODIR / 'README.md').resolve())
 
     def test_get_downloaded_file_path_notfound(self):
         self.assertIsNone(utils.get_downloaded_file_path(REPODIR, 'NothingToFind.exe'))
@@ -238,11 +251,12 @@ class TestGeneralUtils(unittest.TestCase):
         pass
 
     def test_get_path_size_exists(self):
-        cmd = ['du', '-sb', TESTDATADIR]
-        size_du = int(subprocess.check_output(cmd).decode().split()[0])
-        size_dir = 4096
-        size = size_du + size_dir
-        self.assertEqual(size, utils.get_path_size(TESTDATADIR))
+        child = self.root / "child"
+        child.mkdir()
+        (self.root / "first").write_bytes(b"abc")
+        (child / "second").write_bytes(b"12345")
+        expected = 8 + self.root.stat().st_size + child.stat().st_size
+        self.assertEqual(expected, utils.get_path_size(self.root))
 
     def test_get_path_size_notexists(self):
         self.assertEqual(0, utils.get_path_size('./no_dir'))

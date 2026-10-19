@@ -6,7 +6,7 @@ permissions:
   contents: read
 
 jobs:
-  focused-tests:
+  offline-tests:
     if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -20,22 +20,6 @@ jobs:
           python-version: '3.12'
       - name: Install reviewed runtime dependencies
         run: python -m pip install .
-      - name: Check private development boundaries
+      - name: Run the full inexpensive offline suite
         run: >-
-          python -m unittest -v
-          tests.test_constants tests.test_private_development
-          tests.test_artifacts tests.test_network tests.test_artifact_consumers
-          tests.test_releases tests.test_controller_update tests.test_metadata tests.test_release_ui
-          tests.test_filesystem_safety tests.test_runtime_paths tests.test_desktop_entries
-          tests.test_backup tests.test_maintenance
-          tests.test_tui_maintenance
-          tests.test_installation tests.test_logging
-          tests.test_config tests.test_recovery_dispatch
-          tests.test_app_exit tests.test_lifecycle tests.test_database_watchers
-      - name: Check retained version comparisons in a separate process
-        run: >-
-          python -m unittest -v
-          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_custom
-          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_notset
-          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_uptodate
-          tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_yes
+          python -B -m unittest discover -s tests -t . -p 'test*.py' -v

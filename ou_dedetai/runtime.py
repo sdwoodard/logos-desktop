@@ -345,7 +345,7 @@ def activate(app, accepted):
 
 
 def executable(binary, app=None, *, destination=None):
-    """Resolve mutable aliases once, preserving companion argv0 within a generation."""
+    """Pin accepted generations while preserving native wrapper invocation paths."""
     if app is not None:
         with activation_guard(app):
             return executable(binary, destination=Path(app.conf.install_dir) / "data/bin")
@@ -380,4 +380,5 @@ def executable(binary, app=None, *, destination=None):
     paths.executable(str(requested))
     if concrete.parent.parent.parent.name == ".artifacts":
         artifacts.installed(concrete, "winetricks" if concrete.name == "winetricks" else "elf")
-    return str(concrete)
+        return str(concrete)
+    return str(requested)

@@ -125,74 +125,53 @@ class App(abc.ABC):
         return True
 
     def ask(self, question: str, options: list[str]) -> str:
-        """Asks the user a question with a list of supplied options
+        """Return a canonical choice or validated path, or unwind cancellation."""
+        if not options:
+            raise ValueError("No choices are available for this question")
 
-        Returns the option the user picked.
-
-        If the internal ask function returns None, the process will exit with 1
-        """
         def validate_result(answer: str, options: list[str]) -> Optional[str]:
-            special_cases = set(constants.PROMPT_OPTION_SIGILS)
-            # These constants have special meaning, don't worry about them to start with
-            simple_options = list(set(options) - special_cases)
-            # This MUST have the same indexes as above
-            simple_options_lower = [opt.lower() for opt in simple_options]
-
-            # Case sensitive check first
+            simple_options = [option for option in options if option not in constants.PROMPT_OPTION_SIGILS]
             if answer in simple_options:
                 return answer
-            # Also do a case insensitive match, no reason to fail due to casing
-            if answer.lower() in simple_options_lower:
-                # Return the correct casing to simplify the parsing of the ask result
-                return simple_options[simple_options.index(answer.lower())]
-            
-            # Now check the special cases
-            if PROMPT_OPTION_FILE in options and Path(answer).is_file():
-                return answer
-            if PROMPT_OPTION_DIRECTORY in options and Path(answer).is_dir():
-                return answer
+            for option in simple_options:
+                if option.casefold() == answer.casefold():
+                    return option
+
+            if not answer.strip():
+                return None
+            path = Path(answer).expanduser()
+            if PROMPT_OPTION_FILE in options and path.is_file():
+                return str(path)
+            if PROMPT_OPTION_DIRECTORY in options and path.is_dir():
+                return str(path)
             if (
                 PROMPT_OPTION_NEW_FILE in options
-                and not Path(answer).is_dir()
-                and Path(answer).parent.is_dir()
+                and not path.is_dir()
+                and path.parent.is_dir()
             ):
-                return answer
-
-            # Not valid
+                return str(path)
             return None
 
-        # Check to see if we're supposed to prompt the user
         if self.conf._overrides.assume_yes:
-            # Get the first non-dynamic option
             for option in options:
-                if option not in [PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE]:
+                if option not in constants.PROMPT_OPTION_SIGILS:
                     return option
 
         passed_options: list[str] | str = options
-        if len(passed_options) == 1 and passed_options[0] in constants.PROMPT_OPTION_SIGILS: 
-            # Set the only option to be the follow up prompt
+        if len(options) == 1 and options[0] in constants.PROMPT_OPTION_SIGILS:
             passed_options = options[0]
-        elif passed_options is not None and self._exit_option is not None:
+        elif self._exit_option is not None:
             passed_options = options + [self._exit_option]
 
-        answer = self._ask(question, passed_options)
-        if answer is None or answer == self._exit_option:
-            raise UserExitedFromAsk
-        while answer is None or validate_result(answer, options) is None:
-            invalid_response = "That response is not valid, please try again."
-            new_question = f"{invalid_response}\n{question}"
-            answer = self._ask(new_question, passed_options)
-            if answer is None or answer == self._exit_option:
+        prompt = question
+        while True:
+            answer = self._ask(prompt, passed_options)
+            if answer is None or (self._exit_option and answer.casefold() == self._exit_option.casefold()):
                 raise UserExitedFromAsk
-
-        if answer is not None:
-            answer = validate_result(answer, options)
-            if answer is None:
-                # Huh? coding error, this should have been checked earlier
-                logging.critical("An invalid response slipped by, please report this incident to the developers") 
-                self.exit("Failed to get a valid value from user")
-
-        return answer
+            result = validate_result(answer, options)
+            if result is not None:
+                return result
+            prompt = f"That response is not valid, please try again.\n{question}"
 
     def approve_or_exit(self, question: str, context: Optional[str] = None) -> bool:
         """Asks the user a question, if they refuse, shutdown"""

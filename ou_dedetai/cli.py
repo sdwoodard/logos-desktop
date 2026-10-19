@@ -1,11 +1,10 @@
-import math
 import os
-import queue
 import select
 import shutil
 import sys
 import threading
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Optional
 
 from ou_dedetai import constants
 from ou_dedetai.app import App
@@ -24,12 +23,9 @@ from . import utils
 class CLI(App):
     def __init__(self, ephemeral_config: EphemeralConfiguration):
         super().__init__(ephemeral_config)
-        self.running: bool = True
-        self.choice_q: queue.Queue[str] = queue.Queue()
-        self.input_q: queue.Queue[Tuple[str, list[str]] | None] = queue.Queue()
-        self.input_event = threading.Event()
-        self.choice_event = threading.Event()
-        self.start_thread(self.user_input_processor, daemon_bool=True)
+        self._prompt_lock = threading.Lock()
+        self._input_failure: str | None = None
+        self._stdin = sys.stdin
 
     def backup(self):
         backup.backup(app=self)
@@ -116,11 +112,13 @@ class CLI(App):
             sys.stdout,
             sys.stderr,
             sys.stdin,
-            exe_args=(self.conf._overrides.wine_args or [])
+            exe_args=(self.conf._overrides.wine_args or []),
+            detach_on_close=False,
         )
         if process:
-            process.wait()
-            sys.exit(process.returncode)
+            self._wait_command(process)
+        else:
+            raise maintenance.MaintenanceError("Winetricks command could not be started")
 
     @maintenance.uses_installation
     def wine(self):
@@ -130,11 +128,27 @@ class CLI(App):
             sys.stdout,
             sys.stderr,
             sys.stdin,
-            exe_args=(self.conf._overrides.wine_args or [])
+            exe_args=(self.conf._overrides.wine_args or []),
+            detach_on_close=False,
         )
         if process:
-            process.wait()
-            sys.exit(process.returncode)
+            self._wait_command(process)
+        else:
+            raise maintenance.MaintenanceError("Wine command could not be started")
+
+    def _wait_command(self, process):
+        """Keep mutation admission until a detached command has settled."""
+        interrupted = False
+        while True:
+            try:
+                process.wait()
+                break
+            except KeyboardInterrupt:
+                interrupted = True
+                self.print("Waiting for the active Wine command to finish before closing")
+        if interrupted:
+            raise KeyboardInterrupt
+        raise SystemExit(process.returncode)
 
     def set_appimage(self):
         utils.set_appimage_symlink(app=self)
@@ -157,98 +171,78 @@ class CLI(App):
 
     _exit_option: str | None = "Exit"
 
-    def _ask(self, question: str, options: list[str] | str) -> str:
-        """Passes the user input to the user_input_processor thread
-        
-        The user_input_processor is running on the thread that the user's stdin/stdout
-        is attached to. This function is being called from another thread so we need to
-        pass the information between threads using a queue/event
-        """
-        if isinstance(options, str):
-            options = [options]
-        self.input_q.put((question, options))
-        self.input_event.set()
-        self.choice_event.wait()
-        self.choice_event.clear()
-        output: str = self.choice_q.get()
-        # NOTE: this response is validated in App's .ask
-        return output
+    def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
+        with self._prompt_lock:
+            if isinstance(options, str):
+                default = str(Path.home()) if options == constants.PROMPT_OPTION_DIRECTORY else ""
+                return self._read_answer(question, default)
+            answer = self._read_answer(question, options[0], options)
+            if answer in constants.PROMPT_OPTION_SIGILS:
+                default = str(Path.home()) if answer == constants.PROMPT_OPTION_DIRECTORY else ""
+                return self._read_answer("Path", default)
+            return answer
 
     def _info(self, message: str) -> None:
-        """Display information to the user"""
-        self.input_q.put((message, ['Continue?']))
-        self.input_event.set()
-        self.choice_event.wait()
-        self.choice_event.clear()
+        self.print(message)
+        if self._stdin.isatty():
+            self._ask("Press Return to continue", ["Continue"])
+
+    def _read_answer(self, question: str, default: str, options: list[str] | tuple[str, ...] = ()) -> str | None:
+        """Read only this answer so later Wine stdin stays with its subprocess."""
+        if self._closing.is_set():
+            return None
+        if self._input_failure is not None:
+            raise maintenance.MaintenanceError(self._input_failure)
+        choices = ", ".join(options)
+        prompt = f"{question}: {choices} [default: {default}]"
+        print(prompt, end=" " if sys.stdout.isatty() else "\n", flush=True)
+        answer = bytearray()
+        try:
+            descriptor = self._stdin.fileno()
+            while not self._closing.is_set():
+                if not select.select([descriptor], [], [], 0.1)[0]:
+                    continue
+                chunk = os.read(descriptor, 1)
+                if not chunk:
+                    self._input_failure = "Required input is unavailable: stdin reached EOF"
+                    if not answer:
+                        raise maintenance.MaintenanceError(self._input_failure)
+                    break
+                if chunk == b"\n":
+                    break
+                answer.extend(chunk)
+                if len(answer) > 65536:
+                    raise ValueError("Input exceeds the maximum answer length")
+            if self._closing.is_set():
+                return None
+            value = answer.decode(self._stdin.encoding or "utf-8").rstrip("\r")
+            return value if value else default
+        except (OSError, ValueError) as error:
+            self._input_failure = f"Could not read required input: {error}"
+            raise maintenance.MaintenanceError(self._input_failure) from error
 
     @classmethod
     def print(_cls, message: str):
-        """Prints a message to the console.
-        
-        Use this instead of python's print.
-
-        Handles implementation detail of drawing nicely
-        even if there was progress bar displayed
-        """
-        print(
-            (
-                # "\033[2K" is the ANSI code for clearing the current line
-                b"\033[2K\r"
-                + message.encode("utf-8")
-                + b"\n\r"
-            ).decode(),
-            end=""
-        )
+        """Clear terminal progress only when writing to an interactive terminal."""
+        prefix = "\033[2K\r" if _terminal_progress() else ""
+        print(prefix + message, flush=True)
 
     def _schedule_exit_on_main_thread(self, reason: str, intended: bool) -> None:
         # Same handling - exit happens to be thread safe today.
         self._exit(reason=reason, intended=intended)
 
     def exit(self, reason: str, intended: bool = False):
-        # Signal CLI.user_input_processor to stop.
-        self.input_q.put(None)
-        self.input_event.set()
-        # Signal CLI itself to stop.
-        self.running = False
-        # We always want this to return regardless of level
         self.print(f"Closing {constants.APP_NAME} due to: {reason}")
         return super().exit(reason, intended)
-
-    def request_close(self, reason="Controller closed", intended=True):
-        super().request_close(reason, intended)
-        self.running = False
-        self.input_q.put(None)
-        self.input_event.set()
-        self.choice_q.put(None)
-        self.choice_event.set()
     
     def _status(self, message: str, percent: Optional[int] = None):
-        """Implementation for updating status pre-front end
-        
-        This implementation adds a progres bar.
-        
-        It should be noted this progress bar won't display nicely if
-        other sources call to python's print. Use Cli.print() instead.
-        """
-        # Enforce percent is not over 100
-        if percent is not None and percent > 100:
-            percent = 100
-        progress_str = ""
-        # We don't want to display 100% as it doesn't print nicely.
-        if percent is not None:
-            # -2 is for the brackets, -1 is for the >
-            progress_bar_length = os.get_terminal_size().columns - 2 -1
-            # Subtract one for the >
-            chars_of_progress = math.floor(float(progress_bar_length) * percent / 100) #noqa: E501
-            chars_remaining = progress_bar_length - chars_of_progress
-            progress_str = "[" + "-" * chars_of_progress + ">" + " " * chars_remaining + "]" #noqa: E501
-
+        """Keep redirected status plain and interactive progress width bounded."""
         if message != self._last_status:
             self.print(message)
-        # Write my progress then carriage return
-        # (so we're back at the beginning for the next log line)
-        if progress_str:
-            print(progress_str, end="\r")
+        if percent is not None and _terminal_progress():
+            width = max(1, min(120, shutil.get_terminal_size(fallback=(80, 24)).columns) - 2)
+            filled = width * max(0, min(100, percent)) // 100
+            print("[" + "-" * filled + " " * (width - filled) + "]", end="\r", flush=True)
 
     def _pop_up(self, title, message):
         self._status(message=message)
@@ -260,41 +254,6 @@ class CLI(App):
         else:
             raise SuperuserCommandNotFound("sudo command not found. Please install.")
 
-    def user_input_processor(self, evt=None) -> None:
-        while self.running:
-            prompt = None
-            question: Optional[str] = None
-            options = None
-            choice: Optional[str] = None
-            # Wait for next input queue item.
-            self.input_event.wait()
-            self.input_event.clear()
-            prompt = self.input_q.get()
-            if prompt is None:
-                return
-            if prompt is not None and isinstance(prompt, tuple):
-                question = prompt[0]
-                options = prompt[1]
-            if question is not None and options is not None:
-                # Convert options list to string.
-                default = options[0]
-                optstr = f"{options[0]} [default], " + ', '.join(options[1:])
-                print(f"{question}: {optstr}: ", end="", flush=True)
-                while self.running:
-                    if select.select([sys.stdin], [], [], 0.1)[0]:
-                        choice = sys.stdin.readline()
-                        if not choice:
-                            self.choice_q.put(None)
-                            self.choice_event.set()
-                            return
-                        choice = choice.rstrip("\n")
-                        break
-                if not self.running:
-                    return
-                if len(choice) == 0:
-                    choice = default
-            if choice is not None and choice == self._exit_option:
-                self.running = False
-            if choice is not None:
-                self.choice_q.put(choice)
-                self.choice_event.set()
+
+def _terminal_progress():
+    return sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ

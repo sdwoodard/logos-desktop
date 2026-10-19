@@ -37,7 +37,7 @@ class TestReleaseRendering(unittest.IsolatedAsyncioTestCase):
                 config._network = client
                 config._overrides = SimpleNamespace(quiet=False)
                 domain = object.__new__(tui_app.TUI)
-                domain.conf, domain.is_running, domain.console_log = config, True, []
+                domain.conf, domain.is_running, domain._last_console_message = config, True, None
                 domain._closing = Event()
                 domain._closed = False
                 domain._thread_lock = RLock()

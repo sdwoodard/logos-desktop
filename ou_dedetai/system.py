@@ -19,7 +19,7 @@ from packaging.version import Version
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ou_dedetai import constants, maintenance, network, wine
+from ou_dedetai import constants, maintenance, network
 from ou_dedetai.app import App
 
 
@@ -377,8 +377,8 @@ class OpenGLIncompatible(Exception):
 
 def check_opengl_version(app: App, required_version="3.2") -> tuple[bool, str]:
     try:
-        env = wine.get_wine_env(app, None)
-        result = run_command(['glxinfo'], env=fix_ld_library_path(env), capture_output=True, text=True, check=True)
+        result = run_command(['glxinfo'], env=fix_ld_library_path(None), capture_output=True,
+                             text=True, check=True, timeout=15)
     except FileNotFoundError:
         return False, "glxinfo command not found. Please install mesa-utils or equivalent."
     except subprocess.CalledProcessError as e:
@@ -500,7 +500,7 @@ def get_package_manager() -> PackageManager | None:
         # query_command =  ["dnf", "list", "--installed"]
 
         # specifying a format is so we can match exactly on the package name
-        query_command =  ["rpm", "-qa", "--qf", "'%{NAME}'"]
+        query_command = ["rpm", "-qa", "--qf", "%{NAME}\n"]
         query_prefix = ''
         packages = (
             "fuse fuse-libs "  # appimages
@@ -561,10 +561,12 @@ def get_package_manager() -> PackageManager | None:
     elif shutil.which('pacman') is not None:  # arch, steamOS
         install_command = ["pacman", "-Syu", "--noconfirm", "--needed"]
         download_command = ["pacman", "-Sw", "-y"]
-        remove_command = ["pacman", "-R", "--no-confirm"]
+        remove_command = ["pacman", "-R", "--noconfirm"]
         query_command =  ["pacman", "-Q"]
         query_prefix = ''
         if os_name == "steamos":  # steamOS
+            # Discovery remains available, but no automatic transaction is validated.
+            install_command = download_command = remove_command = []
             packages = (
                 "patch wget sed grep gawk p7zip cabextract samba bc libxml2 curl print-manager "
                 "system-config-printer cups-filters nss-mdns foomatic-db-engine foomatic-db-ppds "
@@ -619,91 +621,37 @@ def get_package_manager() -> PackageManager | None:
 
 
 def query_packages(package_manager: PackageManager, packages, mode="install") -> list[str]: 
-    result = None
-    missing_packages = []
-    conflicting_packages = []
+    if mode not in ("install", "remove"):
+        raise ValueError(f"Invalid query mode: {mode}")
 
-    command = package_manager.query
-
-    result = dependency_command(command, "query packages")
+    result = dependency_command(package_manager.query, "query packages")
     if not isinstance(result.stdout, str):
         raise maintenance.MaintenanceError("Package query did not return readable output")
-    package_list = result.stdout
 
-    logging.debug(f"packages to check: {packages}")
-    status = {package: "Unchecked" for package in packages}
+    family = package_manager.query[0]
+    installed = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if family == "dpkg":
+            if len(fields) >= 2 and len(fields[0]) >= 2 and fields[0][1] == "i":
+                installed.add(fields[1].split(":")[0])
+        elif family == "zypper":
+            columns = [column.strip() for column in line.split("|")]
+            if len(columns) >= 2 and columns[0] in ("i", "i+"):
+                installed.add(columns[1])
+        elif family == "rpm":
+            installed.add(line.strip())
+        elif family == "apk":
+            match = re.fullmatch(r"(.+)-\d[^ ]*", fields[0])
+            if match:
+                installed.add(match[1])
+        else:
+            installed.add(fields[0])
 
-    for p in packages:
-        logging.debug(f"Checking for: {p}")
-        l_num = 0
-        for line in package_list.split('\n'):
-            # logging.debug(f"{line=}")
-            l_num += 1
-            if package_manager.query[0] == 'dpkg':
-                parts = line.strip().split()
-                if l_num < 6 or len(parts) < 2:  # skip header, etc.
-                    continue
-                state = parts[0]
-                pkg = parts[1].split(':')[0]  # remove :arch if present
-                if pkg == p and state[1] == 'i':
-                    if mode == 'install':
-                        status[p] = "Installed"
-                    elif mode == 'remove':
-                        conflicting_packages.append(p)
-                        status[p] = 'Conflicting'
-                    break
-            else:
-                package_line_start = f"{package_manager.query_prefix}{p}"
-                # For rpm we can match the whole line
-                if package_manager.query[0] == 'rpm' and line.strip() == package_line_start: 
-                    logging.debug(f"'{p}' installed: {line}")
-                    status[p] = "Installed"
-                    break
-                elif package_manager.query[0] == 'zypper' and mode == "install":
-                    # This might be an issue for all OS' however at least on zypper when
-                    # the "fuse3" package is installed, it thinks the fuse package is
-                    # installed. Solve this by adding whitespace to the startswith
-                    package_line_start += " "
-                    # zypper also has two (known) possible prefixes 'i  | '
-                    # as set in query_prefix and 'i+ | '
-                    if (
-                        line.strip().startswith(package_line_start)
-                        or line.strip().startswith(f"i+ | {p} ")
-                    ):
-                        logging.debug(f"'{p}' installed: {line}")
-                        status[p] = "Installed"
-                        break
-                elif line.strip().startswith(package_line_start) and mode == "install":
-                    logging.debug(f"'{p}' installed: {line}")
-                    status[p] = "Installed"
-                    break
-                elif line.strip().startswith(p) and mode == "remove":
-                    conflicting_packages.append(p)
-                    status[p] = "Conflicting"
-                    break
-
-        if status[p] == "Unchecked":
-            if mode == "install":
-                missing_packages.append(p)
-                status[p] = "Missing"
-            elif mode == "remove":
-                status[p] = "Not Installed"
-        logging.debug(f"{p} status: {status.get(p)}")
-
-    logging.debug(f"Packages status: {status}")
-
-    if mode == "install":
-        if missing_packages:
-            txt = f"Missing packages: {' '.join(missing_packages)}"
-            logging.info(f"{txt}")
-        return missing_packages
-    elif mode == "remove":
-        if conflicting_packages:
-            txt = f"Conflicting packages: {' '.join(conflicting_packages)}"
-            logging.info(f"Conflicting packages: {txt}")
-        return conflicting_packages
-    else:
-        raise ValueError(f"Invalid query mode: {mode}")
+    present = mode == "remove"
+    return [package for package in packages if (package.rsplit("/", 1)[-1] in installed) == present]
 
 
 def have_dep(cmd):
@@ -753,47 +701,38 @@ def test_dialog_version():
 
 
 def remove_appimagelauncher(app: App):
-    app.status("Removing AppImageLauncher…")
-    pkg = "appimagelauncher"
     package_manager = get_package_manager()
     if package_manager is None:
-        app.exit("Failed to find the package manager to uninstall AppImageLauncher.")
-    cmd = [app.superuser_command, *package_manager.remove, pkg]
-    try:
-        logging.debug(f"Running command: {cmd}")
-        run_command(cmd)
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 127:
-            logging.error("User cancelled appimagelauncher removal.")
-        else:
-            logging.error(f"An error occurred: {e}")
-            logging.error(f"Command output: {e.output}")
-        app.exit(f"Failed to uninstall AppImageLauncher: {e}")
-    logging.info("System reboot is required.")
-    sys.exit()
+        raise maintenance.MaintenanceError("No supported package manager can remove AppImageLauncher")
+    executable = shutil.which("AppImageLauncher")
+    if executable is None:
+        return
+    if distro.id() == "steamos":
+        raise maintenance.MaintenanceError(
+            "Remove AppImageLauncher using SteamOS-supported system maintenance, then retry. "
+            "Automatic SteamOS package changes are not validated"
+        )
 
+    family = package_manager.query[0]
+    if family == "dpkg":
+        query = ["dpkg-query", "-S", executable]
+    elif family in ("rpm", "zypper"):
+        query = ["rpm", "-qf", "--qf", "%{NAME}\n", executable]
+    elif family in ("pacman", "pamac"):
+        query = ["pacman", "-Qqo", executable]
+    else:
+        raise maintenance.MaintenanceError("Remove the unmanaged AppImageLauncher installation manually, then retry")
 
-def preinstall_dependencies_steamos(superuser_command: str):
-    logging.debug("Disabling read only, updating pacman keys…")
-    command = [
-        [superuser_command, "steamos-readonly", "disable"],
-        [superuser_command, "pacman-key", "--init"],
-        [superuser_command, "pacman-key", "--populate", "archlinux"],
-    ]
-    return command
+    owner = dependency_command(query, "identify the AppImageLauncher package").stdout.strip()
+    if family == "dpkg":
+        owner = owner.split(": ", 1)[0]
+    if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9+_.:-]*", owner) is None:
+        raise maintenance.MaintenanceError("Could not identify one owning package for AppImageLauncher")
 
-
-def postinstall_dependencies_steamos(superuser_command: str):
-    logging.debug("Updating DNS settings & locales, enabling services & read-only system…")
-    command = [
-        [superuser_command, "sed", '-i',
-         's/mymachines resolve/mymachines mdns_minimal [NOTFOUND=return] resolve/', '/etc/nsswitch.conf'],
-        [superuser_command, "locale-gen"],
-        [superuser_command, "systemctl", "enable", "--now", "avahi-daemon"],
-        [superuser_command, "systemctl", "enable", "--now", "cups"],
-        [superuser_command, "steamos-readonly", "enable"],
-    ]
-    return command
+    app.status(f"Removing AppImageLauncher package {owner}")
+    arguments = [*package_manager.remove, owner]
+    dependency_command([app.superuser_command, *arguments], "remove AppImageLauncher")
+    raise maintenance.MaintenanceError("AppImageLauncher was removed. Reboot before retrying installation")
 
 
 def postinstall_dependencies_alpine(superuser_command: str) -> list[str]:
@@ -813,10 +752,7 @@ def preinstall_dependencies(superuser_command: str):
     command = []
     logging.debug("Performing pre-install dependencies…")
     os_name, _ = get_os()
-    if os_name == "Steam":
-        command = preinstall_dependencies_steamos(superuser_command)
-    else:
-        logging.debug("No pre-install dependencies required.")
+    logging.debug("No pre-install dependencies required for %s", os_name)
     return command
 
 
@@ -824,9 +760,7 @@ def postinstall_dependencies(superuser_command: str):
     command = []
     logging.debug("Performing post-install dependencies…")
     os_name, _ = get_os()
-    if os_name == "Steam":
-        command = postinstall_dependencies_steamos(superuser_command)
-    elif os_name == "alpine":
+    if os_name == "alpine":
         command = postinstall_dependencies_alpine(superuser_command)
     else:
         logging.debug("No post-install dependencies required.")
@@ -861,6 +795,12 @@ def install_dependencies(app: App, target_version=10):
         return
 
     details = f"Install: {missing}\nRemove: {conflicts}"
+    if distro.id() == "steamos":
+        raise maintenance.MaintenanceError(
+            f"Automatic SteamOS package changes are not validated.\n{details}\n"
+            "Use SteamOS-supported system maintenance to resolve these dependencies, then retry. "
+            "Filesystem protection and system packages were not changed"
+        )
     if not app.approve("Apply these system dependency changes?", details):
         from .app import UserExitedFromAsk
 

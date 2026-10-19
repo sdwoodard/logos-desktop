@@ -1,13 +1,12 @@
 import copy
 from contextlib import ExitStack
 import os
-import subprocess
 from typing import Any, Optional
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 
-from ou_dedetai import network, utils, constants, wine, system, paths, maintenance, runtime, config_store
+from ou_dedetai import network, utils, constants, wine, paths, maintenance, runtime, config_store
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
 
@@ -1032,43 +1031,8 @@ class Config:
             return self._wine64_path
         self._wine64_path = None
         self._wine64_identity = identity
-        # Some packaging uses wine64 for the 64bit binary (like wine 10 on debian),
-        # others use wine (like wine 10.2 on debian)
-        wine64_path = Path(selected).parent / 'wine64'
-        # Prefer wine64 if it exists
-        if wine64_path.exists():
-            self._wine64_path = str(wine64_path)
-            return str(wine64_path)
-        # Use the file binary if found to check the architecture type
-        try:
-            file_output = subprocess.check_output(
-                ["file", "-bL", str(wine_path)],
-                env=system.fix_ld_library_path(None),
-                encoding="utf-8"
-            ).strip()
-            if file_output.startswith("ELF 64-bit LSB pie executable,"):
-                # Confirmed wine binary is 64 bit
-                self._wine64_path = str(wine_path)
-            elif file_output.startswith("ELF 32-bit LSB pie executable,"):
-                # Woah there, we only have a 32 bit binary.
-                self.app.exit("Could not find a 64 bit wine binary, please install a 64bit wine")
-            else:
-                # We don't want to fail here since file might behave differently on
-                # different systems or maybe different on BSD
-                # better to just let it go this time. 
-                # If it really is a problem, the user will hit other errors later on
-                # And this will be in the log when we support.
-                logging.warning(
-                    "Could not parse architecture from wine binary "
-                    f"({wine_path})"
-                    f": {file_output}\n"
-                    "Assuming it is the right architecture"
-                )
-        except Exception as e:
-            logging.warning(f"Failed to check wine binary architecture: {e}")
-        # Update the cache and return
-        self._wine64_path = str(wine_path)
-        return str(wine_path)
+        self._wine64_path = wine.native_launcher(selected)
+        return self._wine64_path
     
     @property
     # This used to be called WINESERVER_EXE
@@ -1076,7 +1040,7 @@ class Config:
         override = getattr(self._overrides, "wineserver_binary", None)
         if override is not None:
             return self._absolute_from_install_dir(override)
-        return str(Path(self.wine_binary).parent / 'wineserver')
+        return str(Path(self.wine64_binary).parent / 'wineserver')
 
     # FIXME: seems like the logic around wine appimages can be simplified
     # Should this be folded into wine_binary?

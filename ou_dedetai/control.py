@@ -23,7 +23,7 @@ from ou_dedetai.app import App
 
 
 def edit_file(config_file: str):
-    system.run_command(["xdg-open", config_file])
+    system.dependency_command(["xdg-open", config_file], "open the configuration editor")
 
 
 @maintenance.maintains_installation

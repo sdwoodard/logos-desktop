@@ -140,8 +140,30 @@ def require_compatible(app: App, binary: str | Path):
         raise maintenance.MaintenanceError(reason)
 
 
+def native_launcher(binary: str | Path) -> str:
+    """Select the companion without resolving away a runtime's wrapper path.
+
+    Script launchers are supported, but their version does not certify architecture.
+    Reject known incompatible ELF files without booting a prefix to probe a wrapper.
+    """
+    selected = Path(binary)
+    if not selected.exists() or selected.name.lower().endswith(".appimage"):
+        return str(selected)
+    companion = selected.parent / "wine64"
+    if selected.name == "wine" and companion.is_file() and os.access(companion, os.X_OK):
+        selected = companion
+    if not selected.is_file():
+        raise maintenance.MaintenanceError(f"Wine launcher is not a regular file: {selected}")
+    with selected.open("rb") as stream:
+        header = stream.read(20)
+    if header.startswith(b"\x7fELF"):
+        if len(header) < 20 or header[4:6] != b"\x02\x01" or header[18:20] != b"\x3e\x00":
+            raise maintenance.MaintenanceError(f"Wine requires an x86_64 launcher: {selected}")
+    return str(selected)
+
+
 def check_wine_version_and_branch(release_version: Optional[str], test_binary,
-                                  faithlife_product_version):
+                                  faithlife_product_version, *, server=None):
     if not os.path.exists(test_binary):
         reason = "Binary does not exist."
         return False, reason
@@ -154,6 +176,22 @@ def check_wine_version_and_branch(release_version: Optional[str], test_binary,
 
     if wine_release is None:
         return False, error_message
+
+    if server is not None:
+        from . import processes, updates
+
+        try:
+            output, status = processes.capture(
+                [runtime.executable(server), "--version"], env=updates.fresh_environment(),
+                timeout=15, limit=16384, label="Wineserver version probe",
+            )
+            match = re.fullmatch(r"Wine (\d+)\.(\d+)(?:\.\d+)*(?: \([^\n]+\))?", output.decode().strip())
+            if status != 0 or match is None:
+                return False, "Could not identify the matching wineserver version"
+            if (int(match[1]), int(match[2])) != (wine_release.major, wine_release.minor):
+                return False, "Wine and wineserver versions do not match"
+        except (OSError, ValueError, RuntimeError) as error:
+            return False, f"Could not probe the matching wineserver: {error}"
 
     result, message = check_wine_rules(
         wine_release,
@@ -468,6 +506,7 @@ def run_wine_process(
     exe=None,
     exe_args=None,
     additional_wine_dll_overrides: Optional[str] = None,
+    detach_on_close: bool = True,
 ) -> Optional[subprocess.Popen[bytes]]:
     """Runs wine directly
     
@@ -507,7 +546,7 @@ def run_wine_process(
         try:
             closing = getattr(app, "_closing", None)
             while process.poll() is None:
-                if isinstance(closing, threading.Event) and closing.wait(0.1):
+                if detach_on_close and isinstance(closing, threading.Event) and closing.wait(0.1):
                     return
                 try:
                     process.wait(timeout=0.1)
@@ -526,9 +565,9 @@ def run_wine_process(
         if process is None:
             return None
         if isinstance(app, App):
-            app.start_thread(release, daemon_bool=True)
+            app.start_thread(release, daemon_bool=detach_on_close)
         else:
-            threading.Thread(target=release, name="Artifact process lifetime", daemon=True).start()
+            threading.Thread(target=release, name="Artifact process lifetime", daemon=detach_on_close).start()
         transferred = True
         return process
     except BaseException:
@@ -567,7 +606,7 @@ def run_wine_application(
             stderr=wine_log,
             exe=exe,
             exe_args=exe_args,
-            additional_wine_dll_overrides=additional_wine_dll_overrides
+            additional_wine_dll_overrides=additional_wine_dll_overrides,
         )
 
 
@@ -590,7 +629,8 @@ def run_wine_during_install(
             stderr=temp_file,
             exe=exe,
             exe_args=exe_args,
-            additional_wine_dll_overrides=additional_wine_dll_overrides
+            additional_wine_dll_overrides=additional_wine_dll_overrides,
+            detach_on_close=False,
         )
         if process is None:
             raise maintenance.MaintenanceError("Wine command could not be started")

@@ -58,7 +58,9 @@ class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
                 domain._threads = []
                 domain._last_status = None
                 domain._config_updated_event = Mock()
-                domain.console_log = []
+                domain._last_console_message = None
+                domain._operation_lock = threading.Lock()
+                domain._operation_active = False
                 from ou_dedetai.logos import LogosManager
                 domain.logos = LogosManager(domain)
                 domain._closed = False

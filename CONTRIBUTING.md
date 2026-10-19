@@ -17,9 +17,11 @@ python3 -m venv .venv
 .venv/bin/python -m pip install '.[dev]'
 ```
 
-The inherited ensure-python.sh and ensure-venv.sh scripts are not the supported
-setup route. The venv script currently rejects the checkout directory. Snap,
-Flatpak, Nix and binary recipes remain unvalidated for LogosDesktop.
+Alternatively, run `scripts/ensure-venv.sh` from any working directory. It creates
+`.venv` beside the source using installed Python 3.12 or newer. Set `PYTHON` to an
+interpreter path if needed. It preserves existing environments. The inherited
+`ensure-python.sh` compiler script is not a supported setup route. Snap, Flatpak,
+Nix and binary recipes remain unvalidated for LogosDesktop.
 
 The Python namespace remains `ou_dedetai`. The `logos-desktop` and transitional
 `oudedetai` console commands share an entry point. Existing runtime filenames and
@@ -27,26 +29,22 @@ configuration paths have not migrated yet. Controller self-updates are disabled.
 
 ## Focused checks
 
-The product uses stdlib unittest. The private manual workflow runs these focused
-checks, not the full inherited suite:
+The product uses stdlib unittest. The private manual workflow runs full inexpensive
+discovery, including the retained utility tests:
 
 ```bash
-.venv/bin/python -m unittest -v tests.test_constants tests.test_private_development
-.venv/bin/python -m unittest -v \
-  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_custom \
-  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_notset \
-  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_uptodate \
-  tests.test_utils.TestAppUtils.test_compare_logos_linux_installer_version_yes
+.venv/bin/python -B -m unittest discover -s tests -t . -p 'test*.py' -v
 .venv/bin/ruff check
 ```
 
-Keep the comparison cases in a separate process because they mutate constants.
 Tk availability is required for the GUI-specific fixture checks. A skipped GUI
 check is not a native GUI pass.
 
-Full inherited discovery still has known network, checkout-name and host-filesystem
-assumptions. Record those failures rather than presenting the baseline as passing.
-`tests/integration.py` can install and remove software. It is not a routine test
+Tests use local response and filesystem fixtures. They should run without public
+network access or a particular checkout name, home setup or directory block size.
+Use a disposable HOME and XDG paths when running the suite. `tests/integration.py`
+is an obsolete manual harness with old commands, X11 assumptions and install/remove
+side effects. It is excluded from discovery and must not be used as a routine test
 command. Build scripts and package recipes require separate review before use.
 
 ## Changes and review
