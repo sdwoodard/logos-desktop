@@ -49,7 +49,7 @@ jobs:
           import unittest
           from PySide6 import QtCore, QtGui, QtWidgets
           suite = unittest.defaultTestLoader.loadTestsFromNames([
-              'tests.test_qt_frontend', 'tests.test_qt_theme',
+              'tests.test_qt_frontend', 'tests.test_qt_theme', 'tests.test_qt_services',
           ])
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(not result.wasSuccessful() or bool(result.skipped))

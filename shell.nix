@@ -17,7 +17,6 @@ in pkgs.mkShell {
       pythondialog
       inotify
       requests
-      tkinter
     ]))
     pkgs.corefonts
     unstable_pkgs.wineWowPackages.full

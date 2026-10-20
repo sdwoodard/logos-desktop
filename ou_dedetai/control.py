@@ -19,7 +19,7 @@ from ou_dedetai import constants
 from ou_dedetai import maintenance, backup_store
 from ou_dedetai import paths, artifacts, runtime
 from ou_dedetai import system
-from ou_dedetai.app import App
+from ou_dedetai.app import App, UserExitedFromAsk
 
 
 def edit_file(config_file: str):
@@ -167,7 +167,7 @@ def uninstall(app: App):
 
     confirmation = "These paths will be removed:\n\n" + "\n".join(str(path) for path in targets)
     if not app.approve("Are you sure you want to uninstall?", confirmation):
-        return
+        return False
     app.status("Uninstalling…")
     ordered = sorted(targets.values(), key=lambda target: not stat.S_ISDIR(target.info.st_mode))
     maintenance.assert_quiescent(context)
@@ -175,7 +175,18 @@ def uninstall(app: App):
         paths.remove_targets(ordered, protected)
 
     # Reloading would recreate a cache that the user just asked to remove.
-    app.conf._raw = PersistentConfiguration()
+    overrides = app.conf._overrides
+    # Deletion ends pending migration. Keep later writes on the selected path.
+    if hasattr(overrides, "config_destination"):
+        overrides.config_destination = str(config_path)
+    if hasattr(overrides, "runtime_selection"):
+        overrides.runtime_selection = {}
+    empty = PersistentConfiguration.from_document({}, getattr(overrides, "environment", {}))
+    empty._file_path = str(config_path)
+    empty._file_bytes = None
+    app.conf._raw = empty
+    if callable(getattr(app.conf, "rebind", None)):
+        app.conf.rebind(empty)
     if callable(getattr(app.conf, "invalidate_context", None)):
         app.conf.invalidate_context()
     for attribute in (
@@ -186,6 +197,7 @@ def uninstall(app: App):
         setattr(app.conf, attribute, None)
     app._config_updated_event.set()
     app.status("Uninstalled")
+    return True
 
 
 def get_support(app: App) -> str:
@@ -202,7 +214,6 @@ def get_support(app: App) -> str:
     ])
 
     if not output_path or not str(output_path).strip():
-        from ou_dedetai.app import UserExitedFromAsk
         raise UserExitedFromAsk
     output = Path(output_path).expanduser().absolute()
     sources = [
@@ -232,13 +243,16 @@ def get_support(app: App) -> str:
         os.replace(staged, output)
 
     app.status(f"Wrote support bundle to: {output_path}", percent=100)
-    answer = app.ask(
-        "How would you like to continue to get support?\n"
-        "Keep this archive private and review its contents before sharing.\n"
-        "The project repository and issues are private during development.\n"
-        "Describe what went wrong and which actions you took.",
-        ['Keep archive local', 'Open private project issue', 'Show links'],
-    )
+    try:
+        answer = app.ask(
+            "How would you like to continue to get support?\n"
+            "Keep this archive private and review its contents before sharing.\n"
+            "The project repository and issues are private during development.\n"
+            "Describe what went wrong and which actions you took.",
+            ['Keep archive local', 'Open private project issue', 'Show links'],
+        )
+    except UserExitedFromAsk:
+        return output_path
     if answer == "Open private project issue":
         webbrowser.open(constants.REPOSITORY_NEW_ISSUE_LINK)
     elif answer == "Show links":

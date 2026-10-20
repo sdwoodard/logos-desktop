@@ -42,7 +42,7 @@ def get_parser():
         '-a', '--check-for-updates', action='store_true',
         help='force a check for updates'
     )
-    cfg.add_argument('--dialog', choices=('tk', 'tui'), help='choose the controller interface')
+    cfg.add_argument('--dialog', choices=('qt', 'tk', 'tui'), help='choose the controller interface')
     cfg.add_argument(
         '-K', '--skip-dependencies', action='store_true',
         help='skip dependencies check and installation',
@@ -227,6 +227,8 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         ephemeral_config.check_updates_now = True
     if args.dialog:
         ephemeral_config.dialog = args.dialog
+    if ephemeral_config.dialog == "tk":
+        ephemeral_config.dialog = "qt"
 
     if args.quiet:
         ephemeral_config.log_level = logging.WARNING
@@ -331,6 +333,8 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
             break
     if getattr(args, "install_app"):
         run_action = install_app
+    if args.repair_app and ephemeral_config.dialog == "qt":
+        run_action = repair_app
     if run_action is None:
         run_action = run_control_panel
     cli_fields = {
@@ -350,10 +354,8 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
 def run_control_panel(ephemeral_config: EphemeralConfiguration):
     dialog = ephemeral_config.dialog or system.get_dialog()
     logging.info(f"Using DIALOG: {dialog}")
-    if dialog == 'tk':
-        from . import gui_app
-
-        gui_app.start_gui_app(ephemeral_config)
+    if dialog in ('qt', 'tk'):
+        start_graphical(ephemeral_config)
     else:
         try:
             tui_app.control_panel_app(ephemeral_config)
@@ -369,13 +371,28 @@ def run_control_panel(ephemeral_config: EphemeralConfiguration):
             logging.error(f"An error occurred in run_control_panel(): {e}")
             raise e
 
+def repair_app(ephemeral_config: EphemeralConfiguration):
+    from .repair import repair_installation
+
+    start_graphical(ephemeral_config, function=repair_installation)
+
+
+def start_graphical(ephemeral_config, *, function=None, install_only=False):
+    try:
+        from .qt.startup import start
+    except ModuleNotFoundError as error:
+        if not error.name or not error.name.startswith(("PySide6", "shiboken6")):
+            raise
+        raise maintenance.MaintenanceError(
+            "The Qt interface requires the gui extra. Install logos-desktop[gui] or use --dialog tui") from error
+    return start(ephemeral_config, function, install_only=install_only)
+
+
 def install_app(ephemeral_config: EphemeralConfiguration):
     dialog = ephemeral_config.dialog or system.get_dialog()
     logging.info(f"Using DIALOG: {dialog}")
-    if dialog == 'tk':
-        from . import gui_app
-
-        gui_app.start_gui_app(ephemeral_config, install_only=True)
+    if dialog in ('qt', 'tk'):
+        start_graphical(ephemeral_config, install_only=True)
     else:
         app = cli.CLI(ephemeral_config)
         try:

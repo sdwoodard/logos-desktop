@@ -115,7 +115,7 @@ class TestControllerUpdate(unittest.TestCase):
                 prepared.restart(updates.resume_arguments(self.root / "selected config.json", "tk"))
         self.assertEqual(seen[0][0], self.target)
         self.assertEqual(
-            seen[0][1], [str(self.target), "-c", str(self.root / "selected config.json"), "--dialog", "tk"],
+            seen[0][1], [str(self.target), "-c", str(self.root / "selected config.json"), "--dialog", "qt"],
         )
         self.assertEqual(seen[0][2]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
         self.assertEqual(seen[0][3], self.new)
@@ -321,9 +321,9 @@ class TestUpdateAdmission(unittest.TestCase):
             main.run_controller_update(args)
         load.assert_called_once_with("/fixture/selected.json")
         prepared.restart.assert_called_once_with(["-c", "/fixture/selected.json", "--dialog", "tui"])
-        for frontend in ("curses", "cli", "tk", "tui"):
+        for frontend in ("curses", "cli", "tk", "qt", "tui"):
             resumed = updates.resume_arguments("/fixture/selected.json", frontend)
-            self.assertIn(parser.parse_args(resumed).dialog, ("tk", "tui"))
+            self.assertIn(parser.parse_args(resumed).dialog, ("qt", "tui"))
         with self.assertRaises(updates.UpdateError):
             updates.resume_arguments(dialog="unknown")
 

@@ -1,5 +1,4 @@
 import threading
-from queue import Queue
 import unittest
 from unittest.mock import Mock, patch
 
@@ -81,19 +80,3 @@ class TestAppExit(unittest.TestCase):
                 app.exit("fixture", intended=intended)
             self.assertEqual(result.exception.code, code)
             self.assertEqual(app._threads, [])
-
-    def test_tk_callback_failure_does_not_disable_following_work_or_rescheduling(self):
-        try:
-            from ou_dedetai.gui_app import Root
-        except ImportError as error:
-            self.skipTest(str(error))
-        root = Mock(_destroyed=False)
-        root._callbacks = Queue()
-        root._callbacks.put(Mock(side_effect=ValueError("intended callback failure")))
-        following = Mock()
-        root._callbacks.put(following)
-        with patch("ou_dedetai.gui_app.logging.exception") as report:
-            Root._drain_callbacks(root)
-        report.assert_called_once()
-        following.assert_called_once()
-        root.after.assert_called_once_with(50, root._drain_callbacks)

@@ -69,6 +69,7 @@ def ensure_install_dirs(app: App):
 def ensure_sys_deps(app: App):
     app.installer_step_count += 1
     ensure_install_dirs(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring system dependencies are met…")
 
@@ -201,6 +202,7 @@ def check_system_compatibility(app: App):
 def ensure_appimage_download(app: App):
     app.installer_step_count += 1
     ensure_sys_deps(app=app)
+    app.checkpoint()
     check_system_compatibility(app=app)
     app.installer_step += 1
 
@@ -239,6 +241,7 @@ def ensure_appimage_download(app: App):
 def ensure_wine_executables(app: App):
     app.installer_step_count += 1
     ensure_appimage_download(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring wine executables are available…")
 
@@ -256,6 +259,7 @@ def ensure_wine_executables(app: App):
 def ensure_winetricks_executable(app: App):
     app.installer_step_count += 1
     ensure_wine_executables(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring winetricks executable is available…")
 
@@ -267,6 +271,7 @@ def ensure_winetricks_executable(app: App):
 def ensure_product_installer_download(app: App):
     app.installer_step_count += 1
     ensure_winetricks_executable(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status(f"Ensuring {app.conf.faithlife_product} installer is downloaded…")
 
@@ -293,6 +298,7 @@ def ensure_product_installer_download(app: App):
 def ensure_wineprefix_init(app: App):
     app.installer_step_count += 1
     accepted = ensure_product_installer_download(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring wineprefix is initialized…")
 
@@ -313,6 +319,7 @@ def ensure_wineprefix_init(app: App):
 def ensure_wineprefix_config(app: App):
     app.installer_step_count += 1
     accepted = ensure_wineprefix_init(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring wineprefix configuration…")
 
@@ -334,6 +341,7 @@ def ensure_fonts(app: App):
     """Ensure the arial font is installed"""
     app.installer_step_count += 1
     accepted = ensure_wineprefix_config(app=app)
+    app.checkpoint()
     app.installer_step += 1
 
     wine.install_fonts(app)
@@ -343,6 +351,7 @@ def ensure_fonts(app: App):
 def ensure_icu_data_files(app: App):
     app.installer_step_count += 1
     accepted = ensure_fonts(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring ICU data files are installed…")
     logging.debug('- ICU data files')
@@ -357,6 +366,7 @@ def ensure_icu_data_files(app: App):
 def ensure_product_installed(app: App):
     app.installer_step_count += 1
     accepted = ensure_icu_data_files(app=app)
+    app.checkpoint()
     app.installer_step += 1
     app.status(f"Ensuring {app.conf.faithlife_product} is installed…")
 

@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtGui import QPalette
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from ou_dedetai import constants
@@ -78,15 +77,16 @@ class QtCase(unittest.TestCase):
 
     def pump(self, predicate, timeout=3):
         deadline = time.monotonic() + timeout
-        while not predicate() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             self.application.processEvents()
-            QTest.qWait(5)
-        self.application.processEvents()
+            if predicate():
+                return
+            time.sleep(.005)
         self.assertTrue(predicate(), "Qt condition did not settle before the deadline")
 
-    def window(self):
-        self.services = Services(self.root)
-        config = EphemeralConfiguration.project({}, str(self.config), environment={})
+    def window(self, services=None, configuration=None):
+        self.services = services or Services(self.root)
+        config = configuration or EphemeralConfiguration.project({}, str(self.config), environment={})
         window = MainWindow(config, self.theme, self.services)
         window.show()
         self.addCleanup(self.dispose_window, window)

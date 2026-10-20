@@ -236,8 +236,8 @@ def resume_arguments(config_path=None, dialog=None):
     if config_path:
         arguments.extend(["-c", str(Path(config_path).expanduser().absolute())])
     if dialog:
-        dialog = {"curses": "tui", "cli": "tui"}.get(dialog, dialog)
-        if dialog not in ("tk", "tui"):
+        dialog = {"curses": "tui", "cli": "tui", "tk": "qt"}.get(dialog, dialog)
+        if dialog not in ("qt", "tui"):
             raise UpdateError("Unknown controller frontend for restart")
         arguments.extend(["--dialog", dialog])
     return arguments
@@ -307,7 +307,7 @@ class PreparedUpdate:
                 processes.resume()
 
 
-def prepare(app):
+def prepare(app, *, channel=None):
     target = eligible()
     if constants.APP_RELEASE_VERSION is None:
         raise UpdateError("This private build has no LogosDesktop release version")
@@ -317,7 +317,7 @@ def prepare(app):
         if os.path.lexists(destination.record):
             raise UpdateError("Controller replacement needs recovery before another update")
         with idle(app), maintenance.artifact_use():
-            lookup = app.conf._network.controller_release(app.conf.app_release_channel, force=True)
+            lookup = app.conf._network.controller_release(channel or app.conf.app_release_channel, force=True)
             release = lookup.release
             if lookup.status != "ok" or lookup.stale or release is None or release.error:
                 raise UpdateError(lookup.message)

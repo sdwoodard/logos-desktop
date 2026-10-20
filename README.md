@@ -1,7 +1,7 @@
 # LogosDesktop
 
-LogosDesktop is an independent community installer and manager for Logos and
-Verbum on Linux through Wine. It is not affiliated with or endorsed by Logos.
+LogosDesktop is an independent community installer and manager for Logos on Linux
+through Wine. It is not affiliated with or endorsed by Logos.
 A valid Logos license is still required.
 
 ## Development status
@@ -12,13 +12,16 @@ unvalidated and do not establish platform support.
 
 Controller self-update discovery and replacement are disabled during private
 development. Updates to Logos and the selected Wine runtime are separate operations.
-The inherited controller still has known data-safety and lifecycle defects. Use
-disposable configurations and prefixes for development.
+Native journeys and distribution validation are still in progress. Use disposable
+configurations and prefixes for development.
 
 The current source retains the `ou_dedetai` import namespace and legacy runtime
 paths while migration is prepared. Both `logos-desktop` and the transitional
-`oudedetai` console command call the same entry point. The graphical frontend is
-still Tkinter. Native Qt work is planned.
+`oudedetai` console command call the same entry point. The graphical frontend uses
+Qt Widgets through PySide6. Install the `gui` extra for desktop use, or choose
+`--dialog tui` for the terminal panel. Explicit CLI actions remain available
+without a graphical application. See [the architecture](ARCHITECTURE.md) for the
+frontend and shared-service boundaries.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for source setup and focused checks.
 See [CONFIGURATION.md](CONFIGURATION.md) for profile selection, setting precedence,

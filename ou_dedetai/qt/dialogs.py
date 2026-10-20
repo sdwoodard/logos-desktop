@@ -40,7 +40,7 @@ class FailureDialog(QDialog):
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self.details.toPlainText()))
         buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
         if retry is not None:
-            button = buttons.addButton("Retry preview", QDialogButtonBox.ButtonRole.AcceptRole)
+            button = buttons.addButton("Retry", QDialogButtonBox.ButtonRole.AcceptRole)
             button.clicked.connect(retry)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)

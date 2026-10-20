@@ -4,10 +4,9 @@
 a = Analysis(
     ['scripts/run_app.py'],
     pathex=[],
-    #binaries=[('/usr/bin/tclsh8.6', '.')],
     binaries=[],
     datas=[('ou_dedetai/img', 'img'),('ou_dedetai/assets', 'assets')],
-    hiddenimports=["tkinter"],
+    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtDBus"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['scripts/frozen_identity.py'],

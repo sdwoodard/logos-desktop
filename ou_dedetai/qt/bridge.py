@@ -63,6 +63,7 @@ class Bridge(QObject):
     cancel_prompt = Signal(object)
     information = Signal(str, str)
     close_requested = Signal(str, bool)
+    observation = Signal(object, str)
     _wake = Signal()
     _completion = Signal(object)
 

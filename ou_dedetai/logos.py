@@ -314,7 +314,17 @@ class LogosManager:
                 message = f"Database protection unavailable: {error}" if error else "Database protection restored"
                 notifications.append((message, 0))
         for message, percent in notifications:
-            self.app.status(message, percent)
+            observe = getattr(self.app, "observe_manager", None)
+            if observe is not None:
+                observe(self, message, percent)
+            else:
+                self.app.status(message, percent)
+        state = self.logos_state, self.indexing_state, self.enforcement_error
+        if state != getattr(self, "_published_state", None):
+            self._published_state = state
+            observe = getattr(self.app, "observe_manager", None)
+            if observe is not None:
+                observe(self)
 
     def monitor_for_potential_issues(self):
         """Check login from the owned observer without creating a per-launch worker."""

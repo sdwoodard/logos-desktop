@@ -295,7 +295,7 @@ class Prepared:
 
 
 @contextmanager
-def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None):
+def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None):
     """Share input validation and destination ownership with runtime activation."""
     path = absolute_path(path)
     source_path = absolute_path(source_path) if source_path is not None else path
@@ -315,6 +315,8 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
             raise ConfigurationError("Selected installation changed on disk. Reload before saving")
         document = apply_changes(document, changes, path)
         require_ready(document, overrides)
+        if validator is not None:
+            validator(document)
         content = encode(document)
         targets = [primary]
         install = document.get("install_dir")
@@ -349,7 +351,7 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
         yield prepared
 
 
-def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None):
+def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None):
     """Caller holds configuration_lock. A returned result means primary committed."""
     path = absolute_path(path)
     source_path = absolute_path(source_path) if source_path is not None else path
@@ -358,6 +360,7 @@ def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, 
     try:
         with prepare(
             path, changes, source_path=source_path, source_bytes=source_bytes, overrides=overrides, expected=expected,
+            validator=validator,
         ) as prepared:
             document = prepared.document
             primary = prepared.targets[0]

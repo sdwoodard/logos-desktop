@@ -260,6 +260,7 @@ class TestUninstallBoundaries(unittest.TestCase):
             patch.object(installer.network, "logos_reuse_download", side_effect=transfer),
         ):
             self.app.installer_step = self.app.installer_step_count = 0
+            self.app.checkpoint = Mock()
             installer.ensure_appimage_download(self.app)
         from tests.artifact_fixtures import appimage
 
@@ -490,6 +491,7 @@ class TestRemovedCleanup(unittest.TestCase):
             try:
                 os.chdir(root)
                 app = SimpleNamespace(
+                    checkpoint=Mock(),
                     installer_step_count=0, installer_step=0, status=Mock(),
                     is_installed=lambda: True,
                     conf=SimpleNamespace(

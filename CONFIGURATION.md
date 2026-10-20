@@ -1,5 +1,18 @@
 # Configuration and recovery
 
+## Interfaces
+
+The desktop control panel uses Qt. Install `logos-desktop[gui]` for graphical use,
+or select the Textual panel with `--dialog tui`. The old `--dialog tk` value remains
+an alias for Qt. CLI actions such as `--status`, backup and Stop do not initialize
+a graphical application.
+
+The Qt interface manages Logos and uses the latest checked stable release.
+Product/controller channels and manual release selection are not graphical
+preferences. Conflicting version, channel or custom installer-source overrides
+are refused before graphical installation, update or reinstalling repair.
+Wine runtime selection remains a separate advanced setting.
+
 ## Choosing an installation
 
 `logos-desktop -c /absolute/path/profile.json` selects that profile for reads,
@@ -37,6 +50,11 @@ the source. A concurrently created destination causes a reload-required error.
 An explicitly selected `.conf` remains the selected pathname, and its first save
 converts it to JSON. JSON is recognized by content on restart. Shell assignments
 are parsed as data, never executed. Unsupported shell expressions are rejected.
+
+Successful uninstall ends any pending migration relationship for the removed
+profile. The controller keeps that selected pathname as a coherent empty-profile
+read/write target for later setup. It does not load or overwrite a competing
+default destination.
 
 The first conversion retains original shell bytes in `.<filename>.legacy-original`.
 Later saves retain the previous valid bytes in `.<filename>.previous`. Both copies

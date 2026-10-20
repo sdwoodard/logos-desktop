@@ -155,6 +155,7 @@ class RestoreTask(BackupBase):
                     self.app.status(warning, 100)
                 else:
                     self.app.status("Finished restore. All selected data verified", 100)
+                return warning
         except (OSError, ValueError) as error:
             raise store.BackupError(f"Restore failed: {error}") from error
 

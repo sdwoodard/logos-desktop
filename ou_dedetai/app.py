@@ -124,6 +124,15 @@ class App(abc.ABC):
         self._closed = True
         return True
 
+    def checkpoint(self):
+        """Frontends can cancel preparation between completed installation phases."""
+        if self._closing.is_set():
+            raise UserExitedFromAsk
+
+    def observe_manager(self, manager, message="", percent=None):
+        if message:
+            self.status(message, percent)
+
     def ask(self, question: str, options: list[str]) -> str:
         """Return a canonical choice or validated path, or unwind cancellation."""
         if not options:
@@ -198,7 +207,7 @@ class App(abc.ABC):
 
         Called on a worker thread when exit() was invoked off the main thread.
         Frontends with their own main loop override this with the appropriate
-        thread-safe mechanism (e.g. tk's root.after, or poking a polled queue).
+        thread-safe mechanism, such as a queued Qt signal or a terminal event.
         The default interrupts the main thread, which most blocking main loops
         surface as a KeyboardInterrupt.
         """

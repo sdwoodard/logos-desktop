@@ -50,6 +50,7 @@ def fixture_app(root):
         "1", conf.icu_latest_version_url, name="icu-win.tar.gz",
     )
     app = SimpleNamespace(
+        checkpoint=Mock(),
         conf=conf, status=Mock(), installer_step=0, installer_step_count=0, _config_updated_event=Event(),
         is_installed=Mock(return_value=False), approve_or_exit=Mock(side_effect=AssertionError("No real terms")),
     )

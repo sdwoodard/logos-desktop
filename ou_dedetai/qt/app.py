@@ -4,6 +4,7 @@ import logging
 import threading
 
 from ou_dedetai.app import App, UserExitedFromAsk
+from ou_dedetai import processes
 from .bridge import Completion, Progress, Prompt, Result, Ticket
 
 
@@ -57,11 +58,10 @@ class QtApp(App):
 
         def run():
             try:
-                result = operation(self, cancel)
+                with processes.owned(cancel):
+                    result = operation(self, cancel)
                 if not isinstance(result, Result):
                     raise RuntimeError("Operation did not return a checked result")
-                if cancel.is_set() and result.outcome == "succeeded":
-                    result = Result("cancelled", "Cancellation completed after work settled")
             except UserExitedFromAsk:
                 result = Result("cancelled", "Operation cancelled")
             except SystemExit:
@@ -92,6 +92,24 @@ class QtApp(App):
     def cancel_operation(self):
         self._cancel.set()
         self._cancel_prompts()
+
+    def checkpoint(self):
+        if self._cancel.is_set() or self.stop_requested.is_set():
+            raise UserExitedFromAsk
+
+    def approve_or_exit(self, question, context=None):
+        if not self.approve(question, context):
+            raise UserExitedFromAsk
+        return True
+
+    @property
+    def superuser_command(self):
+        import shutil
+        from ou_dedetai.system import SuperuserCommandNotFound
+
+        if not shutil.which("pkexec"):
+            raise SuperuserCommandNotFound("Graphical dependency installation requires pkexec")
+        return "pkexec"
 
     def _cancel_prompts(self):
         with self._prompt_lock:
@@ -129,6 +147,10 @@ class QtApp(App):
         ticket = self.active
         if ticket is not None and not self.stop_requested.is_set():
             self.bridge.post(progress=Progress(ticket, message, percent))
+
+    def observe_manager(self, manager, message="", percent=None):
+        if not self.stop_requested.is_set():
+            self.bridge.observation.emit(manager, message)
 
     def request_close(self, reason="Controller closed", intended=True):
         self.stop_requested.set()

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 
 try:
     import PySide6  # noqa: F401
@@ -76,7 +77,7 @@ class TestQtFrontend(QtCase):
             entered.set()
             cancel.wait(3)
             settle.wait(3)
-            return Result("succeeded", "Should not be shown")
+            return Result("cancelled", "Cancelled after cleanup")
 
         window.start(operation)
         self.assertTrue(entered.wait(2))
@@ -91,6 +92,25 @@ class TestQtFrontend(QtCase):
         self.pump(lambda: window.app.active is None)
         self.assertEqual(seen, ["cancelled"])
         self.assertTrue(window.install.continue_button.isEnabled())
+
+    def test_late_cancel_preserves_a_committed_result(self):
+        window = self.window()
+        entered, settle = threading.Event(), threading.Event()
+        committed = self.root / "committed"
+
+        def operation(app, cancel):
+            committed.write_text("complete")
+            entered.set()
+            settle.wait(3)
+            return Result("succeeded", "Committed before cancellation")
+
+        window.start(operation)
+        self.assertTrue(entered.wait(2))
+        window.cancel.click()
+        settle.set()
+        self.pump(lambda: window.app.active is None)
+        self.assertEqual(committed.read_text(), "complete")
+        self.assertEqual(window.status.text(), "Committed before cancellation")
 
     def test_prompt_confirm_cancel_escape_x_and_parent_close_release_waiters(self):
         window = self.window()
@@ -218,8 +238,66 @@ class TestQtFrontend(QtCase):
         with self.assertRaisesRegex(RuntimeError, "outside the Qt"):
             window.app.ask("Invalid UI thread call", ["Yes"])
 
+    def test_callback_failure_preserves_following_and_later_queued_work(self):
+        window = self.window()
+        seen = []
+
+        def broken():
+            raise ValueError("Intended queued callback failure")
+
+        with patch("ou_dedetai.qt.bridge.logging.exception") as report:
+            window.bridge.post(broken)
+            window.bridge.post(lambda: seen.append("following"))
+            self.pump(lambda: seen == ["following"])
+            report.assert_called_once()
+        window.bridge.post(lambda: seen.append("later"))
+        self.pump(lambda: seen == ["following", "later"])
+
 
 class TestNoQtCLI(unittest.TestCase):
+    def test_frontend_selection_accepts_wayland_and_retains_terminal_and_legacy_aliases(self):
+        from unittest.mock import Mock
+        from ou_dedetai import main, maintenance, system
+        with patch.dict(os.environ, {"WAYLAND_DISPLAY": "fixture-wayland"}, clear=True):
+            self.assertEqual(system.get_dialog(), "qt")
+        with patch.dict(os.environ, {"DIALOG": "tk"}, clear=True):
+            self.assertEqual(system.get_dialog(), "qt")
+        with patch.dict(os.environ, {}, clear=True), patch.object(sys, "__stdin__", Mock(isatty=lambda: True)):
+            self.assertEqual(system.get_dialog(), "tui")
+        with patch.dict(os.environ, {}, clear=True), patch.object(sys, "__stdin__", None):
+            with self.assertRaises(maintenance.MaintenanceError):
+                system.get_dialog()
+        with patch.object(main, "start_graphical") as start:
+            selected = Mock(dialog="tk")
+            main.run_control_panel(selected)
+            start.assert_called_once_with(selected)
+
+    def test_explicit_gui_without_optional_dependency_fails_with_actionable_message(self):
+        import tempfile
+        program = '''
+import importlib.abc,sys
+class NoQt(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith("PySide6"):
+            raise ModuleNotFoundError("Qt omitted by this fixture", name="PySide6")
+sys.meta_path.insert(0, NoQt())
+from ou_dedetai import main
+sys.argv = ["logos-desktop", "-c", sys.argv[1], "--dialog", "qt"]
+main.main()
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = root / "selected.json"
+            selected.write_text("{}")
+            env = dict(os.environ, HOME=str(root), XDG_STATE_HOME=str(root / "state"),
+                       XDG_CONFIG_HOME=str(root / "config"), XDG_CACHE_HOME=str(root / "cache"))
+            result = subprocess.run([sys.executable, "-B", "-c", program, str(selected)],
+                                    capture_output=True, text=True, env=env, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("logos-desktop[gui]", result.stderr)
+            self.assertIn("--dialog tui", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
     def test_cli_help_and_status_do_not_import_qt_or_initialize_a_display(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temporary:
@@ -230,7 +308,7 @@ class TestNoQtCLI(unittest.TestCase):
 import importlib.abc,sys
 class NoQt(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith(("PySide6", "ou_dedetai.qt")):
+        if fullname.startswith(("PySide6", "ou_dedetai.qt", "tkinter", "ou_dedetai.gui")):
             raise AssertionError("CLI imported Qt")
 sys.meta_path.insert(0, NoQt())
 from ou_dedetai import main

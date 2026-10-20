@@ -1,10 +1,11 @@
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import os
 from typing import Any, Optional
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
+import threading
 
 from ou_dedetai import network, utils, constants, wine, paths, maintenance, runtime, config_store
 
@@ -199,7 +200,9 @@ class EphemeralConfiguration:
     dialog: Optional[str] = None
     """Override if we want to select a specific type of front-end
     
-    Accepted values: tk (GUI), curses (TUI), cli (CLI)"""
+    Qt and Textual are current interfaces. Legacy tk/curses/cli spellings are
+    normalized by entry-point and restart dispatch.
+    """
 
     wine_args: Optional[list[str]] = None
     """Arguments when running wine from cli"""
@@ -424,7 +427,7 @@ class PersistentConfiguration:
         return output
 
     @runtime.configuration_writer
-    def write_config(self, *, checked=False, config_file_path=None):
+    def write_config(self, *, checked=False, config_file_path=None, validator=None):
         """Commit only changed fields, preserving saved values hidden by overrides."""
         path = config_file_path or getattr(self, "_file_path", None) or LegacyConfiguration.config_file_path()
         output = self._as_dict()
@@ -436,6 +439,7 @@ class PersistentConfiguration:
             source_bytes=getattr(self, "_file_bytes", None),
             overrides=getattr(self, "_environment", {}),
             expected=getattr(self, "_saved", None),
+            validator=validator,
         )
         loaded = self.from_document(saved.document, getattr(self, "_environment", {}))
         loaded._file_path = str(config_store.absolute_path(path))
@@ -543,6 +547,7 @@ class Config:
         )
         self.rebind(self._raw)
         self.persistence_warning = ""
+        self._write_validation = threading.local()
         self.invalidate_context()
         self._download_dir = self._user_download_dir = None
         self._network = self._create_network_requests_with_hook()
@@ -639,7 +644,10 @@ class Config:
     def _write(self, *, checked=False) -> None:
         """Save the selected profile and report a committed portable-copy failure."""
         destination = getattr(self._overrides, "config_destination", None) or self._overrides.config_path
-        saved = self._raw.write_config(checked=True, config_file_path=destination)
+        options = {"checked": True, "config_file_path": destination}
+        if self.write_validator is not None:
+            options["validator"] = self.write_validator
+        saved = self._raw.write_config(**options)
         self._overrides.config_path = destination
         if isinstance(self._overrides, EphemeralConfiguration):
             self.rebind(self._raw)
@@ -647,6 +655,20 @@ class Config:
         self.app._config_updated_event.set()
         if saved.warning:
             logging.warning(saved.warning)
+
+    @property
+    def write_validator(self):
+        return getattr(getattr(self, "_write_validation", None), "callback", None)
+
+    @contextmanager
+    def validated_writes(self, validator):
+        """Check merged documents before any operation-owned configuration publication."""
+        previous = self.write_validator
+        self._write_validation.callback = validator
+        try:
+            yield
+        finally:
+            self._write_validation.callback = previous
 
     def _relative_from_install_dir(self, path: Path | str) -> str:
         """Store descendants relatively without changing external path identity."""

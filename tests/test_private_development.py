@@ -1,27 +1,13 @@
-import importlib
-import json
 import stat
 import tempfile
-from threading import Event, RLock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import constants, control, network, releases, tui_app, updates, utils
+from ou_dedetai import constants, control, network, tui_app, updates, utils
 from ou_dedetai.config import Config
-from ou_dedetai.app import App, UserExitedFromAsk
-
-try:
-    importlib.import_module("tkinter")
-except ImportError as error:
-    GUI_IMPORT_ERROR = str(error)
-    gui_app = None
-else:
-    from ou_dedetai import gui_app
-
-    GUI_IMPORT_ERROR = ""
 
 
 class TestPrivateUpdates(unittest.TestCase):
@@ -203,112 +189,3 @@ class TestPrivateSupport(unittest.TestCase):
                 self.assertEqual(app.ask.call_count, 1)
                 self.assertFalse(any(call.args[0].startswith("Wrote support") for call in app.status.call_args_list))
                 browser.assert_not_called()
-
-
-@unittest.skipIf(gui_app is None, f"Native Tk import unavailable: {GUI_IMPORT_ERROR}")
-class TestPrivateGuiUpdates(unittest.TestCase):
-    def test_advanced_release_and_wine_callbacks_preserve_custom_destination(self):
-        from tests.test_config import configuration
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            selected = root / "selected.json"
-            install = root / "custom"
-            selected.write_text(json.dumps({
-                "install_dir": str(install), "faithlife_product": "Logos", "faithlife_product_version": "10",
-                "faithlife_product_release": "38.0.0.0", "wine_binary": "data/bin/wine",
-            }))
-            with patch.object(constants, "STATE_DIR", str(root / "state/app")):
-                window = object.__new__(gui_app.InstallerWindow)
-                window.conf = configuration(selected)
-                window.gui = Mock()
-                window.gui.releasevar.get.return_value = "40.1.0.0"
-                window.gui.winevar.get.return_value = str(install / "tools/wine")
-                window.set_release()
-                self.assertEqual(window.conf.install_dir, str(install))
-                window.set_wine()
-                self.assertEqual(window.conf.install_dir, str(install))
-                self.assertEqual(configuration(selected).install_dir, str(install))
-
-    def test_stale_wine_snapshot_does_not_render_latest_recommended(self):
-        window = object.__new__(gui_app.ControlWindow)
-        window.conf = SimpleNamespace(
-            _raw=SimpleNamespace(wine_binary_code="AppImage", wine_binary="fixture.AppImage"),
-            recommended_wine_status=(-1, "Recommended Wine information is stale or unavailable"),
-        )
-        window.gui = Mock()
-        window.is_installed = Mock(return_value=True)
-        with (patch.object(gui_app.ControlWindow, "clear_status"), patch.object(gui_app.gui, "ToolTip") as tooltip):
-            window.update_latest_appimage_button()
-        self.assertIn("stale", tooltip.call_args.args[1])
-        self.assertNotIn("already set to the latest", tooltip.call_args.args[1])
-
-    def test_post_uninstall_empty_selection_still_offers_install_controls(self):
-        window = object.__new__(gui_app.ControlWindow)
-        window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None))
-        window.gui = Mock()
-        window.is_installed = Mock(return_value=False)
-        window.update_app_button()
-        window.gui.app_button.state.assert_called_with(["!disabled"])
-        window.gui.app_install_advanced.state.assert_called_with(["!disabled"])
-
-    def test_native_save_cancellation_and_prompt_retry_cancel(self):
-        window = object.__new__(gui_app.ControlWindow)
-        window.root = Mock()
-        window.conf = SimpleNamespace(_overrides=SimpleNamespace(assume_yes=False))
-        with patch.object(gui_app.fd, "asksaveasfilename", return_value=""):
-            self.assertIsNone(gui_app.GuiApp._ask(window, "Output", constants.PROMPT_OPTION_NEW_FILE))
-        window._ask = Mock(side_effect=["invalid", None])
-        with self.assertRaises(UserExitedFromAsk):
-            App.ask(window, "Choose", ["valid"])
-        self.assertEqual(window._ask.call_count, 2)
-
-    def test_binary_window_initialization_does_not_start_release_discovery(self):
-        def initialize_fixture(window, *args, **kwargs):
-            window.conf = SimpleNamespace(_raw=SimpleNamespace(faithlife_product=None), _network=Mock(),
-                                          app_release_channel="stable")
-            window.logos = Mock()
-            window._closing = Event()
-            window._hook_lock = RLock()
-            window.config_updated_hooks = []
-
-        with (
-            patch.object(constants, "RUNMODE", "binary"),
-            patch.object(gui_app.GuiApp, "__init__", initialize_fixture),
-            patch.object(gui_app.ControlWindow, "start_thread") as start_thread,
-            patch.object(gui_app.ControlWindow, "clear_status"),
-            patch.object(gui_app.ControlWindow, "_config_update_hook"),
-            patch.object(gui_app.ControlWindow, "update_product_button"),
-            patch.object(gui_app.ControlWindow, "update_latest_appimage_button"),
-            patch.object(gui_app.gui, "ToolTip"),
-            patch.object(utils, "compare_logos_linux_installer_version") as compare,
-        ):
-            widgets = Mock()
-            window = gui_app.ControlWindow(Mock(), widgets, Mock())
-
-        compare.assert_not_called()
-        start_thread.assert_not_called()
-        window.logos.start_monitoring.assert_called_once()
-        label_text = widgets.update_lli_label.config.call_args.kwargs["text"]
-        self.assertIn(constants.APP_SELF_UPDATE_DISABLED_MESSAGE, label_text)
-        widgets.update_lli_button.state.assert_called_with(["disabled"])
-
-    def test_unavailable_binary_release_keeps_label_and_refresh_defined(self):
-        window = object.__new__(gui_app.ControlWindow)
-        window._controller_checks = SimpleNamespace(
-            result=releases.ReleaseLookup(status="empty", message="No controller release information is available"),
-            eligibility_message="",
-        )
-        window.gui = Mock()
-
-        with (
-            patch.object(constants, "APP_SELF_UPDATES_ENABLED", True),
-            patch.object(constants, "RUNMODE", "binary"),
-            patch.object(gui_app.ControlWindow, "clear_status"),
-            patch.object(gui_app.gui, "ToolTip") as tooltip,
-        ):
-            window.update_controller_version()
-
-        self.assertIn("latest: unavailable", window.gui.update_lli_label.config.call_args.kwargs["text"])
-        window.gui.update_lli_button.state.assert_called_once_with(["disabled"])
-        self.assertIn("No controller release information", tooltip.call_args.args[1])

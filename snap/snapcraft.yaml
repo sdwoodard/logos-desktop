@@ -25,10 +25,6 @@ environment:
   WINE_EXE: "$SNAP/bin/wine64"
   WINEBIN_CODE: "Custom"
   # Define runtime variables.
-  # https://forum.snapcraft.io/t/modulenotfounderror-no-module-named-tkinter/28707/5
-  TCL_LIBRARY: $SNAP/usr/share/tcltk/tcl8.6
-  TK_LIBRARY: $SNAP/usr/share/tcltk/tk8.6
-  TCLLIBPATH: $SNAP/usr/lib/tcltk/$CRAFT_ARCH_TRIPLET_BUILD_FOR/tk8.6
   PYTHON_SITE_PKGS: $SNAP/lib/python3.12/site-packages
   PYTHON_APT_PKGS: $SNAP/usr/lib/python3.12
   PYTHON_LIB_DYNLD: $SNAP/usr/lib/python3.12/lib-dynload
@@ -113,7 +109,6 @@ parts:
     stage-packages:
       - libncurses6
       - libncursesw6
-      - python3-tk
 
   oudedetai-dump:
     source: https://github.com/sdwoodard/logos-desktop.git

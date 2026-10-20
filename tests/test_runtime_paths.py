@@ -140,6 +140,7 @@ class TestRuntimePaths(unittest.TestCase):
                 self.assertEqual(config.wine_binary, str(root / "install/data/bin" / filename))
                 config.app.ask.assert_not_called()
                 app = SimpleNamespace(
+                    checkpoint=Mock(),
                     conf=config, installer_step=0, installer_step_count=0, status=Mock(), _config_updated_event=Mock(),
                 )
 
@@ -171,7 +172,9 @@ class TestRuntimePaths(unittest.TestCase):
             config = fixture_config(root / "install")
             custom = root / "custom/stable.AppImage"
             config.wine_binary = str(custom)
-            app = SimpleNamespace(conf=config, installer_step=0, installer_step_count=0, status=Mock())
+            app = SimpleNamespace(
+                conf=config, installer_step=0, installer_step_count=0, status=Mock(), checkpoint=Mock(),
+            )
             with (
                 patch.object(installer, "ensure_sys_deps"),
                 patch.object(installer, "check_system_compatibility"),

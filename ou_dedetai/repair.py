@@ -70,9 +70,9 @@ def detect_broken_install(
 # It's possible to add a control panel function to app and make this generic
 def run_under_app(ephemeral_config: EphemeralConfiguration, func: Callable[[App], None]): 
     dialog = ephemeral_config.dialog or ou_dedetai.system.get_dialog()
-    if dialog == 'tk':
-        from ou_dedetai import gui_app
-        return gui_app.start_gui_app(ephemeral_config, func)
+    if dialog in ('qt', 'tk'):
+        from ou_dedetai.main import start_graphical
+        return start_graphical(ephemeral_config, function=func)
     else:
         app = ou_dedetai.cli.CLI(ephemeral_config)
         func(app)
@@ -86,13 +86,13 @@ def inspect(context):
     return detect_broken_install(appdata, context.product)
 
 
-def repair_installation(app):
+def repair_installation(app, *, configuration_changes=None, require_target=False):
     context = maintenance.Context.from_app(app, prompt=False)
     if not app.approve(
         f"Repair {context.product} in {context.prefix}?",
         "This reconciles pending restore/runtime records and reinstalls after a detected failed upgrade.",
     ):
-        return
+        return False
     with maintenance.installing(app) as selected:
         if selected != context:
             raise maintenance.MaintenanceError("Recovery selection changed. Inspect it before retrying repair")
@@ -100,13 +100,20 @@ def repair_installation(app):
         if failure != FailureType.FailedUpgrade:
             app.status("Pending records reconciled. No failed upgrade requires reinstallation")
             return
-        previous = app.conf._raw.faithlife_product_release
-        app.conf._change(faithlife_product_release=None)
+        if require_target and not configuration_changes:
+            raise maintenance.MaintenanceError("Refresh stable release information before reinstalling this product")
+        changes = configuration_changes or {"faithlife_product_release": None}
+        previous = {name: getattr(app.conf._raw, name) for name in changes}
+        app.conf._change(**changes)
         try:
             app.status(f"Recovering {selected.product} after failed upgrade")
             ou_dedetai.installer.install(app)
         except BaseException:
-            app.conf._change(faithlife_product_release=previous)
+            if require_target:
+                with app.conf.validated_writes(None):
+                    app.conf._change(**previous)
+            else:
+                app.conf._change(**previous)
             raise
         app.status(f"Recovery of {selected.product} complete")
 

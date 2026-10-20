@@ -254,29 +254,20 @@ def reboot(superuser_command: str):
 
 
 def get_dialog() -> str:
-    """Returns which frontend the user prefers
-    
-    Uses "DIALOG" from environment if found,
-    otherwise opens curses if the user has a tty
-    
-    Returns:
-        dialog - tk (graphical), curses (terminal ui), or cli (command line)
-    """
-    if not os.environ.get('DISPLAY'):
-        logging.critical("The installer does not work unless you are running a display")
-
+    """Choose Qt on a desktop or the terminal frontend on a usable terminal."""
     dialog = os.getenv('DIALOG')
-    # find dialog
     if dialog is not None:
         dialog = dialog.lower()
-        if dialog not in ['cli', 'curses', 'tk']:
-            print("Valid values for DIALOG are 'cli', 'curses' or 'tk'.", file=sys.stderr)
+        if dialog not in ['cli', 'curses', 'tui', 'qt', 'tk']:
+            print("Valid values for DIALOG are 'cli', 'curses', 'tui', 'qt' or 'tk'.", file=sys.stderr)
             sys.exit(1)
-        return dialog
-    elif sys.__stdin__ is not None and sys.__stdin__.isatty():
-        return 'curses'
-    else:
-        return 'tk'
+        return {"tk": "qt", "cli": "tui", "curses": "tui"}.get(dialog, dialog)
+    if os.environ.get('WAYLAND_DISPLAY') or os.environ.get('DISPLAY'):
+        return 'qt'
+    if sys.__stdin__ is not None and sys.__stdin__.isatty():
+        return 'tui'
+    from .maintenance import MaintenanceError
+    raise MaintenanceError("Open a desktop or terminal for the control panel, or select a command such as --status")
 
 
 def get_architecture() -> Tuple[str, int]:

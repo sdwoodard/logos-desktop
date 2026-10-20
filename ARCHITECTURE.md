@@ -1,68 +1,54 @@
-# ARCHITECTURE.md
+# Architecture
 
-## Module map
+## Frontends and dispatch
 
-- [ou_dedetai/app.py](ou_dedetai/app.py) — abstract `App` (ABC). Provides
-  `ask()`/`approve()`/`info()`/`status()`/`exit()`, threading via `start_thread()`,
-  config-update hooks, and `self.conf` / `self.logos` handles. Concrete UIs implement
-  `_ask()`/`_info()`/`_status()`.
-- UI implementations:
-  - [ou_dedetai/cli.py](ou_dedetai/cli.py) — `CLI`
-  - [ou_dedetai/tui_app.py](ou_dedetai/tui_app.py) — `TUI` (curses/dialog)
-  - [ou_dedetai/gui_app.py](ou_dedetai/gui_app.py) + [ou_dedetai/gui.py](ou_dedetai/gui.py) — `GuiApp` (Tkinter)
-- [ou_dedetai/main.py](ou_dedetai/main.py) — entry point / dispatcher.
-- Domain modules:
-  - [ou_dedetai/installer.py](ou_dedetai/installer.py) — install orchestration (`ensure_*` functions)
-  - [ou_dedetai/wine.py](ou_dedetai/wine.py) — Wine integration
-  - [ou_dedetai/system.py](ou_dedetai/system.py) — subprocess and platform detection
-  - [ou_dedetai/logos.py](ou_dedetai/logos.py) — `LogosManager` lifecycle and `State` enum
-  - [ou_dedetai/config.py](ou_dedetai/config.py) — Legacy/Persistent/Ephemeral config dataclasses
-  - [ou_dedetai/constants.py](ou_dedetai/constants.py) — paths, RUNMODE, version
-  - [ou_dedetai/database.py](ou_dedetai/database.py) — SQLite context managers
-  - Others: `network.py`, `backup.py`, `control.py`, `repair.py`, `utils.py`, `msg.py`
-- **Version source of truth:** `ou_dedetai.constants.LLI_CURRENT_VERSION` —
-  [pyproject.toml](pyproject.toml) reads the package version from this attribute.
+`main.py` selects the graphical control panel on Wayland or X11 and the Textual
+panel in a headless terminal. Explicit command actions use `cli.py` without
+importing Qt. `--dialog qt` and `--dialog tui` select an interface. The retained
+`tk` spelling is an alias for Qt and does not load a Tk implementation.
 
-## Operations pattern
+Install the `gui` extra for graphical use. PySide6 Essentials supplies the Qt
+Widgets, GUI, Core and D-Bus components. A missing optional GUI dependency produces
+an actionable message. CLI help, status and recovery remain usable without it.
 
-Operations are UI-agnostic domain functions that take `app: App`, call
-`app.ask()`/`app.status()`/`app.approve()` for user interaction, and mutate
-`app.conf` for persistence. The UI layer calls them; it never implements them.
+## Qt boundary
 
-| Module | Purpose |
-|--------|---------|
-| `installer.py` | Chained `ensure_*` steps; `install(app)` is the top-level sequencer |
-| `control.py` | Post-install actions: uninstall, repair index, get support, edit file |
-| `logos.py` / `LogosManager` | Start/stop/index the Logos process; owns `State` enum (RUNNING/STOPPED/STARTING/STOPPING) |
-| `backup.py` / `repair.py` | Backup/restore and installation repair detection |
-| `wine.py` | Wine process execution and configuration |
+`qt/startup.py` owns the application, theme and window lifetime. `qt/app.py`
+adapts the shared `App` interactions to owned workers. `qt/bridge.py` delivers
+queued results, bounded progress and independent process observations.
+`qt/dialogs.py` resolves each prompt once on confirmation, rejection or close.
 
-## Shared state
+Pages render immutable installation snapshots. `qt/services.py` performs discovery,
+inspection and operations away from the GUI thread. Installation controls remain
+draft values until confirmed. Qt exposes Logos and latest stable releases, with
+explicit refusal of conflicting invocation and custom-installer overrides.
+Maintenance and settings use the same backend services as the terminal frontends.
 
-All mutable state lives on the `App` instance:
+`qt/theme.py` persists System, Light or Dark independently of installation profiles.
+System follows Qt palette/scheme events and the asynchronous desktop appearance
+portal. Semantic colors update without polling desktop configuration. Most controls
+retain native styling. The primary action uses a palette-derived fill and text
+contrast, with explicit disabled and focus states.
 
-- **`app.conf: Config`** — three-layer config:
-  - `_raw: PersistentConfiguration` — JSON on disk (`~/.config/FaithLife-Community/oudedetai.json`, overridable via `$CONFIG_FILE`); every mutation calls `_write()`.
-  - `_overrides: EphemeralConfiguration` — CLI args / env vars; never persisted.
-  - `_network: NetworkRequests` ([network.py](ou_dedetai/network.py)) — download/version-check cache (`network.json`, 12h lifetime).
-- **`app.logos: LogosManager`** — process-lifecycle state (PIDs, `State` enum).
+## Domain services
 
-Config mutations fire `config_updated_hooks` via a background daemon thread
-watching `_config_updated_event`. UIs subscribe to redraw on change.
+| Module | Responsibility |
+| --- | --- |
+| `app.py` | Interaction contract, owned workers, subscriptions and shutdown |
+| `config.py`, `config_store.py` | Precedence, profile projection, migration and atomic merged saves |
+| `maintenance.py` | Prefix admission, role leases, quiescence and recovery exclusions |
+| `logos.py`, `processes.py` | Selected process identity, observations and bounded helper execution |
+| `installer.py`, `wine.py`, `runtime.py` | Checked installation, Wine commands and recoverable runtime selection |
+| `artifacts.py`, `network.py`, `metadata.py`, `releases.py`, `updates.py` | Accepted artifacts, bounded metadata and controller updates |
+| `backup.py`, `backup_store.py` | Verified snapshots and recoverable user-data replacement |
+| `control.py`, `repair.py`, `database.py` | Maintenance, explicit recovery and owned database policies |
 
-## Control flow
+Configuration writes reload and patch the selected file. Operation-scoped validators
+inspect the merged document before publication. Runtime activation adopts the exact
+document it validated and published rather than rereading a mutable file. Recovery
+preserves unexpected changes instead of guessing which data may be overwritten.
 
-```
-main() → setup_config() → run(ephemeral_config, action)
-  → App subclass.__init__   # loads Config + LogosManager, starts hooks daemon
-  → UI event / user action
-      → operation(app)              # e.g. installer.install, logos.start
-          → app.ask/status/approve  # dispatched to _ask/_status/_info
-          → app.conf mutation       # triggers hooks → UI redraws
-```
-
-| UI | Interaction model | Notable detail |
-|----|-------------------|----------------|
-| `CLI` | Stdout + blocking stdin in a background thread | Queues hand prompts/responses across threads |
-| `TUI` | Curses screens (`MenuScreen`, `ConsoleScreen`, `HeaderScreen`) | Menu choices call operations directly |
-| `GuiApp` | Tkinter `InstallerWindow` + `ControlWindow` | Callbacks dispatch operations via `start_thread()` |
+Normal controller close cancels prompts and observations, waits for owned mutations
+to settle and detaches Logos. Explicit Stop validates selected process identities.
+An indexer launch is distinct from its observed completion. Unknown worker exit
+status is retained rather than inferred from a successful launcher exit.

@@ -263,7 +263,7 @@ def activate(app, accepted):
             _safe_target(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             _safe_target(path)
-        from .config import PersistentConfiguration
+        from .config import PersistentConfiguration, environment_document
         from . import config_store
 
         source = conf._overrides.config_path
@@ -278,6 +278,7 @@ def activate(app, accepted):
         with config_store.prepare(
             destination, changes, source_path=source, source_bytes=getattr(conf._raw, "_file_bytes", None),
             expected=getattr(conf._raw, "_saved", None),
+            validator=getattr(conf, "write_validator", None),
         ) as prepared:
             auxiliary = {target.path for target, _, _ in prepared.backups}
             if auxiliary.intersection(links):
@@ -330,9 +331,12 @@ def activate(app, accepted):
                 "wine_binary": changes["wine_binary"], "wine_binary_code": "AppImage",
                 "SELECTED_APPIMAGE_FILENAME": None,
             }
-        conf._raw = PersistentConfiguration.load_from_path(
-            destination, environment=getattr(conf._overrides, "environment", True),
-        )
+        environment = getattr(conf._overrides, "environment", None)
+        if not isinstance(environment, dict):
+            environment = {} if environment is False else environment_document()
+        conf._raw = PersistentConfiguration.from_document(prepared.document, environment)
+        conf._raw._file_path = str(config_store.absolute_path(destination))
+        conf._raw._file_bytes = prepared.content
         if callable(getattr(conf, "rebind", None)):
             conf.rebind(conf._raw)
         conf._overrides.wine_appimage_path = None
