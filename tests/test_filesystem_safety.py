@@ -63,6 +63,42 @@ class TestUninstallBoundaries(unittest.TestCase):
         self.assertEqual(unknown_log.read_bytes(), b"unrelated log")
         self.app.status.assert_called_with("Uninstalled")
 
+    def test_new_only_portable_installation_can_be_uninstalled(self):
+        legacy = self.install / f"{constants.BINARY_NAME}.json"
+        portable = self.install / constants.PORTABLE_CONFIG_NAME
+        legacy.rename(portable)
+        self.app.conf._overrides.config_path = str(portable)
+        self.app.approve.side_effect = [False, True]
+
+        self.assertTrue(control.uninstall(self.app))
+
+        self.assertFalse(self.install.exists())
+        self.assertTrue(self.config.exists())
+        self.app.status.assert_called_with("Uninstalled")
+
+    def test_mismatched_portable_metadata_preserves_all_targets(self):
+        original_config = self.config.read_bytes()
+        legacy = self.install / f"{constants.BINARY_NAME}.json"
+        matching_legacy = legacy.read_bytes()
+        sentinel = self.install / "data/wine64_bottle/library"
+        sentinel.write_bytes(b"library sentinel")
+
+        for filename in (constants.PORTABLE_CONFIG_NAME, legacy.name):
+            portable = self.install / filename
+            with self.subTest(filename=filename):
+                portable.write_text(json.dumps({"install_dir": str(self.root / "other")}))
+                with self.assertRaisesRegex(ValueError, "ownership is not established"):
+                    control.uninstall(self.app)
+
+                self.assertEqual(self.config.read_bytes(), original_config)
+                self.assertEqual(sentinel.read_bytes(), b"library sentinel")
+                self.assertTrue(portable.exists())
+                self.app.approve.assert_not_called()
+
+                if portable != legacy:
+                    self.assertEqual(legacy.read_bytes(), matching_legacy)
+                    portable.unlink()
+
     def test_writer_started_during_confirmation_prevents_any_removal(self):
         processes = []
         prefix = self.install / "data/wine64_bottle"

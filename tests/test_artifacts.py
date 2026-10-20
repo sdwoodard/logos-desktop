@@ -3,13 +3,15 @@ import multiprocessing
 from pathlib import Path
 import tempfile
 import struct
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
 import olefile
 
-from ou_dedetai import artifacts, constants, maintenance
+from ou_dedetai import artifacts, constants, installer, maintenance
+from ou_dedetai.app import UserExitedFromAsk
 from tests.artifact_fixtures import appimage, msi, winetricks_zip
 
 
@@ -31,6 +33,28 @@ def competing_store_use(state, ready, finish, results):
 
 
 class TestArtifacts(unittest.TestCase):
+    def test_installer_counters_reset_after_success_failure_and_cancellation(self):
+        for error in (None, OSError("fixture failure"), UserExitedFromAsk()):
+            app = SimpleNamespace(
+                conf=SimpleNamespace(faithlife_product_release="38.0.0.0"),
+                status=Mock(), _config_updated_event=Mock(),
+            )
+
+            def install_steps(selected_app):
+                selected_app.installer_step = 3
+                selected_app.installer_step_count = 9
+                if error:
+                    raise error
+
+            with patch.object(installer, "ensure_launcher_shortcuts", side_effect=install_steps):
+                if error:
+                    with self.assertRaises(type(error)):
+                        installer._install(app)
+                else:
+                    installer._install(app)
+            self.assertEqual(app.installer_step, 0)
+            self.assertEqual(app.installer_step_count, 0)
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -59,6 +83,88 @@ class TestArtifacts(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(artifacts.ArtifactError):
                 self.acquire(response(b"error", status))
             self.assert_preserved()
+
+    def test_cancel_during_cached_hash_or_copy_never_falls_back_to_network(self):
+        content = b"#!/bin/sh\n" + b"# fixture\n" * 300000
+        source = self.root / "cached-script"
+        source.write_bytes(content)
+        spec = artifacts.ArtifactSpec(
+            self.spec.url, "winetricks", "winetricks",
+            artifacts.Digest("sha256", hashlib.sha256(content).hexdigest(), "fixture"),
+        )
+        for phase in ("Checking cached", "Copying cached"):
+            active = False
+            checkpoints = 0
+
+            def status(message, percent):
+                nonlocal active
+                active = message.startswith(phase)
+
+            def checkpoint():
+                nonlocal checkpoints
+                if active:
+                    checkpoints += 1
+                    if checkpoints == 2:
+                        raise UserExitedFromAsk
+
+            with (
+                self.subTest(phase=phase),
+                patch.object(artifacts.requests, "get") as get,
+                self.assertRaises(UserExitedFromAsk),
+            ):
+                artifacts.acquire(spec, self.root, [source], status, checkpoint=checkpoint)
+            get.assert_not_called()
+            self.assertEqual(source.read_bytes(), content)
+            self.assert_preserved()
+
+    def test_cancel_after_received_chunk_cleans_stage_and_preserves_old_target(self):
+        cancelled = False
+        transfer = response()
+
+        def chunks(chunk_size):
+            nonlocal cancelled
+            yield b"x" * chunk_size
+            yield b"x" * chunk_size
+            stages = list(self.root.glob(".artifacts/.incoming-*/tag.zip"))
+            self.assertGreater(stages[0].stat().st_size, 0)
+            cancelled = True
+            yield b"second chunk"
+
+        def checkpoint():
+            if cancelled:
+                raise UserExitedFromAsk
+
+        transfer.iter_content = chunks
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=transfer),
+            self.assertRaises(UserExitedFromAsk),
+        ):
+            artifacts.acquire(self.spec, self.root, checkpoint=checkpoint)
+        self.assert_preserved()
+
+    def test_late_cancel_after_artifact_publication_returns_accepted_bytes(self):
+        cancelled = False
+        rename = artifacts.paths.rename_no_replace
+
+        def publish(source, target):
+            nonlocal cancelled
+            rename(source, target)
+            cancelled = True
+
+        def checkpoint():
+            if cancelled:
+                raise UserExitedFromAsk
+
+        with (
+            patch.object(artifacts.paths, "rename_no_replace", side_effect=publish),
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(self.content)),
+        ):
+            accepted = artifacts.acquire(self.spec, self.root, checkpoint=checkpoint)
+        self.assertTrue(cancelled)
+        self.assertEqual(accepted.check().read_bytes(), self.content)
+        self.assert_preserved()
 
     def test_get_size_and_digest_mismatch(self):
         from base64 import b64encode

@@ -26,6 +26,11 @@ class CopyCancelled(BackupError):
     """The operation stopped before publication."""
 
 
+def checkpoint(stop):
+    if stop is not None and stop.is_set():
+        raise CopyCancelled("Operation cancelled before publication")
+
+
 def identity(info):
     return [info.st_dev, info.st_ino]
 
@@ -87,7 +92,7 @@ class Directory(AbstractContextManager):
         os.close(self.fd)
 
 
-def read_json(path: Path):
+def read_json(path: Path, stop=None):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor) as source:
         info = os.fstat(source.fileno())
@@ -100,7 +105,16 @@ def read_json(path: Path):
                     raise BackupError("Duplicate metadata key")
                 result[key] = value
             return result
-        return json.load(source, object_pairs_hook=unique_keys)
+        chunks = []
+        while True:
+            checkpoint(stop)
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        result = json.loads("".join(chunks), object_pairs_hook=unique_keys)
+        checkpoint(stop)
+        return result
 
 
 def sync_directory(path):
@@ -160,6 +174,7 @@ def inventory(root: Path, stop=None):
     states = {}
     with Directory(root) as directory:
         def visit(parent, relative):
+            checkpoint(stop)
             info = parent.lstat()
             if stat.S_ISLNK(info.st_mode) or info.st_dev != directory.info.st_dev:
                 raise BackupError(f"Linked or mounted data entry is unsupported: {relative}")
@@ -176,6 +191,7 @@ def inventory(root: Path, stop=None):
                 raise BackupError(f"Unsupported data entry: {relative}")
 
         for name in ROOTS:
+            checkpoint(stop)
             child = directory.path / name
             states[name] = os.path.lexists(child)
             if states[name]:
@@ -186,7 +202,7 @@ def inventory(root: Path, stop=None):
     return {"roots": states, "entries": entries}
 
 
-def validate_manifest(manifest, product):
+def validate_manifest(manifest, product, stop=None):
     if (
         not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
         or manifest.get("product") != product or not isinstance(manifest.get("id"), str)
@@ -200,6 +216,9 @@ def validate_manifest(manifest, product):
     if not any(roots.values()) or any(type(value) is not bool for value in roots.values()):
         raise BackupError("Backup has invalid root states")
     for name, record in entries.items():
+        checkpoint(stop)
+        if not isinstance(name, str):
+            raise BackupError("Backup inventory has an invalid path")
         parts = name.split("/")
         if (
             not parts or parts[0] not in ROOTS or not roots[parts[0]]
@@ -240,7 +259,7 @@ def verify_capacity(directory: Directory, manifest):
         raise BackupError("Destination is read-only or has insufficient space for the complete staged copy")
 
 
-def copy_payload(source: Path, destination: Path, manifest, stop=None, progress=None):
+def copy_payload(source: Path, destination: Path, manifest, stop=None, progress=None, phase=None):
     with Directory(source) as incoming, Directory(destination) as target:
         for name, expected in sorted(manifest["entries"].items()):
             if stop is not None and stop.is_set():
@@ -274,15 +293,19 @@ def copy_payload(source: Path, destination: Path, manifest, stop=None, progress=
                     directory.__exit__()
         incoming.validate()
         target.validate()
+    if phase:
+        phase("Verifying staged data…", None)
     verify_payload(destination, manifest, stop)
 
 
-def new_manifest(source, product, stop=None):
+def new_manifest(source, product, stop=None, *, source_identity=None):
     manifest = {
         "schema": SCHEMA, "id": secrets.token_hex(16), "product": product,
         "created": datetime.now(UTC).isoformat(), **inventory(source, stop),
     }
-    validate_manifest(manifest, product)
+    if source_identity is not None:
+        manifest["source"] = str(source_identity)
+    validate_manifest(manifest, product, stop)
     return manifest
 
 
@@ -433,7 +456,7 @@ def recover_pending_restore(context, app=None):
             ) from error
 
 
-def restore_payload(context, live_path, payload, manifest, stop=None, progress=None, precommit=None):
+def restore_payload(context, live_path, payload, manifest, stop=None, progress=None, precommit=None, phase=None):
     with Directory(live_path) as live, Directory(live_path.parent) as parent:
         verify_capacity(parent, manifest)
         name = ".logos-desktop-restore-" + secrets.token_hex(16)
@@ -448,7 +471,9 @@ def restore_payload(context, live_path, payload, manifest, stop=None, progress=N
                     sync_directory(transaction.path / child)
                 sync_directory(transaction.path)
                 sync_directory(parent.path)
-                copy_payload(payload, transaction.path / "new", manifest, stop, progress)
+                copy_payload(payload, transaction.path / "new", manifest, stop, progress, phase=phase)
+                if phase:
+                    phase("Verifying restore source and current data…", None)
                 verify_payload(payload, manifest, stop)
                 inventory(live.path, stop)
                 live.validate()
@@ -456,6 +481,9 @@ def restore_payload(context, live_path, payload, manifest, stop=None, progress=N
                 maintenance.assert_quiescent(context)
                 if precommit is not None:
                     precommit()
+                checkpoint(stop)
+                if phase:
+                    phase("Replacing verified data roots…", None)
                 record = {
                     "schema": SCHEMA, "prefix": str(context.prefix), "live": str(live_path),
                     "transaction": str(transaction_path), "live_identity": identity(live.info),
@@ -482,7 +510,8 @@ def restore_payload(context, live_path, payload, manifest, stop=None, progress=N
                         _move(live.path / root, transaction.path / "old" / root)
                     if record["new"][root] is not None:
                         _move(transaction.path / "new" / root, live.path / root)
-                verify_payload(live.path, manifest, stop)
+                # Finish or roll back the replacement once the journal is durable.
+                verify_payload(live.path, manifest)
                 record["phase"] = "committed"
                 _journal(context, record)
         except BaseException:

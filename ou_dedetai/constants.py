@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pwd
 import sys
 from pathlib import Path
 
@@ -75,21 +76,33 @@ else:
 
 CACHE_DIR = str(CACHE_BASE / 'logos-desktop')
 
-XDG_DATA_HOME = str(Path(os.getenv('XDG_DATA_HOME', str(Path.home() / '.local/share'))))
-DATA_HOME = str(Path(XDG_DATA_HOME)/ 'FaithLife-Community') 
-CONFIG_DIR = os.getenv("XDG_CONFIG_HOME", "~/.config") + "/FaithLife-Community"
-STATE_DIR = os.getenv("XDG_STATE_HOME", "~/.local/state") + "/FaithLife-Community"
+XDG_DATA_HOME = str(paths.xdg_base(os.getenv('XDG_DATA_HOME'), Path.home() / '.local/share'))
+DATA_HOME = str(Path(XDG_DATA_HOME) / 'logos-desktop')
+CONFIG_BASE = paths.xdg_base(os.getenv('XDG_CONFIG_HOME'), Path.home() / '.config')
+STATE_BASE = paths.xdg_base(os.getenv('XDG_STATE_HOME'), Path.home() / '.local/state')
+CONFIG_DIR = str(CONFIG_BASE / 'logos-desktop')
+STATE_DIR = str(STATE_BASE / 'logos-desktop')
+PORTABLE_CONFIG_NAME = 'logos-desktop.json'
+# Recovery roots already used this child before the identity migration.
+RECOVERY_STATE_DIR = str(STATE_BASE / 'logos-desktop')
+COORDINATION_DIR = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.local/state/logos-desktop/coordination'
 
 # Set other run-time variables not set in the env.
-DEFAULT_CONFIG_PATH = os.path.expanduser(f"{CONFIG_DIR}/{BINARY_NAME}.json")
+DEFAULT_CONFIG_PATH = str(Path(CONFIG_DIR) / 'config.json')
 DEFAULT_APP_WINE_LOG_PATH = os.path.expanduser(f"{STATE_DIR}/wine.log")
-DEFAULT_APP_LOG_PATH = os.path.expanduser(f"{STATE_DIR}/{BINARY_NAME}.log")
+DEFAULT_APP_LOG_PATH = str(Path(STATE_DIR) / 'logos-desktop.log')
 NETWORK_CACHE_PATH = f"{CACHE_DIR}/network.json"
 
 RELATIVE_BINARY_DIR = "data/bin"
 
 DEFAULT_WINEDEBUG = "err+all"
 LEGACY_CONFIG_FILES = [
+    str(CONFIG_BASE / 'FaithLife-Community/oudedetai.json'),
+    str(CONFIG_BASE / 'FaithLife-Community/oudedetai'),
+    str(CONFIG_BASE / 'FaithLife-Community/Logos_on_Linux.json'),
+    str(CONFIG_BASE / 'Logos_on_Linux/Logos_on_Linux.json'),
+    str(CONFIG_BASE / 'Logos_on_Linux/Logos_on_Linux.conf'),
+    os.path.expanduser('~/.config/FaithLife-Community/oudedetai.json'),
     # If the user didn't have XDG_CONFIG_HOME set before, but now does.
     os.path.expanduser("~/.config/FaithLife-Community/oudedetai"),
     os.path.expanduser("~/.config/FaithLife-Community/Logos_on_Linux.json"),

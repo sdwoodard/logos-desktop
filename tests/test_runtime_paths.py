@@ -3,9 +3,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from zipfile import ZipFile
 
 from ou_dedetai import artifacts, constants, control, installer, network, paths, utils, wine
 from ou_dedetai.config import Config, PersistentConfiguration
@@ -184,32 +186,51 @@ class TestRuntimePaths(unittest.TestCase):
             transfer.assert_not_called()
             self.assertEqual(config.wine_binary, str(custom))
 
-    def test_support_uses_selected_absolute_runtime_without_prompting(self):
+    def test_support_inspects_stored_runtime_without_execution_or_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runtime = root / "runtime"
-            runtime.write_text("fixture")
+            install = root / "install"
+            install.mkdir()
+            runtime = install / "runtime"
+            capture = root / "executed"
+            runtime.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(capture)!r}).touch()\n")
             runtime.chmod(0o755)
             absent = str(root / "absent")
             conf = SimpleNamespace(
-                _raw=SimpleNamespace(wine_binary="runtime", install_dir=str(root), faithlife_product="Logos",
+                _raw=SimpleNamespace(wine_binary="runtime", install_dir=str(install), faithlife_product="Logos",
                                       _as_dict=lambda: {}), wine_binary=str(runtime),
-                install_dir=str(root),
-                installer_binary_dir=str(root / "data/bin"),
+                install_dir=str(install),
+                installer_binary_dir=str(install / "data/bin"),
                 config_file_path=absent, app_log_path=absent, app_wine_log_path=absent,
                 app_wine_log_previous_path=absent, _faithlife_crash_log=None,
                 _network=SimpleNamespace(_cache=SimpleNamespace(_as_dict=lambda: {})), _overrides=SimpleNamespace(),
             )
+            output = root / "support.zip"
             app = SimpleNamespace(
-                conf=conf, ask=Mock(side_effect=[str(root / "support.zip"), "Keep archive local"]), status=Mock(),
+                conf=conf, ask=Mock(side_effect=[str(output), "Keep archive local"]),
+                status=Mock(), info=Mock(), approve=Mock(return_value=True),
             )
+            original_runtime = runtime.read_bytes()
+            original_config = vars(conf._raw).copy()
             with (
-                patch.object(control.subprocess, "check_output", return_value="fixture") as commands,
-                patch.object(control.system, "get_dialog", return_value="cli"),
+                patch.object(
+                    subprocess, "Popen", side_effect=AssertionError("Support must not execute commands"),
+                ) as commands,
             ):
                 control.get_support(app)
-            expected = unittest.mock.call([str(runtime), "--version"], text=True, env=unittest.mock.ANY, timeout=15)
-            self.assertIn(expected, commands.call_args_list)
+            commands.assert_not_called()
+            self.assertFalse(capture.exists())
+            self.assertEqual(runtime.read_bytes(), original_runtime)
+            self.assertEqual(vars(conf._raw), original_config)
+            self.assertEqual(set(root.iterdir()), {install, output})
+            self.assertEqual(set(install.iterdir()), {runtime})
+            with ZipFile(output) as archive:
+                report = json.loads(archive.read("doctor.json"))
+                self.assertIsNone(report["command_preview"])
+                runtime_check = next(check for check in report["checks"] if check["name"] == "runtime")
+                self.assertEqual(runtime_check["status"], "unknown")
+                self.assertIn("not an ELF binary", runtime_check["summary"])
+                self.assertNotIn(str(root), app.info.call_args.args[0])
 
     def test_configured_symlink_is_preserved_and_invalid_types_are_not_executable(self):
         with tempfile.TemporaryDirectory() as directory:

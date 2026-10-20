@@ -101,10 +101,10 @@ class AcceptedArtifact:
     size: int
     evidence: str
 
-    def check(self):
-        if regular_hash(self.path) != self.sha256 or self.path.stat().st_size != self.size:
+    def check(self, checkpoint=None):
+        if regular_hash(self.path, checkpoint=checkpoint) != self.sha256 or self.path.stat().st_size != self.size:
             raise ArtifactError(f"Accepted artifact changed: {self.path.name}")
-        validate_format(self.path, self.spec.kind)
+        validate_format(self.path, self.spec.kind, checkpoint)
         return self.path
 
 
@@ -113,14 +113,19 @@ def safe_url(url):
     return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
 
 
-def regular_hash(path, algorithm="sha256"):
+def regular_hash(path, algorithm="sha256", checkpoint=None):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as source:
         before = os.fstat(source.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise ArtifactError("Artifact must be a regular file")
         digest = hashlib.new(algorithm, usedforsecurity=False)
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        while True:
+            if checkpoint:
+                checkpoint()
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
         after = os.fstat(source.fileno())
         if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
@@ -360,7 +365,7 @@ def _msi_name(name):
     return "".join(output)
 
 
-def validate_msi(path):
+def validate_msi(path, checkpoint=None):
     try:
         with olefile.OleFileIO(path, raise_defects=olefile.DEFECT_INCORRECT) as database:
             if database.root.clsid.upper() != "000C1084-0000-0000-C000-000000000046":
@@ -379,9 +384,12 @@ def validate_msi(path):
                 raise ArtifactError("Expected an x64 MSI database")
             _msi_structure(database, names)
             for parts in database.listdir():
+                if checkpoint:
+                    checkpoint()
                 with database.openstream(parts) as stream:
                     while stream.read(1024 * 1024):
-                        pass
+                        if checkpoint:
+                            checkpoint()
     except (OSError, ValueError, UnicodeError, struct.error) as error:
         raise ArtifactError(f"Invalid MSI database ({type(error).__name__})") from None
 
@@ -475,10 +483,12 @@ def _archive_name(name):
     return path
 
 
-def winetricks_member(archive):
+def winetricks_member(archive, checkpoint=None):
     candidates = []
     names = set()
     for member in archive.infolist():
+        if checkpoint:
+            checkpoint()
         path = _archive_name(member.filename)
         mode = member.external_attr >> 16
         if member.filename in names or (stat.S_IFMT(mode) and not (
@@ -488,12 +498,19 @@ def winetricks_member(archive):
         names.add(member.filename)
         if not member.is_dir() and path.name == "winetricks":
             candidates.append(member)
-    if len(candidates) != 1 or archive.testzip() is not None:
+        if not member.is_dir():
+            with archive.open(member) as source:
+                while source.read(1024 * 1024):
+                    if checkpoint:
+                        checkpoint()
+    if len(candidates) != 1:
         raise ArtifactError("Winetricks archive must contain exactly one valid script")
     return candidates[0]
 
 
-def validate_format(path, kind):
+def validate_format(path, kind, checkpoint=None):
+    if checkpoint:
+        checkpoint()
     if not path.stat().st_size:
         raise ArtifactError("Artifact is empty")
     try:
@@ -502,12 +519,13 @@ def validate_format(path, kind):
         elif kind == "elf":
             _elf_extent(path)
         elif kind == "msi":
-            validate_msi(path)
+            validate_msi(path, checkpoint)
         elif kind == "winetricks-zip":
             with zipfile.ZipFile(path) as archive:
-                member = winetricks_member(archive)
-                if not archive.read(member).startswith(b"#!/bin/sh"):
-                    raise ArtifactError("Winetricks member is not a shell script")
+                member = winetricks_member(archive, checkpoint)
+                with archive.open(member) as source:
+                    if not source.read(32).startswith(b"#!/bin/sh"):
+                        raise ArtifactError("Winetricks member is not a shell script")
         elif kind == "winetricks":
             with path.open("rb") as source:
                 if not source.read(32).startswith(b"#!/bin/sh"):
@@ -516,6 +534,8 @@ def validate_format(path, kind):
             roots = set()
             with tarfile.open(path, "r:gz") as archive:
                 for member in archive:
+                    if checkpoint:
+                        checkpoint()
                     name = _archive_name(member.name)
                     if not (member.isfile() or member.isdir()):
                         raise ArtifactError("ICU archive contains a linked or special member")
@@ -525,7 +545,8 @@ def validate_format(path, kind):
                     if member.isfile():
                         with archive.extractfile(member) as source:
                             while source.read(1024 * 1024):
-                                pass
+                                if checkpoint:
+                                    checkpoint()
             if len(roots) != 1:
                 raise ArtifactError("ICU archive must have one supported Windows subtree")
     except (OSError, EOFError, ValueError, tarfile.TarError, zipfile.BadZipFile,
@@ -533,16 +554,16 @@ def validate_format(path, kind):
         raise ArtifactError(f"Invalid {kind} artifact ({type(error).__name__})") from None
 
 
-def _verify(path, spec, size=None, digest=None):
+def _verify(path, spec, size=None, digest=None, checkpoint=None):
     actual_size = path.stat().st_size
     if any(expected is not None and actual_size != expected for expected in (spec.size, size)):
         raise ArtifactError("Artifact length mismatch")
     for expected in (spec.digest, digest):
         if expected is not None:
             expected.validate()
-            if regular_hash(path, expected.algorithm).lower() != expected.value.lower():
+            if regular_hash(path, expected.algorithm, checkpoint).lower() != expected.value.lower():
                 raise ArtifactError("Artifact digest mismatch")
-    validate_format(path, spec.kind)
+    validate_format(path, spec.kind, checkpoint)
 
 
 def _store(root):
@@ -556,9 +577,9 @@ def _store(root):
     return maintenance.private_directory(root / ".artifacts")
 
 
-def _publish(staging, store, spec, evidence):
+def _publish(staging, store, spec, evidence, checkpoint=None):
     file = staging / spec.name
-    sha256 = regular_hash(file)
+    sha256 = regular_hash(file, checkpoint=checkpoint)
     parent = maintenance.private_directory(store / spec.key)
     destination = parent / sha256
     file.chmod(0o500 if spec.kind in ("appimage", "elf", "winetricks") else 0o400)
@@ -566,6 +587,9 @@ def _publish(staging, store, spec, evidence):
         for name in COMPANIONS:
             if name != spec.name:
                 (staging / name).symlink_to(spec.name)
+    if checkpoint:
+        checkpoint()
+    # Publication is the commit boundary. Finish acceptance after a late cancel.
     try:
         paths.rename_no_replace(staging, destination)
     except FileExistsError:
@@ -621,32 +645,54 @@ def import_local(source, root, spec):
         raise ArtifactError(f"Could not stage local artifact ({type(error).__name__})") from None
 
 
-def acquire(spec, root, candidates=(), status=None):
+def _copy(incoming, output, checkpoint):
+    while True:
+        if checkpoint:
+            checkpoint()
+        chunk = incoming.read(1024 * 1024)
+        if not chunk:
+            return
+        output.write(chunk)
+
+
+def acquire(spec, root, candidates=(), status=None, *, checkpoint=None):
     """Return an immutable accepted file, preserving all candidate source files."""
     spec.validate()
     if urlsplit(spec.url).scheme != "https":
         raise ArtifactError("Artifact downloads require HTTPS")
+    if checkpoint:
+        checkpoint()
     try:
         _, remote_digest = head_metadata(spec.url) if spec.digest is None else (None, None)
         expected = spec.digest or remote_digest
         if expected is not None:
             for candidate in candidates:
+                if checkpoint:
+                    checkpoint()
                 try:
                     with _staged(root, spec) as (staging, store):
                         candidate = Path(candidate)
-                        before = regular_hash(candidate)
+                        if status:
+                            status(f"Checking cached {spec.name}…", None)
+                        before = regular_hash(candidate, checkpoint=checkpoint)
+                        if status:
+                            status(f"Copying cached {spec.name}…", None)
                         with candidate.open("rb") as incoming, (staging / spec.name).open("xb") as output:
-                            shutil.copyfileobj(incoming, output)
+                            _copy(incoming, output, checkpoint)
                             output.flush()
                             os.fsync(output.fileno())
-                        if regular_hash(staging / spec.name) != before:
+                        if regular_hash(staging / spec.name, checkpoint=checkpoint) != before:
                             raise ArtifactError("Candidate changed while copying")
-                        _verify(staging / spec.name, spec, digest=expected)
-                        return _publish(staging, store, spec, expected.source)
+                        _verify(staging / spec.name, spec, digest=expected, checkpoint=checkpoint)
+                        if status:
+                            status(f"Publishing accepted {spec.name}…", None)
+                        return _publish(staging, store, spec, expected.source, checkpoint)
                 except (OSError, ArtifactError):
                     continue
 
         with _staged(root, spec) as (staging, store):
+            if checkpoint:
+                checkpoint()
             if status:
                 status(f"Downloading {spec.name}…", 0)
             with requests.get(
@@ -660,6 +706,8 @@ def acquire(spec, root, candidates=(), status=None):
                 received = 0
                 with (staging / spec.name).open("xb") as output:
                     for chunk in response.iter_content(chunk_size=100 * 1024):
+                        if checkpoint:
+                            checkpoint()
                         if not chunk:
                             continue
                         output.write(chunk)
@@ -668,9 +716,13 @@ def acquire(spec, root, candidates=(), status=None):
                             status(f"Downloading {spec.name}…", min(received / size, 1) if size else None)
                     output.flush()
                     os.fsync(output.fileno())
-            _verify(staging / spec.name, spec, size, checksum)
+            if status:
+                status(f"Verifying {spec.name}…", None)
+            _verify(staging / spec.name, spec, size, checksum, checkpoint)
             evidence = spec.digest.source if spec.digest else "completed HTTPS transfer and format acceptance"
-            return _publish(staging, store, spec, evidence)
+            if status:
+                status(f"Publishing accepted {spec.name}…", None)
+            return _publish(staging, store, spec, evidence, checkpoint)
     except requests.RequestException as error:
         raise ArtifactError(f"Transfer failed for {safe_url(spec.url)} ({type(error).__name__})") from None
     except OSError as error:

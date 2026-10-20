@@ -23,6 +23,61 @@ else:
 
 @unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
 class TestQtFrontend(QtCase):
+    def test_unconfigured_home_discovery_requires_explicit_candidate_and_adoption_destination(self):
+        from unittest.mock import Mock
+        from ou_dedetai import constants
+        from ou_dedetai.config import EphemeralConfiguration
+        from ou_dedetai.qt.services import Services
+
+        install = self.root / "legacy-installation"
+        (install / "data/wine64_bottle").mkdir(parents=True)
+        legacy = self.root / "legacy.json"
+        legacy.write_text(json.dumps({"install_dir": str(install), "faithlife_product": "Logos",
+                                      "faithlife_product_version": "10"}))
+        original = legacy.read_bytes()
+        missing = self.root / "new-default.json"
+        self.stack.enter_context(patch.object(constants, "LEGACY_CONFIG_FILES", [str(legacy)]))
+        window = self.window(Services(), EphemeralConfiguration.project({}, str(missing), environment={}))
+        self.pump(lambda: window.app.active is None)
+        self.assertFalse(window.snapshot.selected)
+        self.assertTrue(window.existing_installation.isVisible())
+        self.assertFalse(window.adopt_candidate.isEnabled())
+        window.discover_profiles.click()
+        self.assertEqual(window.profile_candidates.count(), 1)
+        self.assertEqual(window.profile_candidates.currentIndex(), -1)
+        self.assertFalse(window.adopt_candidate.isEnabled())
+        self.assertIsNone(window.app.conf._raw.install_dir)
+        self.assertFalse(missing.exists())
+
+        window.profile_candidates.setCurrentIndex(0)
+        self.assertTrue(window.adopt_candidate.isEnabled())
+        destination = self.root / "adopted.json"
+        operation = Mock()
+        with (patch.object(window.services, "adopt_profile", return_value=operation) as adopt,
+              patch.object(window, "start") as start,
+              patch.object(window.dialogs, "picker") as picker):
+            window.adopt_candidate.click()
+            adopt.assert_not_called()
+            callback = picker.call_args.args[2]
+            callback(str(destination))
+            adopt.assert_called_once_with(str(legacy), directory=False, destination=str(destination))
+            start.assert_called_once_with(operation)
+        self.assertEqual(legacy.read_bytes(), original)
+        self.assertFalse(destination.exists())
+
+    def test_information_preview_preserves_exact_multiline_snapshot_and_copy(self):
+        from PySide6.QtWidgets import QPushButton
+        window = self.window()
+        snapshot = "\n".join(f"Sanitized member {number}" for number in range(450))
+        window.bridge.information.emit("Support preview", snapshot)
+        self.pump(lambda: bool(window.dialogs.dialogs))
+        dialog = next(iter(window.dialogs.dialogs))
+        self.assertEqual(dialog.details.toPlainText(), snapshot)
+        copy = next(button for button in dialog.findChildren(QPushButton) if button.text() == "Copy details")
+        copy.click()
+        self.assertEqual(self.application.clipboard().text(), snapshot)
+        dialog.reject()
+
     def test_worker_delivery_liveness_coalescing_and_checked_failure_recovery(self):
         window = self.window()
         worker_entered, release = threading.Event(), threading.Event()

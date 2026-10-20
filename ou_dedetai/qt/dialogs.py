@@ -72,7 +72,13 @@ class DialogHost(QObject):
 
     @Slot(str, str)
     def information(self, title, message):
-        self.failure(title, message)
+        if self.closing:
+            return
+        dialog = self._own(FailureDialog(title, "Review the details below.", parent=self.window))
+        dialog.details.document().setMaximumBlockCount(0)
+        dialog.details.setAccessibleName("Information details")
+        dialog.details.setPlainText(message)
+        dialog.open()
 
     def picker(self, title, choice, callback, initial=None):
         dialog = self._own(QFileDialog(self.window, title, initial or str(Path.home())))

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, installer
+from ou_dedetai import constants, desktop, installer
 
 
 class TestDesktopEntries(unittest.TestCase):
@@ -17,20 +17,25 @@ class TestDesktopEntries(unittest.TestCase):
                 install_dir=str(install), faithlife_product="Logos",
                 logos_exe_windows_path=r"C:\Logos Space\Logos.exe",
                 _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
-                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None,
+                                           config_path=str(root / 'chosen.json'), config_destination=None),
             ))
             with (
-                patch.multiple(constants, RUNMODE="binary", XDG_DATA_HOME=str(root / "share")),
+                patch.multiple(constants, RUNMODE="binary", XDG_DATA_HOME=str(root / "share"),
+                               CONFIG_BASE=root / 'config', COORDINATION_DIR=root / 'coordination'),
+                patch.object(desktop, '_default', return_value=None),
                 patch.object(installer.system, "run_command") as commands,
             ):
                 installer.create_launcher_shortcuts(app)
             entries = root / "share/applications"
             launcher = str(install / constants.BINARY_NAME)
-            controller = (entries / f"{constants.BINARY_NAME}.desktop").read_text()
-            product = (entries / "LogosBible.desktop").read_text()
-            handler = (entries / "Logos-url-handler.desktop").read_text()
-            self.assertIn(f'Exec="{launcher}"\n', controller)
-            self.assertIn(f'Exec="{launcher}" "--run-installed-app"\n', product)
+            controller = next(path for path in entries.glob('*.desktop')
+                              if not path.stem.endswith(('-app', '-url'))).read_text()
+            product = next(entries.glob('*-app.desktop')).read_text()
+            handler = next(entries.glob('*-url.desktop')).read_text()
+            route = f'"{launcher}" "-c" "{root / "chosen.json"}"'
+            self.assertIn(f'Exec={route}\n', controller)
+            self.assertIn(f'Exec={route} "--run-installed-app"\n', product)
             self.assertIn('"--wine" ', handler)
             self.assertIn(' %u\n', handler)
             self.assertIn("Terminal=false", handler)
@@ -46,7 +51,8 @@ class TestDesktopEntries(unittest.TestCase):
                 app = SimpleNamespace(conf=SimpleNamespace(
                     install_dir=str(install), faithlife_product="Logos", logos_exe_windows_path=r"C:\Logos.exe",
                     _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
-                    _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
+                    _overrides=SimpleNamespace(install_dir=None, wine_prefix=None,
+                                               config_path=str(root / 'chosen.json'), config_destination=None),
                 ))
                 with (
                     patch.multiple(constants, RUNMODE="binary", XDG_DATA_HOME=str(root / "share")),
@@ -67,16 +73,18 @@ class TestDesktopEntries(unittest.TestCase):
             app = SimpleNamespace(conf=SimpleNamespace(
                 install_dir=str(install), faithlife_product="Verbum", logos_exe_windows_path=None,
                 _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Verbum"),
-                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None,
+                                           config_path=str(root / 'chosen.json'), config_destination=None),
             ))
             with (
                 patch.multiple(constants, RUNMODE="script", XDG_DATA_HOME=str(root / "share")),
                 patch.object(installer.sys, "argv", [str(script)]),
                 patch.object(installer.sys, "executable", str(root / "Python Space/bin/python")),
-                patch.object(installer, "create_desktop_file", return_value=Mock()) as create,
+                patch.object(desktop, 'preview', return_value=Mock()) as preview,
+                patch.object(desktop, 'adopt', return_value=SimpleNamespace(issues=())),
             ):
                 installer.create_launcher_shortcuts(app)
-            self.assertEqual(create.call_args_list[1].kwargs["exec_args"], [
+            self.assertEqual(preview.call_args.args[1], [
                 str(root / "Python Space/bin/python"), str(script),
             ])
 

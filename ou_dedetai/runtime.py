@@ -144,11 +144,12 @@ def _restore(snapshots, proposed):
             _replace_bytes(path, b64decode(saved["content"], validate=True), saved["mode"])
 
 
-def _targets(app):
+def _targets(app, *, legacy_portable=False):
     conf = app.conf
     bindir = Path(conf.installer_binary_dir)
     destination = getattr(conf._overrides, "config_destination", None) or conf._overrides.config_path
-    configs = [Path(conf.install_dir) / f"{constants.BINARY_NAME}.json", Path(destination)]
+    portable = f'{constants.BINARY_NAME}.json' if legacy_portable else constants.PORTABLE_CONFIG_NAME
+    configs = [Path(conf.install_dir) / portable, Path(destination)]
     link = conf.wine_appimage_link_file_name
     if Path(link).name != link or link in artifacts.COMPANIONS or link in (".", "..", ""):
         raise artifacts.ArtifactError("Invalid selected runtime link name")
@@ -185,6 +186,9 @@ def _recover_locked(app, context):
     try:
         record = json.loads(journal.read_bytes())
         links, configs = _targets(app)
+        recorded_paths = {saved.get('path') for saved in record['previous']}
+        if recorded_paths != {str(path) for path in (*links, *configs)}:
+            links, configs = _targets(app, legacy_portable=True)
         allowed = {str(path) for path in (*links, *configs)}
         snapshots = record["previous"]
         if record["install"] != str(context.install) or len(snapshots) != len(allowed) or {

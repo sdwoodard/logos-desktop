@@ -1,16 +1,52 @@
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
 from ou_dedetai import artifacts, constants, metadata, network
+from ou_dedetai.app import UserExitedFromAsk
 from tests.test_artifacts import response
 
 
 class TestNetwork(unittest.TestCase):
+    def test_product_update_projection_and_admission_comparison(self):
+        lookup = network.ProductLookup(("9.10", "10.0", "9.9"), "ok")
+        available = network.product_update_state("9.10.0.0", lookup)
+        self.assertTrue(available.actionable)
+        self.assertEqual(available.target, "10.0")
+        for installed in ("10.0.0.0", "11.0"):
+            self.assertEqual(network.product_update_state(installed, lookup).status, "current")
+            self.assertFalse(network.is_newer_product_release(installed, available.target))
+        for installed in (None, "", "unknown"):
+            self.assertEqual(network.product_update_state(installed, lookup).status, "unknown-installed")
+            self.assertFalse(network.is_newer_product_release(installed, "10.0"))
+        for status in ("unchecked", "offline", "malformed", "rate-limited"):
+            state = network.product_update_state("9.0", network.ProductLookup(("10.0",), status))
+            self.assertEqual(state.status, status)
+            self.assertFalse(state.actionable)
+        stale = network.product_update_state("9.0", network.ProductLookup(("10.0",), "ok", stale=True))
+        self.assertEqual(stale.status, "stale")
+        self.assertFalse(stale.actionable)
+        empty = network.product_update_state("9.0", network.ProductLookup(status="empty"))
+        self.assertEqual(empty.status, "no-release")
+
+    def test_download_adapter_checks_cancellation_even_without_status_messages(self):
+        app = SimpleNamespace(
+            conf=SimpleNamespace(download_dir="/fixture/cache", user_download_dir=None),
+            checkpoint=Mock(side_effect=UserExitedFromAsk), status=Mock(),
+        )
+        with patch.object(artifacts.requests, "head") as head, self.assertRaises(UserExitedFromAsk):
+            network.logos_reuse_download(
+                "https://example.invalid/script", "winetricks", "/fixture/target", app,
+                status_messages=False, kind="winetricks",
+            )
+        head.assert_not_called()
+        app.status.assert_not_called()
+
     def test_head_downgrade_is_not_authenticated_cache_evidence(self):
         from base64 import b64encode
         import hashlib

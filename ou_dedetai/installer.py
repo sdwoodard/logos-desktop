@@ -1,6 +1,5 @@
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -446,12 +445,16 @@ def _install(app: App):
     """Entrypoint for installing"""
     app.installer_step = 1
     app.installer_step_count = 0
-    wine.product_release(app.conf.faithlife_product_release)
-    app.status('Installing…')
-    ensure_launcher_shortcuts(app)
-    app.status("Install Complete!", 100)
-    # Trigger a config update event to refresh the UIs
-    app._config_updated_event.set()
+    try:
+        wine.product_release(app.conf.faithlife_product_release)
+        app.status('Installing…')
+        ensure_launcher_shortcuts(app)
+        app.status("Install Complete!", 100)
+        # Trigger a config update event to refresh the UIs
+        app._config_updated_event.set()
+    finally:
+        app.installer_step = 0
+        app.installer_step_count = 0
 
 
 def get_progress_pct(current, total):
@@ -558,121 +561,28 @@ Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(addit
 
 @maintenance.uses_installation
 def create_launcher_shortcuts(app: App):
-    # Set variables for use in launcher files.
-    flproduct = app.conf.faithlife_product
-    if flproduct not in constants.FAITHLIFE_PRODUCTS:
-        raise ValueError("Unknown product for desktop shortcuts")
-    installdir = Path(app.conf.install_dir)
-    logos_icon_src = constants.APP_IMAGE_DIR / f"{flproduct}-128-icon.png"
-    app_icon_src = constants.APP_IMAGE_DIR / 'icon.png'
+    from . import desktop
 
-    if not installdir.is_absolute() or installdir.is_symlink() or not installdir.is_dir():
-        raise ValueError("Shortcuts require an absolute, unlinked installation directory")
-    app_dir = Path(installdir) / 'data'
-    logos_icon_path = app_dir / logos_icon_src.name
-    app_icon_path = app_dir / app_icon_src.name
-
+    if constants.RUNMODE in ('snap', 'flatpak'):
+        return
     if constants.RUNMODE == 'binary':
-        launcher_args = [str(installdir / constants.BINARY_NAME)]
-    elif constants.RUNMODE == "script":
-        script = Path(sys.argv[0]).expanduser().resolve()
-        launcher_args = [sys.executable, str(script)]
-    elif constants.RUNMODE in ["snap", "flatpak"]:
-        logging.info(f"Not creating launcher shortcuts, {constants.RUNMODE} already handles this") 
-        return
+        launcher = [str(Path(app.conf.install_dir) / constants.BINARY_NAME)]
+    elif constants.RUNMODE == 'script':
+        launcher = [sys.executable, str(Path(sys.argv[0]).expanduser().resolve())]
     else:
-        raise ValueError(f"Unsupported desktop launcher mode: {constants.RUNMODE}")
+        raise ValueError(f'Unsupported desktop launcher mode: {constants.RUNMODE}')
 
-    windows_executable = app.conf.logos_exe_windows_path
-    desktop_exec(launcher_args)
-    desktop_exec([*launcher_args, "--run-installed-app"])
-    if windows_executable:
-        desktop_exec([*launcher_args, "--wine", windows_executable], accepts_url=True)
-
-    if app_dir.is_symlink() or logos_icon_path.is_symlink() or app_icon_path.is_symlink():
-        raise ValueError("Shortcut icons cannot be written through symlinks")
-
-    for (src, path) in [(app_icon_src, app_icon_path), (logos_icon_src, logos_icon_path)]:
-        if not path.is_file():
-            app_dir.mkdir(exist_ok=True)
-            shutil.copy(src, path)
-        else:
-            logging.info(f"Icon found at {path}.")
-
-    # Create Logos/Verbum desktop file.
-    logos_path = create_desktop_file(
-        filename=f"{flproduct}Bible.desktop",
-        app_name=f"{flproduct}",
-        generic_name="Bible",
-        comment="Runs Faithlife Bible Software via Wine. Community supported.",
-        exec_args=[*launcher_args, "--run-installed-app"],
-        icon_path=logos_icon_path,
-        wm_class=f"{flproduct.lower()}.exe",
-        additional_keywords=["Catholic"] if flproduct == "Verbum" else None
-    )
-    logging.debug(f"> File exists?: {logos_path}: {logos_path.is_file()}")
-    # Create Ou Dedetai desktop file.
-    app_path = create_desktop_file(
-        filename=f"{constants.BINARY_NAME}.desktop",
-        app_name=constants.APP_NAME,
-        generic_name="FaithLife App Installer",
-        comment="Installs and manages either Logos or Verbum via wine. Community supported.",
-        exec_args=launcher_args,
-        icon_path=app_icon_path,
-        wm_class=constants.BINARY_NAME,
-    )
-    logging.debug(f"> File exists?: {app_path}: {app_path.is_file()}")
-
-    # Register URL scheme handlers:
-    # logos4 - to facilitate Logos 40.1+ login OAuth flow
-    # libronixdls - allows opening of bible links from the browser
-
-    if not windows_executable:
-        logging.error("Failed to register MIME types with system due to missing wine exe path")
-        return
-
-    url_handler_desktop_filename = f"{flproduct}-url-handler.desktop"
-    # Create the desktop file to register the MIME types.
-    app_path = create_desktop_file(
-        filename=url_handler_desktop_filename,
-        app_name=f"{flproduct} URL Handler",
-        comment="Handles logos4: and libronixdls: URL Schemes",
-        exec_args=[*launcher_args, "--wine", windows_executable],
-        icon_path=app_icon_path,
-        mime_types=["x-scheme-handler/logos4","x-scheme-handler/libronixdls"],
-        accepts_url=True,
-    )
-    # For most users Logos will be "installed" at this point, if we fail here there is no easy
-    # way in the current flow to re-apply these - and this isn't required for Logos to function,
-    # more of a nice to have. While it would be nice for support reasons not to branch here - 
-    # which is more important: a passing exit code doing what we could to setup Logos, or 
-    # everything that we do - even that which is optional such as this - passes?
-
-    # On most systems these commands have the effect of adding the following to ~/.config/mimetypes:
-    # ```
-    # [Default Applications]
-    # x-scheme-handler/logos4=logos4.desktop
-    # x-scheme-handler/libronixdls=libronixdls.desktop
-    # ```
+    selected = app.conf._overrides
+    config = selected.config_destination or selected.config_path
+    desktop_exec(launcher)
+    plan = None
     try:
-        system.run_command([
-            "xdg-mime",
-            "default",
-            url_handler_desktop_filename,
-            "x-scheme-handler/logos4"
-        ])
-        system.run_command([
-            "xdg-mime",
-            "default",
-            url_handler_desktop_filename,
-            "x-scheme-handler/libronixdls"
-        ])
-    except subprocess.CalledProcessError:
-        logging.exception("Failed to register MIME types with system")
-
-    # Now best-effort update the desktop database
-    if shutil.which("update-desktop-database") is not None:
-        try:
-            system.run_command(["update-desktop-database", f"{Path(constants.XDG_DATA_HOME) / 'applications'}"])
-        except Exception as e:
-            logging.warning(f"Failed to update the desktop databse (not strictly required on all systems): {e}")
+        plan = desktop.preview(config, launcher, product=app.conf.faithlife_product,
+                               windows_executable=app.conf.logos_exe_windows_path)
+        result = desktop.adopt(plan)
+    except (OSError, ValueError, maintenance.MaintenanceError) as error:
+        journal = plan.journal if plan is not None else None
+        result = desktop.Result(journal, 'incomplete', (f'Desktop integration needs attention: {error}',))
+    for issue in result.issues:
+        logging.warning(issue)
+    return result

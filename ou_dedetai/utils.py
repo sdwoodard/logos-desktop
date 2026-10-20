@@ -510,18 +510,50 @@ def update_to_latest_lli_release(app: App):
     return network.update_lli_binary(app=app)
 
 
+def validate_product_update_document(conf, target, document):
+    """Check the post-rebind selection before publishing an admitted update."""
+    from . import config_store
+    from .config import EphemeralConfiguration, PersistentConfiguration
+
+    old = conf._overrides
+    projected = EphemeralConfiguration.project(
+        document, conf.config_file_path, environment=old.environment,
+        cli_overrides=old.cli_overrides, runtime_selection=old.runtime_selection,
+    )
+    overlays = config_store.apply_changes(old.environment, old.runtime_selection, conf.config_file_path)
+    effective = PersistentConfiguration.from_document(document, overlays)
+    if projected.faithlife_installer_download_url or projected.faithlife_installer_name:
+        raise maintenance.MaintenanceError(
+            "Custom installer sources are not supported by the stable-release update workflow")
+    if (effective.faithlife_product != "Logos" or effective.faithlife_product_release != target
+            or (projected.faithlife_product_version or effective.faithlife_product_version) != "10"
+            or effective.faithlife_product_release_channel != "stable"
+            or effective.app_release_channel != "stable"):
+        raise maintenance.MaintenanceError("An override conflicts with the latest stable Logos release")
+
+
 @maintenance.changes_installation
 def update_faithlife_product(app: App):
     from ou_dedetai import installer  # local import to avoid circular dependency
-    releases = app.conf.faithlife_product_releases
-    if not releases:
-        raise maintenance.MaintenanceError(
-            f"No usable release was found for {app.conf.faithlife_product}. Check the connection and retry"
-        )
-    latest = releases[0]  # feed is ordered newest-first
+    from . import config_store
+    from functools import partial
+
+    lookup = app.conf._network.product_release(
+        app.conf.faithlife_product, app.conf.faithlife_product_version, 'stable', force=True,
+    )
+    state = network.product_update_state(app.conf.refresh_installed_faithlife_product_release(), lookup)
+    if not state.actionable:
+        raise maintenance.MaintenanceError(state.message)
+    latest = state.target
+    validator = partial(validate_product_update_document, app.conf, latest)
+    document = config_store.apply_changes(
+        app.conf._raw._saved, {"faithlife_product_release": latest}, app.conf.config_file_path,
+    )
+    validator(document)
     app.status(f"Updating {app.conf.faithlife_product} to {latest}…")
-    app.conf.faithlife_product_release = latest
-    installer.install(app)
+    with app.conf.validated_writes(validator):
+        app.conf.faithlife_product_release = latest
+        installer.install(app)
 
 
 # FIXME: consider moving this to control

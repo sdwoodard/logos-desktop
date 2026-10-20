@@ -263,7 +263,7 @@ raw.write_config(checked=True)
 
     def test_committed_portable_failure_and_sync_uncertainty_keep_committed_memory(self):
         conf = configuration(self.path)
-        portable = self.install / f"{constants.BINARY_NAME}.json"
+        portable = self.install / constants.PORTABLE_CONFIG_NAME
         portable.write_text(json.dumps(self.document))
         previous = portable.read_bytes()
         publish = config_store.Target.publish
@@ -479,7 +479,7 @@ print(json.dumps([conf.wine_prefix,conf.installer_binary_dir,conf.wineserver_bin
         self.assertFalse(Path(conf.wine_prefix).exists())
 
     def test_previous_copy_role_collision_preserves_primary_and_portable(self):
-        portable = self.install / f"{constants.BINARY_NAME}.json"
+        portable = self.install / constants.PORTABLE_CONFIG_NAME
         selected = portable.with_name(f".{portable.name}.previous")
         portable.write_text(json.dumps(dict(self.document, future="portable")))
         selected.write_text(json.dumps(dict(self.document, future="selected")))
@@ -491,7 +491,7 @@ print(json.dumps([conf.wine_prefix,conf.installer_binary_dir,conf.wineserver_bin
 
     def test_warning_delivery_failure_cannot_undo_committed_memory_or_baseline(self):
         conf = configuration(self.path)
-        portable = self.install / f"{constants.BINARY_NAME}.json"
+        portable = self.install / constants.PORTABLE_CONFIG_NAME
         portable.write_text(json.dumps(self.document))
         publish = config_store.Target.publish
 
@@ -675,7 +675,7 @@ main.main()
         self.assertEqual(journal.read_text(), "durable installation pending")
         self.assertFalse(runtime.pending(second))
         self.assertFalse((second / "data/bin/selected_wine.AppImage").exists())
-        self.assertFalse((second / f"{constants.BINARY_NAME}.json").exists())
+        self.assertFalse((second / constants.PORTABLE_CONFIG_NAME).exists())
 
     def test_relative_cli_appimage_uses_invocation_file_not_installation_decoy(self):
         invocation = self.root / "invocation"

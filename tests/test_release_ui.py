@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 import tempfile
-from threading import Event, RLock, Timer
+from threading import Event, Lock, RLock, Timer
 import time
 from types import SimpleNamespace
 import unittest
@@ -40,6 +40,8 @@ class TestReleaseRendering(unittest.IsolatedAsyncioTestCase):
                 domain.conf, domain.is_running, domain._last_console_message = config, True, None
                 domain._closing = Event()
                 domain._closed = False
+                domain._profile_lock = Lock()
+                domain._instance_session = None
                 domain._thread_lock = RLock()
                 domain._hook_lock = RLock()
                 domain._threads = []

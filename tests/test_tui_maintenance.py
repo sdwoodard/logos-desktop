@@ -64,6 +64,8 @@ class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
                 from ou_dedetai.logos import LogosManager
                 domain.logos = LogosManager(domain)
                 domain._closed = False
+                domain._profile_lock = threading.Lock()
+                domain._instance_session = None
                 domain._thread_lock = threading.RLock()
                 domain._hook_lock = threading.RLock()
                 domain.config_updated_hooks = []

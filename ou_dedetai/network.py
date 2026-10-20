@@ -28,6 +28,54 @@ class ProductLookup:
     retry_after: float = 0
 
 
+@dataclass(frozen=True)
+class ProductUpdateState:
+    installed: str | None
+    target: str | None
+    status: str
+    message: str
+    actionable: bool = False
+    stale: bool = False
+
+
+def _product_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){1,3}", value):
+        raise ValueError("Product version is unknown or invalid")
+    parts = tuple(int(part) for part in value.split("."))
+    return parts + (0,) * (4 - len(parts))
+
+
+def is_newer_product_release(installed, target):
+    """Compare the actual installed version again under mutation admission."""
+    try:
+        return _product_version(target) > _product_version(installed)
+    except ValueError:
+        return False
+
+
+def product_update_state(installed, lookup: ProductLookup):
+    """Project a stable product feed into truthful frontend action state."""
+    target = None
+    try:
+        target = max(lookup.versions, key=_product_version) if lookup.versions else None
+    except ValueError:
+        return ProductUpdateState(installed, None, "malformed", "Product feed contains an invalid version")
+
+    if lookup.stale:
+        return ProductUpdateState(installed, target, "stale", lookup.message, stale=True)
+    if lookup.status not in ("ok", "empty"):
+        return ProductUpdateState(installed, target, lookup.status, lookup.message)
+    if target is None:
+        return ProductUpdateState(installed, None, "no-release", "No stable product release is available")
+    try:
+        current = _product_version(installed)
+    except ValueError:
+        return ProductUpdateState(installed, target, "unknown-installed", "Installed product version is unknown")
+    if _product_version(target) > current:
+        return ProductUpdateState(installed, target, "available", f"Stable release {target} is available", True)
+    return ProductUpdateState(installed, target, "current", "The installed product is current")
+
+
 class FileProps:
     def __init__(self, path):
         self.path = Path(path) if path is not None else None
@@ -360,7 +408,10 @@ def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, 
     if user:
         candidates.append(Path(user) / file)
     spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest, size)
-    return artifacts.acquire(spec, Path(targetdir), candidates, app.status if status_messages else None)
+    return artifacts.acquire(
+        spec, Path(targetdir), candidates, app.status if status_messages else None,
+        checkpoint=app.checkpoint,
+    )
 
 
 def _net_get(url):

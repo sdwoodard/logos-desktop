@@ -323,7 +323,7 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
         if install:
             from . import constants
 
-            portable = absolute_path(Path(install) / f"{constants.BINARY_NAME}.json")
+            portable = absolute_path(Path(install) / constants.PORTABLE_CONFIG_NAME)
             if portable != path:
                 targets.append(stack.enter_context(Target(portable)))
 

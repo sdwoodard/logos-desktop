@@ -175,12 +175,13 @@ class TestArtifactConsumers(unittest.TestCase):
         before = self.state()
         raw = self.app.conf._raw.wine_binary
         original = runtime.os.replace
-        for failure in range(1, 8):
+        links, configs = runtime._targets(self.app)
+        publications = set((*links, *configs))
+        for failure in range(1, len(publications) + 1):
             calls = []
 
             def replace(source, target, **kwargs):
-                name = Path(target).name
-                if name != "runtime.json" and not name.endswith((".previous", ".legacy-original")):
+                if Path(target) in publications:
                     calls.append(target)
                     if len(calls) == failure:
                         raise OSError("intended activation publication failure")

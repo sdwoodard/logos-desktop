@@ -2,23 +2,17 @@
 They can be called from CLI, GUI, or TUI.
 """
 
-import copy
 from contextlib import ExitStack
 import json
-import logging
 import os
 import stat
-import tempfile
 from pathlib import Path
-import subprocess
-from typing import Any
 import webbrowser
-from zipfile import ZipFile
 
 from ou_dedetai import constants
 from ou_dedetai import maintenance, backup_store
-from ou_dedetai import paths, artifacts, runtime
-from ou_dedetai import system
+from ou_dedetai import paths, runtime
+from ou_dedetai import system, support
 from ou_dedetai.app import App, UserExitedFromAsk
 
 
@@ -120,10 +114,14 @@ def uninstall(app: App):
     add_target(config_path)
     if install is not None and (install.exists() or install.is_symlink()):
         add_target(install, directory=True)
-        portable = install / f"{constants.BINARY_NAME}.json"
+        portable = install / constants.PORTABLE_CONFIG_NAME
+        if not os.path.lexists(portable):
+            portable = install / f"{constants.BINARY_NAME}.json"
         paths.validate_removal_path(portable, protected)
         with portable.open() as source:
             portable_config = json.load(source)
+        if not isinstance(portable_config, dict):
+            raise ValueError(f"Installation ownership is not established: {install}")
         recorded = portable_config.get("install_dir", portable_config.get("INSTALLDIR"))
         if (
             not isinstance(recorded, str)
@@ -200,8 +198,16 @@ def uninstall(app: App):
     return True
 
 
-def get_support(app: App) -> str:
-    """Publish a closed support archive before presenting follow-up choices."""
+def get_support(app: App, cancel=None) -> str | None:
+    """Preview a frozen sanitized snapshot and confirm before publication."""
+
+    if vars(app.conf._overrides).get("assume_yes"):
+        raise maintenance.MaintenanceError("Support export requires explicit preview confirmation without --assume-yes")
+    snapshot = support.prepare(app, cancel=cancel)
+    app.info(support.preview(snapshot))
+    if not app.approve("Export this exact sanitized support snapshot?",
+                       "Raw logs, configuration, environment and cache are omitted."):
+        return None
 
     # Save in ~/Downloads or ~/
     output_dir = Path(os.path.expanduser("~/Downloads"))
@@ -216,31 +222,14 @@ def get_support(app: App) -> str:
     if not output_path or not str(output_path).strip():
         raise UserExitedFromAsk
     output = Path(output_path).expanduser().absolute()
-    sources = [
-        app.conf.config_file_path, app.conf.app_log_path, app.conf.app_wine_log_path,
-        app.conf.app_wine_log_previous_path, app.conf._faithlife_crash_log,
-    ]
-    for source in filter(None, sources):
-        source = Path(source)
-        if output.resolve() == source.resolve() or (output.exists() and source.exists() and output.samefile(source)):
-            raise maintenance.MaintenanceError("Support output cannot replace a configuration or log file")
-    if output.is_symlink() or output.is_dir():
-        raise maintenance.MaintenanceError("Support output must be an unlinked regular file")
+    overwrite = False
+    if os.path.lexists(output):
+        overwrite = app.approve("Replace the existing support output?", str(output))
+        if not overwrite:
+            return None
 
     app.status(f"Writing support package to: {output_path}", percent=0)
-
-    with tempfile.TemporaryDirectory(prefix=".logos-support-", dir=output.parent) as temporary:
-        staged = Path(temporary) / "support.zip"
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(descriptor)
-        with maintenance.artifact_use():
-            _write_support(app, staged)
-        with staged.open("rb") as completed:
-            os.fsync(completed.fileno())
-        with ZipFile(staged) as archive:
-            if archive.testzip() is not None or "context.json" not in archive.namelist():
-                raise maintenance.MaintenanceError("Support archive validation failed")
-        os.replace(staged, output)
+    support.export(snapshot, output, overwrite=overwrite, cancel=cancel)
 
     app.status(f"Wrote support bundle to: {output_path}", percent=100)
     try:
@@ -262,102 +251,3 @@ def get_support(app: App) -> str:
             f"- Issues: {constants.REPOSITORY_ISSUES_LINK}\n"
         )
     return output_path
-
-
-def _write_support(app, output_path):
-    with ZipFile(output_path, "w") as zip:
-        if Path(app.conf.config_file_path).exists():
-            zip.write(app.conf.config_file_path)
-        if Path(app.conf.app_log_path).exists():
-            zip.write(app.conf.app_log_path)
-        if Path(app.conf.app_wine_log_path).exists():
-            zip.write(app.conf.app_wine_log_path)
-        if Path(app.conf.app_wine_log_previous_path).exists():
-            zip.write(app.conf.app_wine_log_previous_path)
-        # Only include LogosCrash.log for now. Logos.log can include
-        # information about which books the user owns which is more information than
-        # The user would probably expect to be included in a support package.
-        if (
-            app.conf._faithlife_crash_log is not None and
-            Path(app.conf._faithlife_crash_log).exists()
-        ):
-            zip.write(app.conf._faithlife_crash_log)
-
-        if Path("/etc/os-release").exists():
-            zip.write("/etc/os-release")
-        run_commands = [
-            ["glxinfo"],
-            ["free", "-h"],
-            ["inxi", "-F"],
-            ["df", "-h"],
-            ["xdg-mime", "query", "default", "x-scheme-handler/https"],
-            ["xdg-mime", "query", "default", "x-scheme-handler/logos4"],
-            ["xdg-mime", "query", "default", "x-scheme-handler/libronixdls"]
-        ]
-
-        if app.conf._raw.wine_binary:
-            try:
-                selected = Path(app.conf._raw.wine_binary)
-                if not selected.is_absolute():
-                    selected = Path(app.conf._raw.install_dir) / selected
-                # AppImage resolution can import bytes into the prefix. Diagnostics
-                # skip it rather than changing the failing installation.
-                if selected.resolve().name.lower().endswith(".appimage"):
-                    raise ValueError("AppImage execution is skipped during read-only diagnostics")
-                run_commands += [[str(paths.executable(selected)), "--version"]]
-            except (ValueError, OSError, artifacts.ArtifactError, maintenance.MaintenanceError) as error:
-                logging.warning("Skipping runtime diagnostic: %s", error)
-
-        subprocess_env = copy.deepcopy(os.environ)
-        # Set LANG to enable support
-        subprocess_env["LANG"] = "en_US.UTF-8"
-
-        for command in run_commands:
-            try:
-                output = subprocess.check_output(
-                    command,
-                    text=True,
-                    env=subprocess_env,
-                    timeout=15,
-                )
-                zip.writestr(f"/tmp/{" ".join(command).replace("/","_")}", output)
-            except Exception as e:
-                # Some of these commands may not be found.
-                logging.debug(
-                    "Failed to gather extra information: "
-                    + " ".join(command) + ": " + str(e)
-                )
-
-        include_envs = [
-            "WINEDEBUG",
-            # Which desktop environment is running
-            "XDG_CURRENT_DESKTOP",
-            "DESKTOP_SESSION",
-            # Needed to detect lxde
-            "GDMSESSION",
-            # Wayland vs X11
-            "XDG_SESSION_TYPE",
-            "DISPLAY",
-            "LANG"
-        ]
-
-        context_to_write: dict[str, Any] = {}
-        for env in include_envs:
-            if os.getenv(env):
-                context_to_write[env] = os.getenv(env)
-
-        # Also add our DIALOG to the list
-        context_to_write["DIALOG"] = getattr(app.conf._overrides, "dialog", None) or "cli"
-
-        # These aren't really envs, but still relevant. Consider a different file?
-        context_to_write["RUNMODE"] = constants.RUNMODE
-        context_to_write["CACHE_DIR"] = constants.CACHE_DIR
-        context_to_write["DATA_HOME"] = constants.DATA_HOME
-        context_to_write["CONFIG_DIR"] = constants.CONFIG_DIR
-        context_to_write["STATE_DIR"] = constants.STATE_DIR
-
-        context_to_write["network_cache"] = app.conf._network._cache._as_dict()
-        context_to_write["ephemeral_config"] = app.conf._overrides.__dict__
-        context_to_write["persistent_config"] = app.conf._raw._as_dict()
-
-        zip.writestr("context.json", json.dumps(context_to_write, indent=4))

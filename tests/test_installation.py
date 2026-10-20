@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import artifacts, cli, constants, installer, maintenance, processes, runtime, system, utils, wine
+from ou_dedetai import (
+    artifacts, cli, constants, installer, maintenance, network, processes, runtime, system, utils, wine,
+)
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import Config, EphemeralConfiguration
 from tests.artifact_fixtures import appimage, msi
@@ -107,11 +109,15 @@ class TestInstallation(unittest.TestCase):
         run.assert_called_once_with(["sudo", "pkg", "install", "required"])
 
     def test_unavailable_update_never_reports_cli_success(self):
-        self.app.conf.faithlife_product_releases = []
+        self.app.conf._network.product_release.return_value = network.ProductLookup(status="empty")
+        self.app.conf.refresh_installed_faithlife_product_release = Mock(return_value="38.0.0.0")
         self.app.exit = Mock(side_effect=AssertionError("Update must not report success"))
         with patch.object(installer, "install") as install:
-            with self.assertRaisesRegex(maintenance.MaintenanceError, "No usable release"):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "No stable product release"):
                 cli.CLI.update_installed_app(self.app)
+        self.app.conf._network.product_release.assert_called_once_with("Logos", "10", "stable", force=True)
+        self.app.conf.refresh_installed_faithlife_product_release.assert_called_once_with()
+        self.assertEqual(self.app.conf.faithlife_product_release, "38.0.0.0")
         install.assert_not_called()
         self.app.exit.assert_not_called()
 
@@ -400,6 +406,99 @@ print(json.dumps([conf.wine_binary,conf.wine64_binary,conf.wineserver_binary,
         path.write_text(json.dumps(saved))
         with self.assertRaisesRegex(ValueError, "Boolean settings"):
             EphemeralConfiguration.load_from_path(str(path))
+
+
+class TestCLIUpdateEffectiveConfiguration(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.install = self.root / "install"
+        self.live = self.install / "data/wine64_bottle/drive_c/users/fixture/AppData/Local/Logos"
+        (self.live / "System").mkdir(parents=True)
+        (self.live / "Logos.exe").write_bytes(b"fixture executable")
+        (self.live / "System/Logos.deps.json").write_text(json.dumps({"libraries": {"Logos/38.0.0.0": {}}}))
+        self.path = self.root / "selected.json"
+        self.path.write_text(json.dumps({
+            "install_dir": str(self.install), "faithlife_product": "Logos",
+            "faithlife_product_version": "10", "faithlife_product_release": "38.0.0.0",
+        }))
+        self.original = self.path.read_bytes()
+        self.app = SimpleNamespace(_config_updated_event=Event(), status=Mock(),
+                                   ask=Mock(side_effect=AssertionError("No prompts")))
+        self.requests = Mock()
+        self.requests.product_release.return_value = network.ProductLookup(("40.0.0.0",), "ok")
+        environment = patch.dict(os.environ, {}, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        state = patch.object(constants, "STATE_DIR", str(self.root / "state/logos-desktop"))
+        state.start()
+        self.addCleanup(state.stop)
+
+    def load(self, environment=None):
+        os.environ.update(environment or {})
+        with patch.object(Config, "_create_network_requests_with_hook", return_value=self.requests):
+            self.app.conf = Config(EphemeralConfiguration.load_from_path(str(self.path)), self.app)
+        self.assertEqual(self.app.conf.refresh_installed_faithlife_product_release(), "38.0.0.0")
+
+    def test_older_environment_target_rejected_before_any_publication(self):
+        self.load({"TARGET_RELEASE_VERSION": "37.0.0.0"})
+        with patch.object(installer, "install") as install:
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "override conflicts"):
+                utils.update_faithlife_product(self.app)
+        install.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), self.original)
+        self.assertFalse(self.app._config_updated_event.is_set())
+        self.assertFalse((self.install / f"{constants.BINARY_NAME}.json").exists())
+
+    def test_no_source_override_and_matching_target_overlay_use_admitted_release(self):
+        for environment in ({}, {"TARGET_RELEASE_VERSION": "40.0.0.0"}):
+            with self.subTest(environment=environment):
+                self.path.write_bytes(self.original)
+                self.load(environment)
+
+                def acquire(app):
+                    self.assertTrue(maintenance.installation_owned())
+                    self.assertIsNotNone(app.conf.write_validator)
+                    self.assertEqual(app.conf.faithlife_product_release, "40.0.0.0")
+                    self.assertIsNone(app.conf._overrides.faithlife_installer_download_url)
+                    self.assertIsNone(app.conf._overrides.faithlife_installer_name)
+                    # Installer-owned publications retain the admitted-target validator.
+                    app.conf.faithlife_product_logging = True
+                    before = self.path.read_bytes()
+                    with self.assertRaisesRegex(maintenance.MaintenanceError, "override conflicts"):
+                        app.conf._change(faithlife_product_release_channel="beta")
+                    self.assertEqual(self.path.read_bytes(), before)
+
+                with patch.object(installer, "install", side_effect=acquire) as install:
+                    utils.update_faithlife_product(self.app)
+                install.assert_called_once_with(self.app)
+                self.assertEqual(self.app.conf.faithlife_product_release, "40.0.0.0")
+                saved_target = "38.0.0.0" if environment else "40.0.0.0"
+                self.assertEqual(json.loads(self.path.read_bytes())["faithlife_product_release"], saved_target)
+                self.assertIsNone(self.app.conf.write_validator)
+
+    def test_custom_source_overrides_refuse_even_when_target_matches(self):
+        for source in ({"LOGOS64_URL": "https://example.invalid/custom.msi"},
+                       {"LOGOS_EXECUTABLE": "custom.msi"}):
+            with self.subTest(source=source), patch.dict(os.environ, source, clear=True):
+                self.load({"TARGET_RELEASE_VERSION": "40.0.0.0"})
+                with patch.object(installer, "install") as install:
+                    with self.assertRaisesRegex(maintenance.MaintenanceError, "Custom installer sources"):
+                        utils.update_faithlife_product(self.app)
+                install.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), self.original)
+                self.assertFalse(self.app._config_updated_event.is_set())
+
+    def test_current_installed_target_never_publishes_or_installs(self):
+        self.load()
+        self.requests.product_release.return_value = network.ProductLookup(("38.0.0.0",), "ok")
+        with patch.object(installer, "install") as install:
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "current"):
+                utils.update_faithlife_product(self.app)
+        install.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), self.original)
+        self.assertFalse(self.app._config_updated_event.is_set())
 
 
 class TestWinePolicy(unittest.TestCase):

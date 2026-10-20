@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import constants, control, network, tui_app, updates, utils
+from ou_dedetai import constants, control, network, support, tui_app, updates, utils
 from ou_dedetai.config import Config
 
 
@@ -111,7 +111,7 @@ class TestPrivateSupport(unittest.TestCase):
                         return str(archive_path)
                     with ZipFile(archive_path) as completed:
                         self.assertIsNone(completed.testzip())
-                        self.assertIn("context.json", completed.namelist())
+                        self.assertEqual(completed.namelist(), ["manifest.json", "doctor.json", "summary.txt"])
                     return choice
 
                 def status(message, percent=None):
@@ -124,8 +124,6 @@ class TestPrivateSupport(unittest.TestCase):
 
                 with (
                     patch.object(control.os.path, "expanduser", return_value=str(root)),
-                    patch.object(control.subprocess, "check_output", return_value="synthetic command output"),
-                    patch.object(control.system, "get_dialog", return_value="cli"),
                     patch.object(control.webbrowser, "open") as browser,
                 ):
                     self.assertEqual(control.get_support(app), str(archive_path))
@@ -148,7 +146,11 @@ class TestPrivateSupport(unittest.TestCase):
 
                 with ZipFile(archive_path) as archive:
                     self.assertIsNone(archive.testzip())
-                    self.assertIn("context.json", archive.namelist())
+                    self.assertEqual(archive.namelist(), ["manifest.json", "doctor.json", "summary.txt"])
+                    preview = app.info.call_args_list[0].args[0]
+                    for name in archive.namelist():
+                        self.assertIn(archive.read(name).decode(), preview)
+                    self.assertNotIn(str(root), preview)
 
     def test_failed_archive_close_or_publication_preserves_previous_output(self):
         class CloseFailure(ZipFile):
@@ -174,13 +176,11 @@ class TestPrivateSupport(unittest.TestCase):
                 )
                 app.ask.return_value = str(archive)
                 boundary = (
-                    patch.object(control, "ZipFile", CloseFailure) if failure == "close"
-                    else patch.object(control.os, "replace", side_effect=OSError("injected replace failure"))
+                    patch.object(support, "ZipFile", CloseFailure) if failure == "close"
+                    else patch.object(support.os, "replace", side_effect=OSError("injected replace failure"))
                 )
                 with (
                     boundary,
-                    patch.object(control.subprocess, "check_output", return_value="fixture"),
-                    patch.object(control.system, "get_dialog", return_value="cli"),
                     patch.object(control.webbrowser, "open") as browser,
                     self.assertRaises(OSError),
                 ):

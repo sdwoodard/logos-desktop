@@ -4,16 +4,19 @@ from dataclasses import replace
 from functools import partial
 import logging
 from pathlib import Path
+import json
+import hashlib
+import os
 import shutil
+import sys
 import threading
 
-from packaging.version import InvalidVersion, Version
-
 from ou_dedetai import backup, backup_store, constants, control, installer, maintenance
+from ou_dedetai import adoption, desktop, doctor, network, processes, support
 from ou_dedetai import config_store, repair, runtime, updates, utils, wine
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
-from ou_dedetai.logos import LogosManager, State
+from ou_dedetai.logos import State
 from .bridge import Result
 from .window import Installation
 
@@ -25,6 +28,8 @@ class Services:
         self._lock = threading.Lock()
         self._snapshot = Installation("Logos", "Unknown", "Not selected", "", installed=False)
         self.prepared = None
+        self.doctor_report = ""
+        self._doctor_profile = None
 
     def snapshot(self):
         with self._lock:
@@ -32,6 +37,8 @@ class Services:
 
     def refresh(self, app, cancel):
         conf = app.conf
+        if self._doctor_profile != conf.config_file_path:
+            self.doctor_report = ""
         raw = conf._raw
         snapshot = Installation(
             raw.faithlife_product or "Logos", "Unknown",
@@ -39,7 +46,7 @@ class Services:
             installed=False, running=app.logos.logos_state == State.RUNNING,
             state=app.logos.logos_state.name.title(), indexing=app.logos.indexing_state.name.title(),
             health="Choose Install or use an existing installation profile.", profile=conf.config_file_path,
-            backup=raw.backup_dir or "", product_channel=conf.faithlife_product_release_channel,
+            backup=str(doctor.selected_paths(conf)[2] or ""), product_channel=conf.faithlife_product_release_channel,
             controller_channel=conf.app_release_channel, logging=conf.faithlife_product_logging,
             selected=bool(raw.install_dir and raw.faithlife_product == "Logos"),
             runtimes=self.snapshot().runtimes,
@@ -72,13 +79,36 @@ class Services:
         if not installed:
             return "Install a product first"
         lookup = conf._network.product_release("Logos", conf.faithlife_product_version, "stable", refresh=False)
-        if lookup.status != "ok" or lookup.stale or not lookup.versions:
-            return "Not checked or unavailable"
-        try:
-            current = Version(conf.installed_faithlife_product_release) >= Version(lookup.versions[0])
-        except (TypeError, InvalidVersion):
-            return "Not checked or unavailable"
-        return "Current" if current else "Update available"
+        state = network.product_update_state(conf.installed_faithlife_product_release, lookup)
+        return f"Update available: {state.message}" if state.actionable else f"{state.status}: {state.message}"
+
+    def _preflight(self, app, candidate):
+        report = doctor.inspect(candidate)
+        self.doctor_report = report["summary"]
+        self._doctor_profile = candidate.config_file_path
+        errors = [item["summary"] for item in report["checks"] if item["status"] == "error"]
+        if errors:
+            raise maintenance.MaintenanceError("Installation preflight failed:\n" + "\n".join(errors))
+        if not app.approve("Review installation preflight", self.doctor_report):
+            raise UserExitedFromAsk
+
+    @staticmethod
+    def _selection(app, candidate):
+        if any(state != State.STOPPED for state in (app.logos.logos_state, app.logos.indexing_state)):
+            raise maintenance.MaintenanceBusy("Stop this installation before changing profiles")
+        selection = getattr(app, "profile_selection", None)
+        if selection is None:
+            raise maintenance.MaintenanceError("Profile ownership transfer is unavailable")
+        return selection(candidate)
+
+    @staticmethod
+    def _candidate(app, document, path):
+        candidate = Config(EphemeralConfiguration.project(document, str(path), environment={}), app)
+        raw = PersistentConfiguration.from_document(document, {})
+        raw._file_path = str(path)
+        raw._file_bytes = candidate._raw._file_bytes
+        candidate.rebind(raw)
+        return candidate
 
     def toggle(self, app, cancel):
         return self.operation("stop" if self.snapshot().running else "launch")(app, cancel)
@@ -135,7 +165,10 @@ class Services:
         app.checkpoint()
         if lookup.status != "ok" or lookup.stale or not lookup.versions:
             raise maintenance.MaintenanceError("The latest stable Logos release is unavailable. Check and retry")
-        return lookup.versions[0]
+        state = network.product_update_state("0.0", lookup)
+        if not state.actionable:
+            raise maintenance.MaintenanceError("The stable Logos release target is invalid or unavailable")
+        return state.target
 
     @staticmethod
     def _release_changes(conf, target):
@@ -205,6 +238,9 @@ class Services:
             document = config_store.apply_changes(app.conf._raw._saved, changes, app.conf.config_file_path)
             self._validate_proposal(app.conf, target_draft, document)
 
+            self._preflight(app, self._candidate(app, document, app.conf.config_file_path))
+            app.checkpoint()
+
             validate_release = partial(self._validate_release_document, app.conf, target_draft.release)
             validate_install = partial(self._validate_proposal, app.conf, target_draft)
             with app.conf.validated_writes(validate_install):
@@ -244,13 +280,71 @@ class Services:
                 return Result("cancelled", "Installation selection was not changed")
             app.checkpoint()
 
-            if not app.logos.close():
-                raise maintenance.MaintenanceBusy("The previous installation is still settling")
-
-            app.conf = candidate
-            app.logos = LogosManager(app)
-            app.logos.start_monitoring()
+            with self._selection(app, candidate):
+                app.checkpoint()
             return Result("succeeded", "Existing installation selected without reinstalling")
+        return self._settled(run)
+
+    def adopt_profile(self, path, *, directory=False, destination=None):
+        def run(app, cancel):
+            discovery = (adoption.discover([], installation=path) if directory
+                         else adoption.discover([path]))
+            if discovery.issues:
+                raise ValueError("\n".join(discovery.issues))
+            if len(discovery.candidates) != 1:
+                raise ValueError("Choose one configuration file. The selection did not identify one installation")
+            selected = discovery.candidates[0]
+            if selected.product != "Logos":
+                raise ValueError("Choose a Logos installation")
+            plan = adoption.preview(selected, destination)
+            candidate = self._candidate(app, json.loads(plan.content), plan.destination)
+            description = (f"Original: {selected.source or 'No configuration, reconstruct from directory'}\n"
+                           f"New durable configuration: {plan.destination}\nInstallation: {selected.install}\n"
+                           f"Prefix: {selected.prefix}\nJournal: {plan.journal}\n"
+                           "The original and library stay in place. No installation or download is performed.")
+            if not app.approve("Adopt this existing installation?", description):
+                return Result("cancelled", "Adoption was not started")
+            app.checkpoint()
+            with self._selection(app, candidate):
+                result = adoption.adopt(plan)
+                try:
+                    if adoption._read(plan.destination) != plan.content:
+                        raise adoption.AdoptionError("Published configuration no longer matches the adoption preview")
+                except (OSError, ValueError, maintenance.MaintenanceError) as error:
+                    raise maintenance.MaintenanceError(
+                        "Adoption was published, but its configuration changed or could not be verified. "
+                        f"Later edits were preserved. Review the adoption journal: {result.journal}") from error
+                raw = PersistentConfiguration.from_document(json.loads(plan.content), candidate._overrides.environment)
+                raw._file_path = str(plan.destination)
+                raw._file_bytes = plan.content
+                candidate.rebind(raw)
+            return Result("succeeded", f"Installation adopted. Journal: {result.journal}")
+        return self._settled(run)
+
+    def rollback_migration(self, journal, *, integration=False):
+        def run(app, cancel):
+            if not app.approve("Roll back this migration?", f"Journal: {journal}\n"
+                               "Restore controller-owned files only. Later edits and library data are preserved."):
+                return Result("cancelled", "Rollback was not started")
+            app.checkpoint()
+            if integration:
+                profile = hashlib.sha256(os.fsencode(Path(app.conf.config_file_path).resolve())).hexdigest()[:24]
+                expected = Path(constants.COORDINATION_DIR) / "desktop" / f"{profile}.json"
+                if Path(journal).resolve() != expected.resolve():
+                    raise ValueError("Choose the desktop journal for the selected profile")
+                result = desktop.rollback(journal)
+            else:
+                selected = Path(app.conf.config_file_path)
+                if Path(journal).resolve() != adoption._journal_path(selected).resolve():
+                    raise ValueError("Choose the adoption journal for the selected profile")
+                candidate = self._candidate(app, {}, selected)
+                with self._selection(app, candidate):
+                    result = adoption.rollback(journal)
+                    if result.conflicts:
+                        raise maintenance.MaintenanceError(
+                            "Rollback preserved later edits: " + ", ".join(result.conflicts))
+            return Result("unknown" if result.conflicts else "succeeded",
+                          f"Rollback: {result.state}", "\n".join(result.conflicts))
         return self._settled(run)
 
     def settings(self, backup_dir, product_channel, controller_channel, *, profile=None):
@@ -287,26 +381,51 @@ class Services:
                 return Result("succeeded", "Selected indexer stopped")
 
             if name == "check":
+                app.status("Checking stable Logos releases…", None)
                 lookup = app.conf._network.product_release("Logos", app.conf.faithlife_product_version,
                                                           "stable", force=True)
                 app.checkpoint()
-                if lookup.status != "ok" or lookup.stale:
-                    return Result("unknown", "Stable release information is unavailable",
-                                  "Check the connection and try again")
-                return Result("succeeded", "Checked the latest stable Logos release")
+                state = network.product_update_state(app.conf.installed_faithlife_product_release, lookup)
+                return Result("succeeded", f"{state.status}: {state.message}")
+
+            if name == "doctor":
+                self.doctor_report = doctor.inspect(app.conf)["summary"]
+                self._doctor_profile = app.conf.config_file_path
+                app.info(self.doctor_report)
+                return Result("succeeded", "Read-only diagnostics completed")
+
+            if name == "desktop":
+                launcher = [sys.executable] if getattr(sys, "frozen", False) else [
+                    sys.executable, "-m", "ou_dedetai.main"]
+                plan = desktop.preview(app.conf.config_file_path, launcher, product="Logos",
+                                       windows_executable=app.conf.logos_exe_windows_path)
+                details = (f"Profile: {plan.config}\nJournal: {plan.journal}\nFiles:\n"
+                           + "\n".join(str(item.path) for item in plan.files)
+                           + "\nCurrent URL defaults:\n"
+                           + "\n".join(f"{scheme}: {previous or 'None'}" for scheme, previous in plan.defaults)
+                           + "\n" + "\n".join(plan.issues))
+                if not app.approve("Add desktop launchers for this profile?", details):
+                    return Result("cancelled", "Desktop integration was not changed")
+                app.checkpoint()
+                result = desktop.adopt(plan)
+                return Result("succeeded", f"Desktop integration: {result.state}. Journal: {result.journal}",
+                              "\n".join(result.issues))
+
+            if name in ("open_install", "open_backup", "open_logs"):
+                return self.open_folder(name)(app, cancel)
 
             if name == "backup":
                 path = backup.BackupTask(app, stop=cancel).run()
                 return Result("succeeded", f"Verified backup: {path}")
 
             if name == "restore":
-                if not app.approve("Restore a completed backup?", "This replaces the selected product's user data."):
-                    return Result("cancelled", "Restore was not started")
                 warning = backup.RestoreTask(app, stop=cancel).run()
                 return Result("succeeded", warning or "Restore completed. Selected data verified")
 
             if name == "support":
-                path = control.get_support(app)
+                path = control.get_support(app, cancel=cancel)
+                if path is None:
+                    return Result("cancelled", "Support export was not started")
                 return Result("succeeded", f"Private support archive: {path}")
 
             if name == "controller_update":
@@ -345,12 +464,19 @@ class Services:
             if name == "product_update":
                 target = self._latest_target(app)
                 changes = self._release_changes(app.conf, target)
+                if not network.is_newer_product_release(app.conf.installed_faithlife_product_release, target):
+                    raise maintenance.MaintenanceError(
+                        "The target is not newer than the installed version. Check releases again")
                 if not app.approve("Update Logos?", f"Latest stable release: {target}\n"
                                    f"Installation: {app.conf._raw.install_dir}"):
                     return Result("cancelled", "Update was not started")
                 app.checkpoint()
                 validator = partial(self._validate_release_document, app.conf, target)
                 with app.conf.validated_writes(validator), maintenance.installing(app):
+                    installed = app.conf.refresh_installed_faithlife_product_release()
+                    if not network.is_newer_product_release(installed, target):
+                        raise maintenance.MaintenanceError(
+                            "The target is not newer than the installed version. Check releases again")
                     app.conf._change(**self._release_changes(app.conf, target))
                     self._validate_release_document(app.conf, target, app.conf._raw._saved)
                     installer.install(app)
@@ -417,7 +543,7 @@ class Services:
         def run(app, cancel):
             try:
                 return operation(app, cancel)
-            except (backup_store.CopyCancelled, UserExitedFromAsk):
+            except (backup_store.CopyCancelled, support.SupportCancelled, UserExitedFromAsk):
                 return Result("cancelled", "Operation cancelled at a safe boundary. Earlier completed steps remain")
             finally:
                 try:
@@ -430,7 +556,34 @@ class Services:
         path = Path(app.conf.app_log_path)
         if not path.is_file():
             raise ValueError("No controller log exists yet")
-        if not shutil.which("xdg-open"):
-            raise ValueError("xdg-open is unavailable")
-        control.edit_file(str(path))
+        self._open(path, cancel)
         return Result("succeeded", "Controller log opened")
+
+    @staticmethod
+    def _open(path, cancel):
+        command = shutil.which("xdg-open")
+        if not command:
+            raise ValueError("xdg-open is unavailable")
+        with processes.owned(cancel):
+            try:
+                _, code = processes.capture([command, str(path.resolve())], env=dict(os.environ),
+                                            timeout=10, limit=16384, label="Folder opener")
+            except processes.CaptureError:
+                if cancel.is_set():
+                    raise UserExitedFromAsk from None
+                raise
+        if code:
+            raise ValueError("The desktop opener could not open the selected path")
+
+    def open_folder(self, name):
+        def run(app, cancel):
+            install, _, backup_path = doctor.selected_paths(app.conf)
+            paths = {"open_install": install, "open_backup": backup_path,
+                     "open_logs": Path(app.conf.app_log_path).parent}
+            path = paths[name]
+            if path is None or not path.is_absolute() or not path.is_dir():
+                raise ValueError("The selected folder is unavailable")
+            app.checkpoint()
+            self._open(path, cancel)
+            return Result("succeeded", f"Opened folder: {path}")
+        return run

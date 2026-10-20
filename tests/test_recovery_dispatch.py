@@ -92,12 +92,13 @@ class TestRecoveryDispatch(unittest.TestCase):
                 self.dispatch("--edit-config")
                 edit.assert_called_once_with(str(self.selected[0]))
             archive = self.root / "support.zip"
-            with patch("ou_dedetai.control.subprocess.check_output", return_value="fixture"):
-                self.dispatch("--get-support", [str(archive), "Keep archive local"])
+            self.dispatch("--get-support", ["Yes", str(archive), "Keep archive local"])
             with ZipFile(archive) as package:
-                member = str(self.selected[0]).lstrip("/")
-                self.assertEqual(package.read(member), self.selected[0].read_bytes())
-                self.assertNotIn(str(self.other[0]).lstrip("/"), package.namelist())
+                self.assertEqual(package.namelist(), ["manifest.json", "doctor.json", "summary.txt"])
+                report = json.loads(package.read("doctor.json"))
+                self.assertIn("Pending recovery", report["summary"])
+                for name in package.namelist():
+                    self.assertNotIn(str(self.root).encode(), package.read(name))
             self.dispatch("--repair", ["No"])
         for name, digest in before.items():
             self.assertEqual(hashlib.sha256((self.root / name).read_bytes()).hexdigest(), digest)

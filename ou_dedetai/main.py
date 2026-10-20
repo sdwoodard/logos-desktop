@@ -12,6 +12,7 @@ from ou_dedetai.config import (
 import logging
 import os
 import sys
+import threading
 
 from . import cli
 from . import artifacts
@@ -23,6 +24,7 @@ from . import tui_app
 from . import utils
 from . import updates
 from . import config_store
+from . import instance
 
 
 def get_parser():
@@ -109,6 +111,19 @@ def get_parser():
         ),
     )
     cmd = grp.add_mutually_exclusive_group()
+    cmd.add_argument('--doctor', action='store_true', help='inspect stored configuration without repairs')
+    cmd.add_argument('--discover-installations', action='store_true', help='list existing installation candidates')
+    cmd.add_argument('--adopt-installation', metavar='PATH', help='adopt an explicit config or installation directory')
+    cmd.add_argument('--rollback-adoption', metavar='JOURNAL', help='roll back controller-owned adoption files')
+    cmd.add_argument('--update-status', action='store_true', help='inspect stable product update availability')
+    cmd.add_argument('--list-backups', action='store_true', help='list completed snapshot metadata')
+    cmd.add_argument('--restore-snapshot', metavar='PATH', help='verify and confirm an exact snapshot restore')
+    cmd.add_argument('--support-preview', action='store_true', help='print the exact sanitized support snapshot')
+    cmd.add_argument('--support-export', metavar='PATH', help='preview and explicitly export a sanitized zip archive')
+    cfg.add_argument('--adoption-destination', metavar='PATH', help='durable configuration destination')
+    cfg.add_argument('--confirm-adoption', action='store_true', help='explicitly confirm adoption or rollback')
+    cfg.add_argument('--confirm-export', action='store_true', help='explicitly confirm support archive export')
+    cfg.add_argument('--overwrite-export', action='store_true', help='allow replacing an existing support archive')
     cmd.add_argument('--repair', dest='repair_app', action='store_true', help='repair the selected installation')
     cmd.add_argument(
         '--status', dest='installation_status', action='store_true',
@@ -134,6 +149,7 @@ def get_parser():
         '--run-indexing', action='store_true',
         help='perform indexing',
     )
+    cmd.add_argument('--stop-indexing', action='store_true', help='stop indexing for the selected installation')
     cmd.add_argument(
         '--remove-library-catalog', action='store_true',
         # help='remove library catalog database file'
@@ -222,7 +238,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
     if args.config is not None:
         ephemeral_config = EphemeralConfiguration.load_from_path(args.config)
     else:
-        ephemeral_config = EphemeralConfiguration.load()
+        ephemeral_config = EphemeralConfiguration.load_from_path(LegacyConfiguration.config_file_path())
     if args.check_for_updates:
         ephemeral_config.check_updates_now = True
     if args.dialog:
@@ -304,6 +320,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
         'remove_library_catalog',
         'restore',
         'run_indexing',
+        'stop_indexing',
         'run_installed_app',
         'update_installed_app',
         'stop_installed_app',
@@ -474,6 +491,55 @@ def run_controller_update(args):
     prepared.restart(arguments)
 
 
+def is_url_request(arguments):
+    from urllib.parse import urlsplit
+
+    return bool(arguments and len(arguments) == 2 and len(arguments[1]) <= 16384
+                and urlsplit(arguments[1]).scheme.lower() in ('logos4', 'libronixdls')
+                and not any(ord(char) < 32 for char in arguments[1]))
+
+
+def run_url_request(ephemeral_config):
+    """Deliver only a selected product URL without constructing a controller."""
+    from types import SimpleNamespace
+    import subprocess
+    from . import runtime, wine
+    from .config import Config
+
+    if os.getuid() == 0 and not ephemeral_config.app_run_as_root_permitted:
+        raise maintenance.MaintenanceError("Running Wine as root requires --force-root")
+    system.check_architecture()
+
+    def no_prompt(*args, **kwargs):
+        raise maintenance.MaintenanceError("The URL handler requires a complete installed profile")
+
+    app = SimpleNamespace(ask=no_prompt, approve=no_prompt, exit=no_prompt,
+                          _config_updated_event=threading.Event())
+    app.conf = Config(ephemeral_config, app)
+    arguments = ephemeral_config.wine_args
+    if not is_url_request(arguments) or arguments[0] != app.conf.logos_exe_windows_path:
+        raise maintenance.MaintenanceError("URL handler executable does not match the selected installation")
+    with maintenance.configured(app) as context:
+        instance.check_legacy(context.prefix)
+        with maintenance.use(context), maintenance.artifact_use(), runtime.activation_guard(app):
+            command, environment = wine._wine_invocation(app, app.conf.wine64_binary, None)
+            # The URL may contain a login token. Bypass command and Wine logs.
+            with subprocess.Popen([*command, *arguments], env=environment,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, start_new_session=True) as process:
+                interrupted = False
+                while True:
+                    try:
+                        code = process.wait()
+                        break
+                    except KeyboardInterrupt:
+                        interrupted = True
+                if interrupted:
+                    raise KeyboardInterrupt
+                if code:
+                    raise maintenance.MaintenanceError("The product URL handler failed")
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--fetch-metadata":
         from . import metadata
@@ -481,21 +547,65 @@ def main():
         metadata.worker(sys.argv[2])
         return
     args = get_parser().parse_args()
-    if args.update_self:
-        try:
-            run_controller_update(args)
-        except (artifacts.ArtifactError, OSError, ValueError) as error:
-            print(str(error), file=sys.stderr)
-            raise SystemExit(1) from error
-        return
-    arguments = updates.resume_arguments(args.config or LegacyConfiguration.config_file_path(), args.dialog)
-    updates.recover_startup(arguments)
     try:
+        from . import commands
+
+        status = commands.dispatch(args)
+        if status is not None:
+            raise SystemExit(status)
+        if args.update_self:
+            updates.eligible()
         ephemeral_config, action = setup_config(args)
-    except config_store.ConfigurationError as error:
+    except (config_store.ConfigurationError, maintenance.MaintenanceError, artifacts.ArtifactError, OSError, ValueError,
+            KeyError, IndexError, TypeError) as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from error
-    diagnostic = action.__name__ in ("installation_status", "get_support", "stop_installed_app", "edit_config")
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    diagnostic = action.__name__ == 'installation_status'
+    session = None
+    try:
+        if is_url_request(args.wine):
+            run_url_request(ephemeral_config)
+            return
+        if not diagnostic:
+            session = instance.Session.for_config(ephemeral_config)
+            try:
+                session.acquire()
+            except instance.InstanceBusy:
+                defaults = get_parser().parse_args([])
+                explicit = any(value != getattr(defaults, name, None) for name, value in vars(args).items()
+                               if name not in ('config', 'dialog', 'force_root', 'quiet'))
+                dialog = ephemeral_config.dialog or system.get_dialog()
+                if action is run_control_panel and dialog in ('qt', 'tk') and not explicit and session.focus(
+                        os.environ.get('XDG_ACTIVATION_TOKEN', '')):
+                    return
+                raise
+            ephemeral_config._instance_session = session
+            if args.update_self:
+                run_controller_update(args)
+                return
+            arguments = updates.resume_arguments(args.config or LegacyConfiguration.config_file_path(), args.dialog)
+            updates.recover_startup(arguments)
+        preserve_logs = action.__name__ in (
+            'installation_status', 'get_support', 'stop_installed_app', 'stop_indexing', 'edit_config',
+        )
+        _run_owned(ephemeral_config, action, preserve_logs)
+    except (maintenance.MaintenanceError, artifacts.ArtifactError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from error
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    finally:
+        if session is not None:
+            application = getattr(session, '_application', None)
+            if application is not None:
+                while not application.close(timeout=.1):
+                    pass
+            session.close()
+
+
+def _run_owned(ephemeral_config, action, diagnostic):
     if not diagnostic:
         msg.initialize_logging(ephemeral_config.app_log_path)
     msg.update_log_level(ephemeral_config.log_level or constants.DEFAULT_LOG_LEVEL)
@@ -510,12 +620,6 @@ def main():
         with open(app_log_path, 'w') as f:
             f.write('')
 
-    # Run safety checks.
-    # FIXME: Fix utils.die_if_running() for GUI; as it is, it breaks GUI
-    # self-update when updating LLI as it asks for a confirmation in the CLI.
-    # Disabled until it can be fixed. Avoid running multiple instances of the
-    # program.
-    # utils.die_if_running()
     if os.getuid() == 0 and not ephemeral_config.app_run_as_root_permitted:
         print("Running Wine/winetricks as root is highly discouraged. Use -f|--force-root if you must run as root. "
               "See https://wiki.winehq.org/FAQ#Should_I_run_Wine_as_root.3F", file=sys.stderr)

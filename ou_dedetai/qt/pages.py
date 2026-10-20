@@ -85,6 +85,8 @@ class CarePage(QWidget):
              ("controller_update", "Update LogosDesktop…"),
              ("dependencies", "Install system dependencies…"), ("icu", "Reinstall ICU data…")],
             [("edit_config", "Open configuration file"), ("logging", "Toggle Logos logging")],
+            [("open_install", "Open installation folder"), ("open_backup", "Open backup folder"),
+             ("desktop", "Set up desktop launchers…")],
             [("catalog", "Remove library catalog…"), ("indexes", "Remove index files…"),
              ("uninstall", "Uninstall Logos…")],
         ):
@@ -126,11 +128,12 @@ class HelpPage(QWidget):
         self.health = Card("Installation status", "Reading the selected installation…")
         layout.addWidget(self.health)
         self.summary = self.health.detail
-        support = Card("Get help", "Create a local support archive with configuration and logs. "
-                       "Review it privately before sharing.")
+        support = Card("Get help", "Preview the exact sanitized support snapshot before exporting. "
+                       "Raw configuration and logs are omitted. Keep the archive private.")
         actions = QHBoxLayout()
         self.buttons = {}
         for key, text in (("support", "Create support archive…"), ("open_log", "Open log"),
+                          ("open_logs", "Open log folder"), ("doctor", "Run diagnostics"),
                           ("refresh", "Refresh status")):
             button = QPushButton(text)
             button.setMinimumHeight(32)
@@ -153,6 +156,11 @@ class HelpPage(QWidget):
             Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
         layout.addWidget(self.details_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.details)
+        self.doctor = QPlainTextEdit()
+        self.doctor.setReadOnly(True)
+        self.doctor.setAccessibleName("Read-only diagnostic report")
+        self.doctor.hide()
+        layout.addWidget(self.doctor)
         layout.addStretch()
 
 
@@ -160,6 +168,8 @@ class ProfileSettings(Card):
     save_requested = Signal()
     profile_requested = Signal()
     runtime_requested = Signal()
+    adoption_requested = Signal(bool)
+    rollback_requested = Signal(bool)
 
     def __init__(self):
         super().__init__("Installation", "Your library stays in its existing location.")
@@ -202,6 +212,17 @@ class ProfileSettings(Card):
                                (self.choose_runtime, self.runtime_requested)):
             button.clicked.connect(signal)
             fields.addRow(button)
+        self.migration_buttons = []
+        for text, signal, flag in (
+            ("Adopt legacy configuration…", self.adoption_requested, False),
+            ("Adopt installation directory…", self.adoption_requested, True),
+            ("Roll back selected adoption…", self.rollback_requested, False),
+            ("Roll back desktop integration…", self.rollback_requested, True),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(lambda checked=False, signal=signal, flag=flag: signal.emit(flag))
+            fields.addRow(button)
+            self.migration_buttons.append(button)
         self.content.addWidget(details)
         details.hide()
         self.advanced.toggled.connect(details.setVisible)

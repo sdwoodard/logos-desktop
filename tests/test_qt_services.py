@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -28,6 +29,17 @@ class TestProductionServices(QtCase):
     def production_window(self):
         window = self.window(Services())
         self.pump(lambda: window.app.active is None)
+        if not hasattr(window.app, "profile_selection"):
+            @contextmanager
+            def selection(candidate):
+                from ou_dedetai.logos import LogosManager
+                if not window.app.logos.close():
+                    raise maintenance.MaintenanceBusy("Fixture manager did not settle")
+                yield
+                window.app.conf = candidate
+                window.app.logos = LogosManager(window.app)
+                window.app.logos.start_monitoring()
+            self.stack.enter_context(patch.object(window.app, "profile_selection", selection, create=True))
         return window
 
     def test_production_bootstrap_and_snapshot_do_not_prompt_or_fetch(self):
@@ -456,7 +468,9 @@ class TestProductionServices(QtCase):
     def test_product_update_failure_is_not_reported_as_completed(self):
         window = self.production_window()
         app = window.app
-        with patch.object(app, "approve", return_value=True):
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(type(app.conf), "installed_faithlife_product_release",
+                           new_callable=unittest.mock.PropertyMock, return_value="40.1.0.0")):
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="ok", stale=False, versions=["46.2.0.5"])):
                 with patch("ou_dedetai.installer.install", side_effect=RuntimeError("Injected MSI failure")):
@@ -483,7 +497,9 @@ class TestProductionServices(QtCase):
         app.conf._overrides.environment = {"faithlife_product_release": "46.2.0.5"}
         with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                 status="ok", stale=False, versions=["46.2.0.5"])):
-            with patch.object(app, "approve", return_value=True), patch("ou_dedetai.installer.install") as install:
+            with (patch.object(app, "approve", return_value=True), patch("ou_dedetai.installer.install") as install,
+                  patch.object(type(app.conf), "installed_faithlife_product_release",
+                               new_callable=unittest.mock.PropertyMock, return_value="40.1.0.0")):
                 result = self.services.operation("product_update")(app, threading.Event())
         self.assertEqual(result.outcome, "succeeded")
         install.assert_called_once_with(app)
@@ -645,6 +661,7 @@ class TestProductionServices(QtCase):
         (self.root / "Logos/data/bin").mkdir(parents=True)
         (self.root / "Logos/data/wine64_bottle").mkdir()
         app.conf._change(faithlife_product_version="10", wine_binary="/usr/bin/wine")
+        (self.root / "Logos/oudedetai.json").write_bytes(self.config.read_bytes())
         app.conf._overrides.runtime_selection = {"wine_binary": "data/bin/stale.AppImage"}
         with patch.object(app, "approve", side_effect=lambda question, *args:
                           False if "clear the cache" in question else True):
@@ -733,3 +750,251 @@ class TestProductionServices(QtCase):
         self.assertNotIn("Indexing stopped", window.status.text())
         settle.set()
         self.pump(lambda: window.app.active is None and not window._refresh_pending)
+
+    def test_adoption_directory_publishes_only_after_reserved_selection_and_rolls_back(self):
+        from ou_dedetai import adoption
+        window = self.production_window()
+        app = window.app
+        install = self.root / "legacy"
+        product = install / "data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        product.mkdir(parents=True)
+        (product / "Logos.exe").write_bytes(b"library sentinel")
+        destination = self.root / "adopted.json"
+        actual_selection = app.profile_selection
+        reservations = []
+
+        @contextmanager
+        def reserve(candidate):
+            reservations.append(candidate._raw.install_dir)
+            self.assertEqual(candidate._overrides.wine_prefix, str(install / "data/wine64_bottle"))
+            self.assertFalse(destination.exists())
+            with actual_selection(candidate):
+                yield
+
+        with (patch.object(app, "approve", return_value=False), patch.object(app, "profile_selection", reserve)):
+            result = self.services.adopt_profile(install, directory=True, destination=destination)(
+                app, threading.Event())
+        self.assertEqual(result.outcome, "cancelled")
+        self.assertFalse(destination.exists())
+        with (patch.object(app, "approve", return_value=True) as approve,
+              patch.object(app, "profile_selection", reserve), patch("ou_dedetai.installer.install") as installer):
+            result = self.services.adopt_profile(install, directory=True, destination=destination)(
+                app, threading.Event())
+        installer.assert_not_called()
+        self.assertEqual(reservations, [str(install)])
+        self.assertIn(str(destination), approve.call_args.args[1])
+        self.assertEqual(result.outcome, "succeeded")
+        self.assertEqual(app.conf.config_file_path, str(destination))
+        with patch.object(app, "approve", return_value=True):
+            result = self.services.rollback_migration(adoption._journal_path(destination))(app, threading.Event())
+        self.assertEqual(result.outcome, "succeeded")
+        self.assertFalse(destination.exists())
+        self.assertEqual((product / "Logos.exe").read_bytes(), b"library sentinel")
+
+    def test_missing_ownership_api_refuses_before_adoption_commit(self):
+        window = self.production_window()
+        with patch.object(window.app, "profile_selection", None):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "ownership transfer"):
+                self.services._selection(window.app, window.app.conf)
+
+    def test_doctor_is_copyable_and_install_preflight_precedes_config_mutation(self):
+        window = self.production_window()
+        app = window.app
+        with patch.object(app, "info") as info:
+            self.services.operation("doctor")(app, threading.Event())
+        window._render()
+        self.assertEqual(window.diagnostics.doctor.toPlainText(), info.call_args.args[0])
+        self.assertTrue(window.diagnostics.doctor.isReadOnly())
+        report = {"summary": "Unsupported host", "checks": [
+            {"name": "architecture", "status": "error", "summary": "Unsupported host"}]}
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
+                  status="ok", stale=False, versions=["46.2.0.5"])),
+              patch("ou_dedetai.doctor.inspect", return_value=report),
+              patch("ou_dedetai.installer.install") as install):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "preflight"):
+                self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine", True))(
+                    app, threading.Event())
+        install.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_relative_backup_display_and_folder_opener_are_scoped_and_bounded(self):
+        window = self.production_window()
+        app = window.app
+        folder = self.root / "Logos/backups with spaces"
+        folder.mkdir(parents=True)
+        app.conf._raw.backup_dir = "backups with spaces"
+        self.services.refresh(app, threading.Event())
+        self.assertEqual(self.services.snapshot().backup, str(folder))
+        with (patch("ou_dedetai.qt.services.shutil.which", return_value="/usr/bin/xdg-open"),
+              patch("ou_dedetai.processes.capture", return_value=(b"", 0)) as capture):
+            self.services.open_folder("open_backup")(app, threading.Event())
+        self.assertEqual(capture.call_args.args[0], ["/usr/bin/xdg-open", str(folder)])
+        self.assertEqual(capture.call_args.kwargs["timeout"], 10)
+        folder.rmdir()
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            self.services.open_folder("open_backup")(app, threading.Event())
+        self.assertFalse(folder.exists())
+
+    def test_fresh_install_preflight_inspects_proposed_paths_before_any_write(self):
+        from ou_dedetai import doctor
+        self.config.write_text("{}")
+        self.original = self.config.read_bytes()
+        window = self.production_window()
+        destination = self.root / "fresh installation"
+        seen = []
+        inspect = doctor.inspect
+
+        def inspect_proposal(candidate):
+            self.assertEqual(self.config.read_bytes(), self.original)
+            self.assertFalse(destination.exists())
+            seen.append(doctor.selected_paths(candidate))
+            return inspect(candidate)
+
+        with (patch.object(window.app, "approve", return_value=True),
+              patch.object(window.app.conf._network, "product_release", return_value=SimpleNamespace(
+                  status="ok", stale=False, versions=["46.2.0.5"])),
+              patch.object(doctor, "inspect", side_effect=inspect_proposal),
+              patch("ou_dedetai.installer.install") as install):
+            result = self.services.install(InstallDraft("Logos", str(destination), "/usr/bin/wine", False))(
+                window.app, threading.Event())
+        self.assertEqual(seen, [(destination, destination / "data/wine64_bottle", None)])
+        self.assertEqual(result.outcome, "succeeded")
+        install.assert_called_once_with(window.app)
+        self.original = self.config.read_bytes()
+
+    def test_support_cancellation_after_inspection_is_reported_as_cancelled(self):
+        window = self.production_window()
+        cancel = threading.Event()
+
+        def inspect(conf):
+            cancel.set()
+            return {"summary": "Fixture diagnostics", "checks": []}
+
+        with (patch("ou_dedetai.doctor.inspect", side_effect=inspect),
+              patch("ou_dedetai.support.export") as export):
+            result = self.services.operation("support")(window.app, cancel)
+        self.assertEqual(result.outcome, "cancelled")
+        export.assert_not_called()
+
+    def test_update_rechecks_actual_installed_version_under_admission_before_write(self):
+        from ou_dedetai import utils
+        window = self.production_window()
+        app = window.app
+        product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        (product / "System").mkdir(parents=True)
+        (product / "Logos.exe").write_bytes(b"fixture executable")
+        metadata = product / "System/Logos.deps.json"
+
+        def write_version(version):
+            metadata.write_text(json.dumps({"libraries": {f"Logos/{version}": {}}}))
+
+        for installed in (None, "46.2.0.5", "50.0.0.0"):
+            if installed is None:
+                metadata.unlink(missing_ok=True)
+            else:
+                write_version(installed)
+            app.conf.invalidate_context()
+            self.assertEqual(app.conf.installed_faithlife_product_release, installed)
+            with (patch.object(app, "approve", return_value=True),
+                  patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
+                      status="ok", stale=False, versions=["46.2.0.5"])),
+                  patch("ou_dedetai.installer.install") as install):
+                with self.assertRaisesRegex(maintenance.MaintenanceError, "not newer"):
+                    self.services.operation("product_update")(app, threading.Event())
+            install.assert_not_called()
+            self.assertEqual(self.config.read_bytes(), self.original)
+
+        for changed in ("46.2.0.5", "50.0.0.0", None):
+            with self.subTest(changed_during_confirmation=changed):
+                write_version("40.0.0.0")
+                app.conf.invalidate_context()
+                self.assertEqual(app.conf.installed_faithlife_product_release, "40.0.0.0")
+
+                def confirm(question, details):
+                    self.assertEqual(question, "Update Logos?")
+                    if changed is None:
+                        metadata.unlink()
+                    else:
+                        write_version(changed)
+                    self.assertEqual(app.conf.installed_faithlife_product_release, "40.0.0.0")
+                    return True
+
+                admitted_reads = []
+                read_version = utils.get_current_logos_version
+
+                def read_metadata(appdata):
+                    self.assertEqual(os.path.normpath(appdata), str(product))
+                    admitted_reads.append(maintenance.installation_owned())
+                    return read_version(appdata)
+
+                with (patch.object(app, "approve", side_effect=confirm) as approve,
+                      patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
+                          status="ok", stale=False, versions=["46.2.0.5"])),
+                      patch.object(utils, "get_current_logos_version", side_effect=read_metadata),
+                      patch.object(app.conf, "_change",
+                                   side_effect=AssertionError("Unexpected config mutation")) as change,
+                      patch("ou_dedetai.installer.install") as install):
+                    with self.assertRaisesRegex(maintenance.MaintenanceError, "not newer"):
+                        self.services.operation("product_update")(app, threading.Event())
+                approve.assert_called_once()
+                self.assertIn(True, admitted_reads)
+                change.assert_not_called()
+                install.assert_not_called()
+                self.assertEqual(app.conf.installed_faithlife_product_release, changed)
+                self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_desktop_integration_is_explicit_and_previews_profile_paths(self):
+        window = self.production_window()
+        app = window.app
+        plan = SimpleNamespace(config=self.config, journal=self.root / "desktop-journal.json",
+                               files=[SimpleNamespace(path=self.root / "applications/profile.desktop")],
+                               defaults=[("x-scheme-handler/logos4", "other.desktop")],
+                               issues=["Existing MIME default preserved"])
+        with (patch("ou_dedetai.desktop.preview", return_value=plan) as preview,
+              patch("ou_dedetai.desktop.adopt") as commit,
+              patch.object(type(app.conf), "logos_exe_windows_path",
+                           new_callable=unittest.mock.PropertyMock, return_value="C:\\Logos\\Logos.exe"),
+              patch.object(app, "approve", return_value=False) as approve):
+            result = self.services.operation("desktop")(app, threading.Event())
+        self.assertEqual(result.outcome, "cancelled")
+        commit.assert_not_called()
+        self.assertEqual(preview.call_args.args[0], str(self.config))
+        self.assertIn(str(plan.files[0].path), approve.call_args.args[1])
+        self.assertIn("other.desktop", approve.call_args.args[1])
+
+    def test_config_adoption_preserves_original_and_refuses_competing_destination(self):
+        window = self.production_window()
+        install = self.root / "legacy"
+        (install / "data/wine64_bottle").mkdir(parents=True)
+        source = self.root / "legacy.json"
+        original = json.dumps({"install_dir": str(install), "faithlife_product": "Logos"}).encode()
+        source.write_bytes(original)
+        destination = self.root / "new.json"
+        destination.write_text('{"sentinel":"competing profile"}')
+        with patch.object(window.app, "approve", return_value=True):
+            with self.assertRaisesRegex(ValueError, "Destination already"):
+                self.services.adopt_profile(source, destination=destination)(window.app, threading.Event())
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(destination.read_text(), '{"sentinel":"competing profile"}')
+        destination.unlink()
+        with patch.object(window.app, "approve", return_value=True) as approve:
+            result = self.services.adopt_profile(source, destination=destination)(window.app, threading.Event())
+        self.assertEqual(result.outcome, "succeeded")
+        self.assertIn(f"Original: {source}", approve.call_args.args[1])
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_update_projection_distinguishes_current_stale_and_fresh(self):
+        from ou_dedetai.network import ProductLookup
+        window = self.production_window()
+        conf = window.app.conf
+        for lookup, expected in (
+            (ProductLookup(("40.0.0.0",), "ok"), "current:"),
+            (ProductLookup(("46.2.0.5",), "ok"), "Update available:"),
+            (ProductLookup(("46.2.0.5",), "ok", "Cached while offline", stale=True), "stale:"),
+            (ProductLookup((), "empty"), "no-release:"),
+        ):
+            with (patch.object(conf._network, "product_release", return_value=lookup),
+                  patch.object(type(conf), "installed_faithlife_product_release",
+                               new_callable=unittest.mock.PropertyMock, return_value="40.0.0.0")):
+                self.assertTrue(self.services._product_update(conf, True).startswith(expected))

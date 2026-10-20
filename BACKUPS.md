@@ -1,5 +1,8 @@
 # Backups and restores
 
+Select the intended [configuration](CONFIGURATION.md) first. For read-only
+diagnostics and sanitized archives, see [support](SUPPORT.md).
+
 Close Logos and its indexer normally before backing up or restoring. The controller
 refuses maintenance when it finds relevant running processes or another operation
 using the selected installation. It does not stop unrelated Wine applications.
@@ -9,6 +12,33 @@ outside the live product data. Decline the saved folder prompt to select another
 location. A new location needs interactive confirmation on its current filesystem
 before it can be used with assume-yes. Reconnect a missing backup disk rather than
 recreating its mount directory.
+
+A saved relative backup path resolves against the saved installation directory.
+Qt Settings accepts an existing absolute folder. Folder-opening actions report a
+missing location instead of creating it.
+
+```bash
+logos-desktop -c /absolute/path/profile.json --backup
+logos-desktop -c /absolute/path/profile.json --list-backups
+logos-desktop -c /absolute/path/profile.json --restore
+logos-desktop -c /absolute/path/profile.json --restore-snapshot /absolute/path/backups/snapshot-name
+```
+
+`--list-backups` reads the configured folder's completed snapshot metadata. The
+CLI listing shows creation time, logical file-byte total, included roots and
+recorded source. This size is not allocated disk usage. The Qt restore chooser
+lists snapshot names. Its later confirmation shows creation time, recorded source
+and target after verifying the selection.
+New snapshots record the source product-data directory. Older valid manifests
+without that field display an unknown source, not the current installation path.
+Metadata listing is not a full payload-integrity check.
+
+`--restore-snapshot` selects the snapshot container, not its `complete` child.
+The controller fully verifies the chosen payload before asking for confirmation
+with the exact snapshot, recorded source and live target. In this explicit CLI
+workflow, type `restore /absolute/path/backups/snapshot-name` exactly as prompted.
+Closed input or a different answer refuses restore. Assume-yes does not replace
+this exact-source confirmation.
 
 Snapshots contain the product's `Data`, `Documents` and `Users` roots, including
 explicitly absent roots and empty directories. They do not contain the whole Wine
@@ -36,4 +66,9 @@ recovery directories until the problem is resolved.
 A committed restore can report that cleanup remains. In that case the new data is
 active and startup retries cleanup. Do not delete recovery records to bypass the
 guard. A support ZIP is closed and validated before the controller offers it as
-ready. Keep support archives private and review their contents before sharing.
+ready. It contains sanitized diagnostics, not a library backup or raw logs. See
+[support archive contents](SUPPORT.md#archive-contents).
+
+Cancellation during copying, hashing or verification stops at a safe boundary.
+Completed publication is not relabeled cancelled. Earlier completed steps remain,
+and interrupted replacement still follows the recovery journal rules above.

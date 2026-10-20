@@ -876,7 +876,7 @@ class Config:
 
     @property
     def install_dir_default(self) -> str:
-        return f"{constants.DATA_HOME}/{constants.BINARY_NAME}"
+        return str(Path(constants.DATA_HOME) / 'installation')
 
     @property
     def install_dir(self) -> str:
@@ -1328,6 +1328,11 @@ class Config:
         if self._installed_faithlife_product_release is None:
             self._installed_faithlife_product_release = utils.get_current_logos_version(self._logos_appdata_dir)
         return self._installed_faithlife_product_release
+
+    def refresh_installed_faithlife_product_release(self) -> Optional[str]:
+        """Reread installed metadata when a mutation decision cannot use cached evidence."""
+        self._installed_faithlife_product_release = None
+        return self.installed_faithlife_product_release
 
     @property
     def app_latest_version_url(self) -> Optional[str]:

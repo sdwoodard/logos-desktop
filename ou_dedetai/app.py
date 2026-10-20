@@ -1,5 +1,6 @@
 
 import abc
+from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
@@ -52,8 +53,18 @@ class App(abc.ABC):
         self._config_updated_event = threading.Event()
         self._threads = []
         self._pending_exit: Optional[tuple[str, bool]] = None
+        self._profile_lock = threading.Lock()
+        self._instance_session = getattr(config, '_instance_session', None)
         self.conf = Config(config, self)
+        if self._instance_session is not None:
+            from ou_dedetai import instance, maintenance
+
+            if instance.Session.for_config(self.conf).key != self._instance_session.key:
+                raise maintenance.MaintenanceError(
+                    "The selected installation changed during startup. Restart the controller to select it safely")
         self.logos = LogosManager(app=self)
+        if self._instance_session is not None:
+            self._instance_session._application = self
 
         def _config_updated_hook_runner():
             while not self._closing.is_set():
@@ -70,6 +81,131 @@ class App(abc.ABC):
                         logging.exception("Failed to run config update hook")
         _config_updated_hook_runner.__name__ = "Config Update Hook"
         self.start_thread(_config_updated_hook_runner, daemon_bool=True)
+
+    @property
+    def conf(self):
+        return self._conf
+
+    @conf.setter
+    def conf(self, configuration):
+        from ou_dedetai.config import Config
+
+        # Each frontend-owned Config enters controller admission before its
+        # existing writer takes the configuration lock. Keep candidate identity.
+        if (getattr(self, '_instance_session', None) is not None and isinstance(configuration, Config)
+                and getattr(configuration, '_controller_owner', None) is not self):
+            write = configuration._change
+
+            def change(*, legacy_changes=None, **changes):
+                return self._configuration_change(configuration, write, changes, legacy_changes)
+
+            configuration._change = change
+            configuration._controller_owner = self
+        self._conf = configuration
+
+    def _configuration_change(self, configuration, write, changes, legacy_changes):
+        """Reserve a newly configured prefix before the configuration writer lock."""
+        from ou_dedetai import config_store, instance
+        from ou_dedetai.config import EphemeralConfiguration, PersistentConfiguration
+
+        session = getattr(self, '_instance_session', None)
+        selection_fields = {'install_dir', 'INSTALLDIR', 'WINEPREFIX'}
+        if (session is None or configuration is not self.conf
+                or not selection_fields.intersection(changes.keys() | (legacy_changes or {}).keys())):
+            return write(legacy_changes=legacy_changes, **changes)
+
+        path = configuration.config_file_path
+        document = config_store.apply_changes(configuration._raw._saved, legacy_changes or {}, path)
+        document = config_store.apply_changes(document, changes, path)
+        old = configuration._overrides
+        overrides = EphemeralConfiguration.project(
+            document, path, destination=old.config_destination, environment=old.environment,
+            cli_overrides=old.cli_overrides, runtime_selection=old.runtime_selection)
+        for name in ('assume_yes', 'quiet', 'agreed_to_faithlife_terms', 'app_run_as_root_permitted', 'wine_args'):
+            setattr(overrides, name, getattr(old, name))
+        candidate = type(configuration)(overrides, self)
+        raw = PersistentConfiguration.from_document(document, old.environment)
+        raw._file_path = path
+        raw._file_bytes = configuration._raw._file_bytes
+        candidate.rebind(raw)
+        if instance.Session.for_config(candidate).key == session.key:
+            return write(legacy_changes=legacy_changes, **changes)
+
+        with self.profile_selection(candidate):
+            result = write(legacy_changes=legacy_changes, **changes)
+            candidate.rebind(configuration._raw)
+        return result
+
+    @contextmanager
+    def profile_selection(self, candidate):
+        """Reserve both profiles until publication succeeds or the body unwinds."""
+        from ou_dedetai import instance, maintenance
+        from ou_dedetai.logos import LogosManager
+
+        if not self._profile_lock.acquire(blocking=False):
+            raise maintenance.MaintenanceBusy("A profile change is already underway")
+        destination = None
+        old_manager = self.logos
+        old_session = self._instance_session
+        monitoring = old_manager._monitor_thread is not None and old_manager._monitor_thread.is_alive()
+        try:
+            if self._closing.is_set():
+                raise maintenance.MaintenanceBusy("Controller is closing")
+            destination = instance.Session.for_config(candidate)
+            if old_session is not None and destination.key == old_session.key:
+                destination = old_session
+            else:
+                destination.acquire()
+                if old_session is not None and old_session.listening:
+                    destination.listen(activation_source=old_session)
+
+            if not old_manager.close():
+                old_manager._closed.clear()
+                old_manager._watcher_stopping = False
+                if monitoring and not self._closing.is_set():
+                    old_manager.start_monitoring()
+                raise maintenance.MaintenanceBusy("The selected installation is still settling")
+            try:
+                yield candidate
+                if instance.Session.for_config(candidate).key != destination.key:
+                    raise maintenance.MaintenanceError(
+                        "The selected installation changed during profile selection. "
+                        "The previous profile remains selected. Published files and later edits were preserved")
+            except BaseException:
+                # close() detaches observers, it never stops the product.
+                old_manager._closed.clear()
+                old_manager._watcher_stopping = False
+                if monitoring and not self._closing.is_set():
+                    old_manager.start_monitoring()
+                raise
+
+            published = destination
+            self._instance_session = published
+            destination = None
+            try:
+                self.conf = candidate
+                published._application = self
+                candidate._overrides._instance_session = published
+                if monitoring:
+                    self.logos = LogosManager(app=self)
+                    if not self._closing.is_set():
+                        self.logos.start_monitoring()
+                else:
+                    old_manager._context = None
+                    old_manager._expected = ()
+                    old_manager._snapshot = []
+                    old_manager._closed.clear()
+                    old_manager._watcher_stopping = False
+            finally:
+                # Publication has succeeded. Even a monitoring startup failure
+                # must leave the selected destination owned until shutdown.
+                if old_session is not None and old_session is not published:
+                    old_session.close()
+            self._config_updated_event.set()
+        finally:
+            if destination is not None and destination is not old_session:
+                destination.close()
+            self._profile_lock.release()
 
     def dispatch_config(self, callback):
         callback()
@@ -108,6 +244,8 @@ class App(abc.ABC):
         if self._closed:
             return True
         self.request_close()
+        if self._profile_lock.locked():
+            return False
         deadline = time.monotonic() + timeout
         if not self.logos.close(timeout=max(0, deadline - time.monotonic())):
             return False
@@ -122,6 +260,8 @@ class App(abc.ABC):
             if any(worker.is_alive() for worker in self._threads):
                 return False
         self._closed = True
+        if self._instance_session is not None:
+            self._instance_session.close()
         return True
 
     def checkpoint(self):
@@ -270,6 +410,10 @@ class App(abc.ABC):
             percent = round(percent * 100)
         # If we're installing
         if self.installer_step_count != 0:
+            if percent is None:
+                self._status(message, None)
+                self._last_status = message
+                return
             current_step_percent = percent or 0
             # We're further than the start of our current step, percent more
             installer_percent = round((self.installer_step * 100 + current_step_percent) / self.installer_step_count)

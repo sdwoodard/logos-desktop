@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ou_dedetai import backup, backup_store as store, constants, maintenance
+from ou_dedetai.app import UserExitedFromAsk
 
 
 def fixture_app(root):
@@ -186,6 +187,103 @@ class TestBackupTransactions(unittest.TestCase):
         (self.backups / "Logos-partial/complete").mkdir(parents=True)
         self.assertEqual(set(backup.completed_snapshots(self.backups, "Logos")), {first.name, second.name})
         self.assertEqual(hashes(first), before)
+
+    def test_metadata_listing_reports_size_roots_and_unknown_legacy_source_without_hashing(self):
+        snapshot = self.snapshot()
+        manifest_path = snapshot / "complete/manifest.json"
+        manifest = store.read_json(manifest_path)
+        with patch.object(store, "_hash_file", side_effect=AssertionError("Listing must not hash data")):
+            info, = backup.list_snapshots(self.backups, "Logos")
+        self.assertEqual(info.name, snapshot.name)
+        self.assertEqual(info.created, manifest["created"])
+        self.assertEqual(info.source, str(self.live))
+        self.assertEqual(info.roots, store.ROOTS)
+        self.assertEqual(info.size, sum(record.get("size", 0) for record in manifest["entries"].values()))
+        del manifest["source"]
+        store.write_json(manifest_path.parent, manifest_path.name, manifest)
+        self.assertIsNone(backup.list_snapshots(self.backups, "Logos")[0].source)
+
+    def test_restore_verifies_only_selected_snapshot_then_confirms_exact_paths(self):
+        selected = self.snapshot()
+        other = self.snapshot()
+        (other / "complete/Data/sentinel").write_bytes(b"corrupt unselected snapshot")
+        self.mutate()
+        verified = []
+        verify = store.verify_payload
+
+        def record(path, manifest, stop=None):
+            verify(path, manifest, stop)
+            verified.append(Path(path).resolve())
+
+        def approve(question, context=None):
+            if question.startswith("Restore this verified"):
+                self.assertEqual(verified, [selected / "complete"])
+                self.assertIn(f"Snapshot: {selected}", context)
+                self.assertIn(f"Target: {self.live}", context)
+                return False
+            return True
+
+        self.app.approve.side_effect = approve
+        with patch.object(store, "verify_payload", side_effect=record), self.assertRaises(UserExitedFromAsk):
+            backup.restore(self.app, snapshot=selected)
+        self.assert_preserved()
+        self.assertFalse(self.context.pending.exists())
+
+    def test_snapshot_verification_cancellation_after_real_block_preserves_live_data(self):
+        (self.live / "Data/large").write_bytes(b"x" * (3 * 1024 * 1024))
+        snapshot = self.snapshot()
+        self.mutate()
+        cancellation = threading.Event()
+        hash_file = store._hash_file
+        received = []
+
+        def interrupt(path, stop=None, target=None, progress=None):
+            def after_block(count):
+                received.append(count)
+                cancellation.set()
+            return hash_file(path, stop, target, after_block)
+
+        with patch.object(store, "_hash_file", side_effect=interrupt), self.assertRaises(store.CopyCancelled):
+            self.restore(snapshot, stop=cancellation)
+        self.assertTrue(received)
+        self.assert_preserved()
+        self.assertFalse(self.context.pending.exists())
+
+    def test_cancel_directory_only_scan_and_metadata_listing(self):
+        self.snapshot()
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaises(store.CopyCancelled):
+            backup.list_snapshots(self.backups, "Logos", stop)
+        for root in store.ROOTS:
+            (self.live / root / "sentinel").unlink()
+        with self.assertRaises(store.CopyCancelled):
+            store.inventory(self.live, stop)
+
+    def test_explicit_snapshot_outside_selected_backup_folder_is_rejected(self):
+        selected = self.snapshot()
+        alias = self.root / selected.name
+        alias.mkdir()
+        with self.assertRaises(store.BackupError):
+            backup.restore(self.app, snapshot=alias, backup_dir=self.backups)
+        self.assert_preserved()
+
+    def test_late_cancellation_during_restore_replacement_keeps_verified_committed_result(self):
+        snapshot = self.snapshot()
+        self.mutate()
+        stop = threading.Event()
+        move = store._move
+
+        def cancel_after_move(source, destination):
+            move(source, destination)
+            stop.set()
+
+        with patch.object(store, "_move", side_effect=cancel_after_move):
+            self.restore(snapshot, stop=stop)
+        self.assertTrue(stop.is_set())
+        self.assertEqual((self.live / "Data/sentinel").read_bytes(), b"Data current")
+        self.assertFalse(self.context.pending.exists())
+        self.assertTrue(any("Finished restore" in call.args[0] for call in self.app.status.call_args_list))
 
     def test_missing_empty_unbound_and_invalid_locations_do_not_create_or_delete_data(self):
         self.app.conf._raw.backup_dir = str(self.root / "missing/disk/backups")

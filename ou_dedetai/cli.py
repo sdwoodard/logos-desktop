@@ -104,6 +104,9 @@ class CLI(App):
     def stop_installed_app(self):
         self.logos.stop()
 
+    def stop_indexing(self):
+        self.logos.stop_indexing()
+
     @maintenance.uses_installation
     def winetricks(self):
         process = wine.run_wine_process(
