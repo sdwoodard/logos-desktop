@@ -111,8 +111,10 @@ LEGACY_CONFIG_FILES = [
 ]
 LLI_AUTHOR = "Ferion11, John Goodman, T. H. Wright, N. Marti, N. Shaaban"
 LLI_CURRENT_VERSION = "4.0.0-beta.15"
-# This SHOULD match the version of winetricks we ship in the latest appimage
-WINETRICKS_VERSION = '20250102'
+# Standalone tagged script, pinned from official-source HTTPS observations.
+# AppImage companions remain owned by their runtime provider.
+WINETRICKS_VERSION = '20260125'
+WINETRICKS_SHA256 = '431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b'
 DEFAULT_LOG_LEVEL = logging.WARNING
 LOGOS_BLUE = '#0082FF'
 LOGOS_GRAY = '#E7E7E7'

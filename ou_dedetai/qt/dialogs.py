@@ -1,17 +1,25 @@
 """Owned asynchronous dialogs and exactly-once prompt resolution."""
 
 from pathlib import Path
+from itertools import islice
+import re
 
-from PySide6.QtCore import QObject, Qt, Slot
+from PySide6.QtCore import QObject, Qt, QUrl, Slot
+from PySide6.QtGui import QDesktopServices, QTextCharFormat, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QLabel,
-    QPlainTextEdit, QPushButton, QVBoxLayout,
+    QPlainTextEdit, QPushButton, QTextBrowser, QVBoxLayout,
 )
 
 from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE, PROMPT_OPTION_NEW_FILE
 
 
 PATH_CHOICES = (PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE, PROMPT_OPTION_NEW_FILE)
+
+
+def _is_https_url(url):
+    return (url.isValid() and not url.isRelative() and url.scheme() == "https"
+            and bool(url.host()) and "@" not in url.authority())
 
 
 class FailureDialog(QDialog):
@@ -109,31 +117,113 @@ class DialogHost(QObject):
             self._path_prompt(prompt, prompt.options)
             return
 
+        binary = len(prompt.options) == 2 and set(prompt.options) == {"Yes", "No"}
+        review = len(prompt.options) == 2 and set(prompt.options) == {"OK", "Cancel"}
         dialog = self._own(QDialog(self.window))
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dialog.setWindowTitle("Choose an option")
+        title = "Choose an option"
+        if binary:
+            title = "Confirm"
+        elif review:
+            title = "Review"
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(420)
+        dialog.resize(640, 420)
         layout = QVBoxLayout(dialog)
-        label = QLabel(prompt.question)
-        label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        choice = QComboBox()
-        choice.setAccessibleName("Answer")
-        choice.addItems(prompt.options)
-        choice.setCurrentIndex(-1)
-        layout.addWidget(choice)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
-        choice.currentIndexChanged.connect(lambda index: buttons.button(QDialogButtonBox.StandardButton.Ok)
-                                          .setEnabled(index >= 0))
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
+        question = QTextBrowser(dialog)
+        question.setReadOnly(True)
+        question.setOpenLinks(False)
+        question.setOpenExternalLinks(False)
+        question.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        question.setAccessibleName("Question and scope")
+        question.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        question.setPlainText(prompt.question)
+
+        # Keep untrusted question text literal and format only bounded HTTPS ranges.
+        matches = re.finditer(r"(?<![\w:/])https://[^\s<>\"']+", prompt.question)
+        for match in islice(matches, 100):
+            target = match.group()
+            if len(target) > 4096:
+                continue
+            target = target.rstrip(".,;:!?")
+            for opening, closing in (("(", ")"), ("[", "]"), ("{", "}")):
+                while target.endswith(closing) and target.count(closing) > target.count(opening):
+                    target = target[:-1]
+            url = QUrl(target, QUrl.ParsingMode.StrictMode)
+            if not _is_https_url(url):
+                continue
+
+            # QTextCursor positions count UTF-16 units, including surrogate pairs.
+            start = len(prompt.question[:match.start()].encode("utf-16-le")) // 2
+            length = len(target.encode("utf-16-le")) // 2
+            cursor = QTextCursor(question.document())
+            cursor.setPosition(start)
+            cursor.setPosition(start + length, QTextCursor.MoveMode.KeepAnchor)
+            link = QTextCharFormat()
+            link.setAnchor(True)
+            link.setAnchorHref(url.toString())
+            link.setFontUnderline(True)
+            cursor.mergeCharFormat(link)
+
+        def open_link(url):
+            if _is_https_url(url) and not QDesktopServices.openUrl(url):
+                self.failure("Browser could not open", "The browser could not open this link.",
+                             "Copy the link from the question and open it in your browser.")
+
+        question.anchorClicked.connect(open_link)
+        layout.addWidget(question, 1)
+
+        selected_answer = None
+        if binary or review:
+            positive = QDialogButtonBox.StandardButton.Yes if binary else QDialogButtonBox.StandardButton.Ok
+            negative = QDialogButtonBox.StandardButton.No if binary else QDialogButtonBox.StandardButton.Cancel
+            buttons = QDialogButtonBox(positive | negative)
+            positive_button = buttons.button(positive)
+            negative_button = buttons.button(negative)
+            positive_button.setAutoDefault(False)
+            positive_button.setDefault(False)
+            negative_button.setAutoDefault(False)
+            negative_button.setDefault(True)
+
+            def direct_clicked(button):
+                nonlocal selected_answer
+                if button is positive_button:
+                    selected_answer = "Yes" if binary else "OK"
+                elif binary:
+                    selected_answer = "No"
+                else:
+                    dialog.reject()
+                    return
+                dialog.accept()
+
+            buttons.clicked.connect(direct_clicked)
+        else:
+            choice = QComboBox()
+            choice.setAccessibleName("Answer")
+            choice.addItems(prompt.options)
+            choice.setCurrentIndex(-1)
+            layout.addWidget(choice)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+
+            def choice_changed(index):
+                nonlocal selected_answer
+                selected_answer = choice.currentText() if index >= 0 else None
+                buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(index >= 0)
+
+            choice.currentIndexChanged.connect(choice_changed)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+
         layout.addWidget(buttons)
         self.pending[prompt] = dialog
 
         def finished(code):
             self.pending.pop(prompt, None)
-            answer = choice.currentText() if code == QDialog.DialogCode.Accepted else None
+            answer = selected_answer if code == QDialog.DialogCode.Accepted else None
             if answer in PATH_CHOICES and not prompt.done.is_set() and not self.closing:
                 self._path_prompt(prompt, answer)
             else:
@@ -141,6 +231,8 @@ class DialogHost(QObject):
 
         dialog.finished.connect(finished)
         dialog.open()
+        if binary or review:
+            negative_button.setFocus()
 
     def _path_prompt(self, prompt, choice):
         def finished(answer):

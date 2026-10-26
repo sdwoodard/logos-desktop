@@ -1,0 +1,39 @@
+{
+  "attribution": {
+    "publisher": "Wine release history served by wine-mirror/wine on GitHub",
+    "checked_utc": "2026-10-25T19:48:47Z",
+    "projection": "Selected literal commit, VERSION, announcement introduction and tag fields. Signature payloads omitted. HTTPS evidence, not independent signature verification.",
+    "development_history_url": "https://api.github.com/repos/wine-mirror/wine/commits?sha=master&path=ANNOUNCE.md&per_page=100",
+    "development_history_sha256": "565f051a33264e09bb4fb3dcfc2764b80b0612232a35efaa77ec5e3c4d8ddd65",
+    "stable_history_url": "https://api.github.com/repos/wine-mirror/wine/commits?sha=stable&path=ANNOUNCE.md&per_page=100",
+    "stable_history_sha256": "5ab4b4d168bc82e07a46f695b0de67d7c94005e63cf399a03f2e010785c571e3",
+    "provider_url": "https://api.github.com/repos/FaithLife-Community/wine-appimages/releases?per_page=100&page=1",
+    "provider_sha256": "c2fced2718476ae94c152ecc80e08ccc599011d6c214fc8cc61d055f78a5e399"
+  },
+  "devel": {
+    "version": "11.20",
+    "commit": "7298a818b79446bae153b8d5aa27235ab3703bf9",
+    "message": "Release 11.20.",
+    "VERSION": "Wine version 11.20\n",
+    "ANNOUNCE.md": "The Wine development release 11.20 is now available.\n",
+    "tag_sha": "b117f32aada84ede119f6c5e7ec385f16315d6f6"
+  },
+  "stable": {
+    "version": "11.0",
+    "commit": "db11d0fe6a169c457e23d007e20404643d067aa8",
+    "message": "Release 11.0.",
+    "VERSION": "Wine version 11.0\n",
+    "ANNOUNCE.md": "The Wine team is proud to announce that the stable release Wine 11.0\nis now available.\n",
+    "tag_sha": "ce295733f9a67970b7f60d7af201f2ac16441a50"
+  },
+  "provider": [
+    {"tag_name": "10.8-staging", "draft": false, "prerelease": false},
+    {"tag_name": "10.5-staging", "draft": false, "prerelease": false},
+    {"tag_name": "10.0-stable", "draft": false, "prerelease": false},
+    {"tag_name": "10.0-rc5-staging", "draft": false, "prerelease": false},
+    {"tag_name": "10.13-devel", "draft": false, "prerelease": true},
+    {"tag_name": "9.19-devel", "draft": false, "prerelease": false},
+    {"tag_name": "9.12-devel", "draft": false, "prerelease": false},
+    {"tag_name": "8.19-devel", "draft": false, "prerelease": false}
+  ]
+}

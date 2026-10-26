@@ -427,7 +427,7 @@ class PersistentConfiguration:
         return output
 
     @runtime.configuration_writer
-    def write_config(self, *, checked=False, config_file_path=None, validator=None):
+    def write_config(self, *, checked=False, config_file_path=None, validator=None, restoration=None):
         """Commit only changed fields, preserving saved values hidden by overrides."""
         path = config_file_path or getattr(self, "_file_path", None) or LegacyConfiguration.config_file_path()
         output = self._as_dict()
@@ -439,9 +439,9 @@ class PersistentConfiguration:
             source_bytes=getattr(self, "_file_bytes", None),
             overrides=getattr(self, "_environment", {}),
             expected=getattr(self, "_saved", None),
-            validator=validator,
+            validator=validator, restoration=restoration,
         )
-        loaded = self.from_document(saved.document, getattr(self, "_environment", {}))
+        loaded = self.from_document(config_store.canonical(saved.document, path), getattr(self, "_environment", {}))
         loaded._file_path = str(config_store.absolute_path(path))
         loaded._file_bytes = config_store.encode(saved.document)
         self.__dict__.update(loaded.__dict__)
@@ -598,7 +598,7 @@ class Config:
                     for name, value in legacy_changes.items():
                         setattr(self._raw._legacy, name, value)
                 try:
-                    self._write(checked=True)
+                    saved = self._write(checked=True)
                 except BaseException:
                     for name, value in previous.items():
                         setattr(self._raw, name, value)
@@ -613,6 +613,13 @@ class Config:
                 self.app.status(warning)
             except Exception:
                 logging.exception("Configuration committed, but its warning could not be displayed")
+        return saved
+
+    def restore_changes(self, previous, published):
+        """Restore operation-owned stored fields without replacing later edits."""
+        with runtime.configuration_lock(), self.validated_writes(None):
+            saved = self._write(checked=True, restoration=(previous, published))
+        return saved.conflicts
 
     def _create_network_requests_with_hook(self) -> network.NetworkRequests:
         def _network_cache_hook():
@@ -641,10 +648,12 @@ class Config:
         # parameter given should be a string
         return str(getattr(self._raw, parameter))
 
-    def _write(self, *, checked=False) -> None:
+    def _write(self, *, checked=False, restoration=None):
         """Save the selected profile and report a committed portable-copy failure."""
         destination = getattr(self._overrides, "config_destination", None) or self._overrides.config_path
         options = {"checked": True, "config_file_path": destination}
+        if restoration is not None:
+            options["restoration"] = restoration
         if self.write_validator is not None:
             options["validator"] = self.write_validator
         saved = self._raw.write_config(**options)
@@ -655,6 +664,7 @@ class Config:
         self.app._config_updated_event.set()
         if saved.warning:
             logging.warning(saved.warning)
+        return saved
 
     @property
     def write_validator(self):
@@ -796,9 +806,9 @@ class Config:
             return
         if self._raw.wine_binary and self._raw.wine_binary_code in ("Recommended", "AppImage"):
             context = self._raw.install_dir, self._raw.wine_binary
-            catalog = self._network.wine_appimage_versions()
-            if catalog.status != "ok":
-                status = (-1, "Recommended Wine information is stale or unavailable")
+            lookup = self._network.wine_appimage_release()
+            if lookup.status != "ok" or lookup.stale:
+                status = (-1, f"Current Wine provider information is stale or unavailable: {lookup.message}")
             else:
                 status = utils.compare_recommended_appimage_version(self.app)
             if context == (self._raw.install_dir, self._raw.wine_binary):
@@ -964,7 +974,6 @@ class Config:
         return get_wine_prefix_path(self.install_dir)
 
     @property
-    @maintenance.uses_owner
     def wine_binary(self) -> str:
         """Returns absolute path to the wine binary"""
         output = self._raw.wine_binary
@@ -985,21 +994,22 @@ class Config:
             self.wine_binary = output
             output = self._raw.wine_binary
 
-        return self._absolute_from_install_dir(output)
+        with maintenance.configured(self.app) as context, maintenance.use(context):
+            return self._absolute_from_install_dir(output)
 
     @wine_binary.setter
-    @maintenance.uses_owner
     def wine_binary(self, value: str):
-        """Takes in a path to the wine binary and stores it as relative for storage"""
-        if value == constants.WINE_RECOMMENDED_SIGIL:
-            value = str(Path(self.installer_binary_dir) / self.wine_appimage_recommended_file_name)
-        elif value == constants.WINE_BETA_SIGIL:
-            if self.wine_appimage_beta_file_name:
-                value = str(Path(self.installer_binary_dir) / self.wine_appimage_beta_file_name)
-            else:
-                logging.info("Failed to find any beta-specific appimage, falling back to latest release.")
-                value = str(Path(self.installer_binary_dir) / self.wine_appimage_recommended_file_name)
+        """Resolve recommendations before entering the concrete selection write lease."""
+        if value in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
+            from . import installer
 
+            installer.select_recommended_wine(self.app)
+            return
+
+        self._set_wine_binary(value)
+
+    @maintenance.uses_owner
+    def _set_wine_binary(self, value: str):
         relative = self._relative_from_install_dir(value)
 
         if self._raw.wine_binary != relative:
@@ -1100,45 +1110,32 @@ class Config:
 
     @property
     def wine_appimage_recommended_url(self) -> str:
-        """URL to recommended appimage.
-        
-        Talks to the network if required"""
-        versions = self._network.wine_appimage_versions()
-        if versions.latest is None:
-            raise ValueError("Failed to find release for wine appimage")
-        else:
-            return versions.latest.download_url
+        """Resolve an existing provider's exact current released development target."""
+        return self.current_wine_appimage().download_url
+
+    def current_wine_appimage(self):
+        lookup = self._network.wine_appimage_release()
+        if lookup.status != "ok" or lookup.stale or lookup.release is None or lookup.release.error:
+            raise maintenance.MaintenanceError(lookup.message or "Current Wine AppImage is unavailable")
+        return lookup.release
     
     @property
     def wine_appimage_beta_url(self) -> Optional[str]:
-        """URL to beta appimage.
-        
-        Talks to the network if required"""
-        versions = self._network.wine_appimage_versions()
-        if versions.pre_release is None:
-            return None
-        else:
-            return versions.pre_release.download_url
+        """Legacy alias for the published development target, without an older fallback."""
+        return self.wine_appimage_recommended_url
     
     @property
     def wine_appimage_beta_file_name(self) -> Optional[str]:
-        """Returns the file name of the recommended appimage with extension"""
-        pre_release = self._network.wine_appimage_versions().pre_release
-        if pre_release is None:
-            return None
-        return os.path.basename(pre_release.download_url)
+        return self.wine_appimage_recommended_file_name
 
     @property
     def wine_appimage_recommended_file_name(self) -> str:
         """Returns the file name of the recommended appimage with extension"""
-        return os.path.basename(self.wine_appimage_recommended_url)
+        return self.current_wine_appimage().name
 
     @property
     def wine_appimage_recommended_version(self) -> str:
-        release = self._network.wine_appimage_versions().latest
-        if release is None or release.error:
-            raise ValueError("Recommended Wine release information is unavailable")
-        return release.version
+        return self.current_wine_appimage().version
 
     @property
     def wine_dll_overrides(self) -> str:
@@ -1321,16 +1318,26 @@ class Config:
     def installed_faithlife_product_release(self) -> Optional[str]:
         if self._raw.install_dir is None:
             return None
-        identity = self.wine_prefix, self._raw.faithlife_product, self.wine_user
-        if getattr(self, "_installed_release_identity", None) != identity:
-            self._installed_faithlife_product_release = None
+        appdata = self._logos_appdata_dir
+        metadata = Path(appdata) / "System/Logos.deps.json" if appdata else None
+        try:
+            info = metadata.stat() if metadata else None
+        except FileNotFoundError:
+            info = None
+        identity = (
+            str(metadata),
+            (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) if info else None,
+        )
+        if (getattr(self, "_installed_release_identity", None) != identity
+                or (info is not None and self._installed_faithlife_product_release is None)):
+            # Pending promotion replaces System metadata after the MSI has settled.
+            self._installed_faithlife_product_release = utils.get_current_logos_version(appdata)
             self._installed_release_identity = identity
-        if self._installed_faithlife_product_release is None:
-            self._installed_faithlife_product_release = utils.get_current_logos_version(self._logos_appdata_dir)
         return self._installed_faithlife_product_release
 
     def refresh_installed_faithlife_product_release(self) -> Optional[str]:
         """Reread installed metadata when a mutation decision cannot use cached evidence."""
+        self._installed_release_identity = None
         self._installed_faithlife_product_release = None
         return self.installed_faithlife_product_release
 

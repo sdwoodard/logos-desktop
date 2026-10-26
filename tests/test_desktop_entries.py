@@ -8,7 +8,7 @@ from ou_dedetai import constants, desktop, installer
 
 
 class TestDesktopEntries(unittest.TestCase):
-    def test_all_binary_entries_use_quoted_argv_and_direct_url_handler(self):
+    def test_all_binary_entries_preserve_complex_launcher_and_direct_url_handler(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install = root / "Logos Space 文"
@@ -33,7 +33,7 @@ class TestDesktopEntries(unittest.TestCase):
                               if not path.stem.endswith(('-app', '-url'))).read_text()
             product = next(entries.glob('*-app.desktop')).read_text()
             handler = next(entries.glob('*-url.desktop')).read_text()
-            route = f'"{launcher}" "-c" "{root / "chosen.json"}"'
+            route = f'/usr/bin/env "--" "{launcher}" "-c" "{root / "chosen.json"}"'
             self.assertIn(f'Exec={route}\n', controller)
             self.assertIn(f'Exec={route} "--run-installed-app"\n', product)
             self.assertIn('"--wine" ', handler)
@@ -103,4 +103,32 @@ class TestDesktopEntries(unittest.TestCase):
 
     def test_url_field_is_distinct_from_literal_percent_arguments(self):
         command = installer.desktop_exec(["/fixture/100% launcher", "literal%u"], accepts_url=True)
-        self.assertEqual(command, '"/usr/bin/env" "--" "/fixture/100%% launcher" "literal%%u" %u')
+        self.assertEqual(command, '/usr/bin/env "--" "/fixture/100%% launcher" "literal%%u" %u')
+
+    def test_safe_executable_is_bare_for_native_kde_lookup(self):
+        for executable in ("/usr/bin/python", "python3", "/opt/Logos-Desktop_1.2+3/run"):
+            for accepts_url in (False, True):
+                with self.subTest(executable=executable, accepts_url=accepts_url):
+                    command = installer.desktop_exec(
+                        [executable, "", "literal%u %f %U %i"], accepts_url=accepts_url,
+                    )
+                    expected = f'{executable} "" "literal%%u %%f %%U %%i"'
+                    self.assertEqual(command, expected + (" %u" if accepts_url else ""))
+
+    def test_complex_executable_uses_bare_env_and_preserves_escaped_argument(self):
+        for character in (" ", "文", "%", "'", '"', "$", "`", "\\", ";", "&", "(", ":"):
+            with self.subTest(character=character):
+                executable = f"/fixture/{character}launcher"
+                command = installer.desktop_exec([executable, "argument"])
+                self.assertTrue(command.startswith('/usr/bin/env "--" "'))
+                # The executable is now an ordinary argument with identical escaping.
+                escaped_argument = installer.desktop_exec(["/safe", executable, "argument"])
+                self.assertEqual(command.removeprefix('/usr/bin/env "--" '),
+                                 escaped_argument.removeprefix("/safe "))
+
+    def test_invalid_executable_and_control_arguments_are_rejected(self):
+        for arguments in ([], [""], ["invalid=launcher"], ["/safe", "bad\nargument"],
+                          ["/space launcher", "bad\x00argument"], ["/bad\tlauncher"],
+                          ["/safe", "bad\x7fargument"]):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                installer.desktop_exec(arguments, accepts_url=True)

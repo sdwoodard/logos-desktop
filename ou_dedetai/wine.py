@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+import hashlib
 import logging
 import os
 import re
@@ -10,10 +12,12 @@ from pathlib import Path
 from packaging.version import Version
 import tempfile
 import threading
+import time
 from typing import IO, Optional
 
-from ou_dedetai import artifacts, constants, maintenance, runtime
+from ou_dedetai import artifacts, compatibility, constants, maintenance, runtime
 from ou_dedetai.app import App
+from ou_dedetai.compatibility import WineVersion as WineRelease
 
 from . import network
 from . import system
@@ -33,20 +37,9 @@ def wineserver_wait(app: App):
     return run_wine_during_install(app, app.conf.wineserver_binary, exe_args=["-w"], timeout=60)
 
 
-@dataclass
-class WineRelease:
-    major: int
-    minor: int
-    release: Optional[str]
-
-
 def get_devel_or_stable(version: str) -> str:
-    # Wine versioning states that x.0 is always stable branch, while x.y is devel.
-    # Ref: https://gitlab.winehq.org/wine/wine/-/wikis/Wine-User's-Guide#wine-from-winehq
-    if version.split('.')[1].startswith('0'):
-        return 'stable'
-    else:
-        return 'devel'
+    output = version if version.startswith("wine-") else f"wine-{version}"
+    return compatibility.parse_wine_version(output).channel.value
 
 
 # FIXME: consider raising exceptions on error
@@ -62,17 +55,7 @@ def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
                 raise RuntimeError("Wine version probe failed")
             version_string = output.decode("utf-8").strip()
         logging.debug(f"Version string: {str(version_string)}")
-        match = re.fullmatch(
-            r"wine-(\d+)\.(\d+)(?:\.\d+)*(?:-rc\d+)?(?: \((stable|devel|staging)\))?",
-            version_string, re.IGNORECASE,
-        )
-        if match is None:
-            raise ValueError("Unrecognized Wine version output")
-        major, minor = int(match[1]), int(match[2])
-        if major == 0:
-            raise ValueError("Wine major version must be positive")
-        branch = match[3].lower() if match[3] else ("stable" if minor == 0 else "devel")
-        return WineRelease(major, minor, branch), "yes"
+        return compatibility.parse_wine_version(version_string), "yes"
 
     except subprocess.CalledProcessError as e:
         return None, f"Error running command: {e}"
@@ -97,36 +80,10 @@ def check_wine_rules(
     faithlife_product_version: str
 ):
     logging.debug(f"Checking {wine_release} for {release_version}.")
-    if faithlife_product_version == "10":
-        if release_version is not None and product_release(release_version) < Version("30.0.0.0"):
-            minimum = (7, 18)
-        else:
-            minimum = (9, 10)
-    elif faithlife_product_version == "9":
-        minimum = (7, 0)
-    else:
-        raise ValueError(
-            "Invalid target version, expecting 9 or 10 but got: "
-            f"{faithlife_product_version} ({type(faithlife_product_version)})"
-        )
-
-    if wine_release is None:
-        return False, "Could not identify the selected Wine version"
-
-    major, minor, branch = wine_release.major, wine_release.minor, wine_release.release
-    if (major, minor) < minimum:
-        return False, f"Wine {major}.{minor} is below minimum required ({minimum[0]}.{minimum[1]})"
-    if branch not in ("stable", "devel", "staging"):
-        return False, f"Unrecognized Wine branch: {branch}"
-    if major == 8 and minor == 0:
-        return False, "Wine 8.0 will not work"
-    if major == 7 and branch != "staging":
-        return False, "Wine 7 requires staging"
-    if major == 8 and branch != "staging" and not (minor >= 16 and branch == "devel"):
-        return False, "Wine 8 requires staging or devel 8.16 or later"
-    if major == 9 and branch not in ("devel", "staging"):
-        return False, "Wine 9 requires devel or staging"
-    return True, "Compatible with the configured Wine version rules"
+    target = None
+    if faithlife_product_version == "10" and release_version is not None:
+        target = product_release(release_version)
+    return compatibility.wine_eligibility(wine_release, target, faithlife_product_version)
 
 
 def require_compatible(app: App, binary: str | Path):
@@ -185,10 +142,10 @@ def check_wine_version_and_branch(release_version: Optional[str], test_binary,
                 [runtime.executable(server), "--version"], env=updates.fresh_environment(),
                 timeout=15, limit=16384, label="Wineserver version probe",
             )
-            match = re.fullmatch(r"Wine (\d+)\.(\d+)(?:\.\d+)*(?: \([^\n]+\))?", output.decode().strip())
-            if status != 0 or match is None:
+            if status != 0:
                 return False, "Could not identify the matching wineserver version"
-            if (int(match[1]), int(match[2])) != (wine_release.major, wine_release.minor):
+            server_version = compatibility.parse_wineserver_version(output.decode("utf-8"))
+            if server_version != wine_release.version:
                 return False, "Wine and wineserver versions do not match"
         except (OSError, ValueError, RuntimeError) as error:
             return False, f"Could not probe the matching wineserver: {error}"
@@ -279,24 +236,17 @@ def wine_reg_query(app: App, key_name: str, value_name: str) -> Optional[str]:
     if process.returncode == 1:
         # Key not found
         return None
-    elif process.returncode == 0:
-        # Parse output?
-        for line in process.stdout.rstrip().splitlines():
-            # If line is empty that's not what we're looking for
-            if not line:
-                continue
-            if line.strip() == key_name:
-                continue
-            if line.lstrip().startswith(value_name) and "REG_SZ" in line:
-                # This is the line in question
-                return line.split(value_name)[1].split("REG_SZ")[1].strip()
-        logging.warning(f"Failed to parse the registry query: {process.stdout.rstrip()}") 
-        return None
-    else:
-        # Unknown exit code
-        failed = f"Failed to query the registry: Unknown Exit code {process.returncode}"
-        logging.debug(f"{failed}. {process=}")
-        raise maintenance.MaintenanceError(f"{failed}: {key_name} {value_name}")
+    if process.returncode != 0:
+        raise maintenance.MaintenanceError(f"Registry query failed with exit code {process.returncode}")
+
+    lines = [line for line in process.stdout.splitlines() if line.strip()]
+    # Wine reg.exe uses four spaces between columns. Preserve data whitespace.
+    pattern = rf"    {re.escape(value_name)}    REG_SZ(?:    (.*))?"
+    if len(lines) == 2 and lines[0].strip().casefold() == key_name.casefold():
+        match = re.fullmatch(pattern, lines[1])
+        if match is not None and "\x00" not in lines[1]:
+            return match.group(1) or ""
+    raise maintenance.MaintenanceError("Registry query returned an unexpected value or type")
 
 
 def wine_reg_install(app: App, name: str, reg_text: str, wine64_binary: str):
@@ -361,7 +311,9 @@ def install_msi(app: App, accepted: artifacts.AcceptedArtifact, *, target_releas
     wine_binary = app.conf.wine64_binary
     if accepted.spec.kind != "msi":
         raise artifacts.ArtifactError("MSI installation requires an accepted MSI artifact")
-    exe_args = ["/i", str(accepted.check())]
+    accepted.check(checkpoint=app.checkpoint)
+    exe_args = ["/i"]
+    passive = False
 
     # Ensure the user agrees to the EULA. Exit if they don't.
     # This code block tells the MSI installer to run non-interactively.
@@ -372,32 +324,256 @@ def install_msi(app: App, accepted: artifacts.AcceptedArtifact, *, target_releas
     # entirely once we confirm the user has agreed to EULA (for Faithlife's sake)
     if (
         app.conf._overrides.agreed_to_faithlife_terms or
-        app.approve_or_exit("Do you agree to Faithlife's EULA? https://faithlife.com/terms")
+        app.approve_or_exit("Do you agree to Faithlife's EULA?\nhttps://faithlife.com/terms")
     ):
-        exe_args.append("/passive")
+        passive = True
 
+    mst_path = None
     if target_version > Version("39.0.0.0"):
         mst_path = constants.APP_ASSETS_DIR / "LogosStubFailOK.mst"
         if not mst_path.is_file() or mst_path.stat().st_size == 0:
             raise maintenance.MaintenanceError(f"Required MSI transform is missing: {mst_path}")
-        with mst_path.open("rb") as transform:
-            transform.read(1)
-        transform_winpath = windows_path(app, wine_binary, mst_path)
-        exe_args.append(f'TRANSFORMS={transform_winpath}')
-        logging.debug(f"TRANSFORMS windows path added: {transform_winpath}")
 
-    exe_args[1] = windows_path(app, wine_binary, accepted.check())
-    logging.info(f"Running: {wine_binary} msiexec {' '.join(exe_args)}")
-    result = run_wine_during_install(app, wine_binary, exe="msiexec", exe_args=exe_args, timeout=None)
-    if result is not None:
-        result.wait()
-    if result is None or result.returncode != 0:
-        raise maintenance.MaintenanceError("Logos MSI installation failed")
-    return result
+    context = maintenance.Context.from_app(app)
+    _wait_for_msi_prefix(context, checkpoint=app.checkpoint)
+    with _msi_inputs(app, accepted, mst_path) as inputs:
+        exe_args.append(inputs.windows_msi)
+        if passive:
+            exe_args.append("/passive")
+        if inputs.windows_transform is not None:
+            exe_args.append(f"TRANSFORMS={inputs.windows_transform}")
+        app.checkpoint()
+        inputs.accepted.check(checkpoint=app.checkpoint)
+        if (context.prefix / "dosdevices/c:").resolve(strict=True) != inputs.accepted.path.parent.parent:
+            raise maintenance.MaintenanceError("Installer C drive mapping changed before execution")
+        failure = None
+        try:
+            logging.info("Running: %s msiexec %s", wine_binary, " ".join(exe_args))
+            result = run_wine_during_install(app, wine_binary, exe="msiexec", exe_args=exe_args, timeout=None)
+            if result is not None:
+                result.wait()
+            if result is None or result.returncode != 0:
+                raise maintenance.MaintenanceError("Logos MSI installation failed")
+            return result
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            # Cancellation must not remove inputs or release admission while a
+            # Windows Installer service or detached Wine child still uses them.
+            try:
+                _wait_for_msi_prefix(context)
+            except BaseException:
+                if failure is None:
+                    raise
+                logging.exception("Installer settlement was interrupted after an earlier failure")
 
 
+def _wait_for_msi_prefix(context, *, checkpoint=None):
+    deadline = time.monotonic() + 60
+    idle_since = None
+    deferred = None
+    while True:
+        try:
+            if checkpoint is not None:
+                checkpoint()
+            try:
+                maintenance.assert_quiescent(context)
+            except maintenance.MaintenanceBusy:
+                idle_since = None
+                if checkpoint is not None and time.monotonic() >= deadline:
+                    raise
+            else:
+                if idle_since is not None and time.monotonic() - idle_since >= 0.3:
+                    break
+                if idle_since is None:
+                    idle_since = time.monotonic()
+            time.sleep(0.1)
+        except BaseException as error:
+            if checkpoint is not None:
+                raise
+            # An interrupted wait or unreadable process outcome must not release
+            # installation ownership. Propagate it only after observed settlement.
+            deferred = deferred or error
+            idle_since = None
+    if deferred is not None:
+        raise deferred
+
+
+@dataclass(frozen=True)
+class _MsiInputs:
+    accepted: artifacts.AcceptedArtifact
+    windows_msi: str
+    windows_transform: str | None
+
+
+def _copy_msi_input(source, directory_fd, name, size, digest, checkpoint):
+    """Copy only the bounded expected bytes into a new private input file."""
+    incoming = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(incoming, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+            raise artifacts.ArtifactError("Installer input source changed")
+        output = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        with os.fdopen(output, "wb") as target:
+            copied = 0
+            actual = hashlib.sha256()
+            while True:
+                checkpoint()
+                chunk = stream.read(min(1024 * 1024, size - copied + 1))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > size:
+                    raise artifacts.ArtifactError("Installer input grew while staging")
+                actual.update(chunk)
+                target.write(chunk)
+            after = os.fstat(stream.fileno())
+            if (
+                (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or copied != size or actual.hexdigest() != digest
+            ):
+                raise artifacts.ArtifactError("Installer input changed while staging")
+            target.flush()
+            os.fchmod(target.fileno(), 0o400)
+            os.fsync(target.fileno())
+
+
+@contextmanager
+def _msi_inputs(app, accepted, transform):
+    """Stage checked inputs at short C names without changing their artifact role."""
+    checkpoint = app.checkpoint
+    checkpoint()
+    accepted.check(checkpoint=checkpoint)
+    prefix = maintenance.Context.from_app(app).prefix
+    drive_fd = stage_fd = None
+    stage_name = None
+    failed = False
+    try:
+        devices = prefix / "dosdevices"
+        drive = devices / "c:"
+        if devices.is_symlink() or not drive.is_symlink():
+            raise maintenance.MaintenanceError("Installer staging requires a verified prefix-local C drive")
+        target = drive.resolve(strict=True)
+        if target == prefix or not target.is_relative_to(prefix):
+            raise maintenance.MaintenanceError("Installer C drive must stay inside the selected Wine prefix")
+        drive_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(drive_fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise maintenance.MaintenanceError("Installer C drive must be owned and not writable by other users")
+
+        transform_size = 0
+        transform_hash = None
+        if transform is not None:
+            transform_hash = artifacts.regular_hash(transform, checkpoint=checkpoint)
+            transform_size = transform.stat().st_size
+            if transform_size == 0:
+                raise maintenance.MaintenanceError("Required MSI transform is empty")
+        space = os.fstatvfs(drive_fd)
+        required = accepted.size + transform_size + 16 * 1024 * 1024
+        available = space.f_bavail * space.f_frsize
+        if available < required:
+            raise maintenance.MaintenanceError(
+                f"Installer input staging needs {required} bytes, but only {available} bytes are available"
+            )
+
+        checkpoint()
+        stage_name = "LogosDesktopInstall-" + secrets.token_hex(6)
+        os.mkdir(stage_name, 0o700, dir_fd=drive_fd)
+        stage_fd = os.open(stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=drive_fd)
+        stage_info = os.fstat(stage_fd)
+        stage = target / stage_name
+        _copy_msi_input(accepted.path, stage_fd, "installer.msi", accepted.size, accepted.sha256, checkpoint)
+        staged = replace(accepted, path=stage / "installer.msi")
+        staged.check(checkpoint=checkpoint)
+        if transform is not None:
+            _copy_msi_input(transform, stage_fd, "installer.mst", transform_size, transform_hash, checkpoint)
+            if (artifacts.regular_hash(transform, checkpoint=checkpoint) != transform_hash
+                    or artifacts.regular_hash(stage / "installer.mst", checkpoint=checkpoint) != transform_hash):
+                raise artifacts.ArtifactError("MSI transform changed while staging")
+        os.fsync(stage_fd)
+        if drive.resolve(strict=True) != target:
+            raise maintenance.MaintenanceError("Installer C drive mapping changed while staging")
+        checkpoint()
+        windows = "\\\\?\\C:\\" + stage_name + "\\"
+        yield _MsiInputs(staged, windows + "installer.msi", windows + "installer.mst" if transform else None)
+    except BaseException as error:
+        failed = True
+        if isinstance(error, OSError):
+            raise maintenance.MaintenanceError(f"Cannot stage private installer inputs: {error}") from error
+        raise
+    finally:
+        if stage_fd is not None:
+            try:
+                current = os.stat(stage_name, dir_fd=drive_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (stage_info.st_dev, stage_info.st_ino):
+                    raise maintenance.MaintenanceError("Installer staging directory changed, inputs preserved")
+                for name in ("installer.msi", "installer.mst"):
+                    try:
+                        os.unlink(name, dir_fd=stage_fd)
+                    except FileNotFoundError:
+                        pass
+                os.rmdir(stage_name, dir_fd=drive_fd)
+            except (OSError, maintenance.MaintenanceError) as error:
+                if not failed:
+                    raise maintenance.MaintenanceError(
+                        "Cannot clean owned installer staging, directory preserved"
+                    ) from error
+                logging.warning("Installer staging cleanup failed after an earlier error: %s", error)
+            finally:
+                os.close(stage_fd)
+                os.close(drive_fd)
+        elif drive_fd is not None:
+            os.close(drive_fd)
+
+
+@maintenance.uses_installation
 def windows_path(app: App, wine_binary: str, source: Path) -> str:
     """Use an extended Windows name so MSI can read long immutable store paths."""
+    source = Path(source)
+    if not source.is_absolute() or any(
+        re.search(r'[<>:"|?*\\\x00-\x1f\x7f]', part)
+        or part.endswith((" ", "."))
+        for part in source.parts[1:]
+    ):
+        raise maintenance.MaintenanceError("Unsupported Windows installer input path")
+
+    # Wine 11.19 winepath corrupts stdout at MAX_PATH, even with exit status zero.
+    # Read the selected prefix's actual mappings instead of guessing a Z drive.
+    if len(os.fsencode(source)) + 2 >= 260:
+        try:
+            resolved = source.resolve(strict=True)
+            mappings = Path(app.conf.wine_prefix) / "dosdevices"
+            candidates = []
+            for drive in sorted(mappings.glob("[a-z]:")):
+                if not drive.is_symlink():
+                    continue
+                target = drive.resolve(strict=True)
+                if not target.is_dir() or not resolved.is_relative_to(target):
+                    continue
+                relative = resolved.relative_to(target)
+                candidates.append((len(target.parts), drive.name[0].upper(), relative))
+            if not candidates:
+                raise ValueError("No DOS drive maps the installer input")
+            _, drive_letter, relative = max(candidates)
+            for part in relative.parts:
+                if (
+                    re.search(r'[<>:"|?*\\\x00-\x1f\x7f]', part)
+                    or part.endswith((" ", "."))
+                    or re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", part)
+                    or len(part.encode("utf-16-le")) // 2 > 255
+                ):
+                    raise ValueError("Unrepresentable Windows path component")
+            pathname = "\\\\?\\" + drive_letter + ":\\" + "\\".join(relative.parts)
+            if len(pathname.encode("utf-16-le")) // 2 >= 32767:
+                raise ValueError("Windows installer input path is too long")
+            return pathname
+        except (OSError, ValueError, RuntimeError) as error:
+            raise maintenance.MaintenanceError(
+                "Cannot map long installer input through the selected Wine prefix"
+            ) from error
+
     converted = run_wine_completed_process(app, wine_binary, exe_args=["winepath", "-w", str(source)])
     if converted is None or converted.returncode != 0 or not isinstance(converted.stdout, str):
         raise maintenance.MaintenanceError(f"winepath failed to convert installer input: {source.name}")
@@ -424,32 +600,10 @@ def run_winetricks(app: App, *args):
 
 
 def install_fonts(app: App):
-    """Installs all required fonts:
-    
-    - arial
-    """
-    fonts_dir = Path(app.conf.wine_prefix) / "drive_c" / "windows" / "Fonts"
-    fonts = ["arial"]
-    for i, f in enumerate(fonts):
-        registry_key = wine_reg_query(
-            app,
-            "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 
-            f"{f.capitalize()} (TrueType)"
-        )
-        if registry_key is not None and registry_key != f"{f}.ttf":
-            # Can hit this case with the debian package ttf-mscorefonts-installer
-            logging.debug(f"Found font {f} already installed by other means, no need to install.") 
-            continue
-        # This case doesn't happen normally, but still good to check.
-        # Now we need to check to see if there is a registry key saying it's in Fonts
-        # but in reality it's not.
-        if registry_key == f"{f}.ttf" and (fonts_dir / f"{f}.ttf").exists():
-            logging.debug(f"Found font {f} already in fonts dir, no need to install.")
-            continue
-        # Font isn't installed, continue to install with winetricks.
-        app.status(f"Configuring font: {f}…", i / len(fonts))
-        args = [f]
-        run_winetricks(app, *args)
+    """Check and, when authorized, repair the selected prefix's Arial prerequisite."""
+    from . import fonts
+
+    fonts.ensure_arial(app)
 
 
 def get_winecmd_encoding(app: App) -> Optional[str]:
@@ -477,22 +631,24 @@ def run_wine_completed_process(
     exe_args=None,
     additional_wine_dll_overrides: Optional[str] = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Like run_wine_proc but outputs a CompletedProcess
-    and sets it's output to text
-
-    Useful when wanting to parse the output for wine commands
-    """
+    """Keep parsed stdout strict and escape non-UTF-8 diagnostic bytes separately."""
     command, env = _wine_invocation(app, wine_binary, additional_wine_dll_overrides)
     if exe is not None:
         command.append(exe)
     if exe_args:
         command.extend(exe_args)
     try:
-        return subprocess.run(
+        result = subprocess.run(
             command, env=system.fix_ld_library_path(env), capture_output=True,
-            text=True, timeout=60,
+            timeout=60,
         )
-    except (OSError, subprocess.SubprocessError) as error:
+        for stream, errors in (("stdout", "strict"), ("stderr", "backslashreplace")):
+            data = getattr(result, stream, None)
+            if data is not None:
+                text = data.decode("utf-8", errors=errors)
+                setattr(result, stream, text.replace("\r\n", "\n").replace("\r", "\n"))
+        return result
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
         raise maintenance.MaintenanceError(f"Wine helper failed: {command!r}: {error}") from error
 
 

@@ -1,17 +1,20 @@
 from contextlib import ExitStack
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from threading import Event, Thread
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from ou_dedetai import (
-    artifacts, cli, constants, installer, maintenance, network, processes, runtime, system, utils, wine,
+    artifacts, cli, compatibility, constants, installer, maintenance, network, processes, releases, runtime,
+    system, utils, wine,
 )
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import Config, EphemeralConfiguration
@@ -28,6 +31,11 @@ class TestInstallation(unittest.TestCase):
         state.start()
         self.addCleanup(state.stop)
         self.app = fixture_app(self.root)
+        self.drive_c = Path(self.app.conf.wine_prefix) / "custom-c"
+        self.drive_c.mkdir(parents=True)
+        devices = Path(self.app.conf.wine_prefix) / "dosdevices"
+        devices.mkdir()
+        (devices / "c:").symlink_to(self.drive_c)
         self.app.conf.skip_install_system_dependencies = False
         self.app.superuser_command = "/fixture/elevate 文"
         self.app.approve = Mock(return_value=True)
@@ -133,6 +141,74 @@ class TestInstallation(unittest.TestCase):
         msi_install.assert_not_called()
         self.assertFalse(any("Complete" in call.args[0] for call in self.app.status.call_args_list))
 
+    def test_prefix_configuration_preserves_renderer_and_remaining_registry_setup(self):
+        registry = Path(self.app.conf.wine_prefix) / "user.reg"
+        for renderer in (None, "gdi", "gl"):
+            contents = "WINE REGISTRY Version 2\n"
+            if renderer is not None:
+                contents += f'\n[Software\\\\Wine\\\\Direct3D]\n"renderer"="{renderer}"\n'
+            registry.write_text(contents)
+            before = registry.read_bytes()
+            accepted = object()
+            scripts = []
+
+            def capture_registry(**kwargs):
+                self.assertIs(kwargs["app"], self.app)
+                self.assertEqual(kwargs["wine_binary"], self.app.conf.wine64_binary)
+                self.assertEqual(kwargs["exe"], "regedit.exe")
+                scripts.append(Path(kwargs["exe_args"][0]).read_text())
+                return SimpleNamespace(returncode=0)
+
+            with (
+                self.subTest(renderer=renderer),
+                patch.object(installer, "ensure_wineprefix_init", return_value=accepted) as initialize,
+                patch.object(wine, "run_wine_during_install", side_effect=capture_registry) as execute,
+                patch.object(wine, "wineserver_wait") as wait,
+                patch.object(wine, "set_renderer", wraps=wine.set_renderer) as set_renderer,
+                patch.object(wine, "wine_reg_query", side_effect=AssertionError("No renderer query needed")),
+            ):
+                self.assertIs(installer.ensure_wineprefix_config(self.app), accepted)
+            initialize.assert_called_once_with(app=self.app)
+            set_renderer.assert_not_called()
+            self.assertEqual(execute.call_count, 2)
+            self.assertEqual(wait.call_count, 2)
+            self.assertIn('"winemenubuilder.exe"=""', scripts[0])
+            self.assertIn('"FontSmoothingType"=dword:00000002', scripts[1])
+            self.assertTrue(all("Direct3D" not in script and '"renderer"' not in script for script in scripts))
+            self.assertEqual(registry.read_bytes(), before)
+
+    def test_prefix_configuration_respects_prerequisite_cancel_and_registry_failures(self):
+        for failure in ("initialization", "cancel", "menubuilder", "fonts"):
+            error = (UserExitedFromAsk("cancelled") if failure == "cancel"
+                     else maintenance.MaintenanceError(f"{failure} refused"))
+            self.app.checkpoint.reset_mock(side_effect=True)
+            with (
+                self.subTest(failure=failure),
+                patch.object(installer, "ensure_wineprefix_init", return_value=object()) as initialize,
+                patch.object(wine, "disable_winemenubuilder") as disable,
+                patch.object(wine, "set_fontsmoothing_to_rgb") as fonts,
+                patch.object(wine, "set_renderer") as set_renderer,
+            ):
+                if failure == "initialization":
+                    initialize.side_effect = error
+                elif failure == "cancel":
+                    self.app.checkpoint.side_effect = error
+                elif failure == "menubuilder":
+                    disable.side_effect = error
+                else:
+                    fonts.side_effect = error
+                with self.assertRaises(type(error)) as caught:
+                    installer.ensure_wineprefix_config(self.app)
+                self.assertIs(caught.exception, error)
+            set_renderer.assert_not_called()
+            if failure in ("initialization", "cancel"):
+                disable.assert_not_called()
+                fonts.assert_not_called()
+            elif failure == "menubuilder":
+                fonts.assert_not_called()
+            else:
+                disable.assert_called_once_with(app=self.app, wine64_binary=self.app.conf.wine64_binary)
+
     def accepted_msi(self):
         source = self.root / "target.msi"
         source.write_bytes(msi())
@@ -146,19 +222,19 @@ class TestInstallation(unittest.TestCase):
                  ("38.0.0.0", "39.0.0.0", False), ("40.0.0.0", "40.1.0.1", True)]
         for installed, target, transformed in cases:
             self.app.conf.installed_faithlife_product_release = installed
-            def converted(*args, **kwargs):
-                path = kwargs["exe_args"][-1]
-                return subprocess.CompletedProcess([], 0, "Z:" + str(path).replace("/", "\\") + "\n")
-
             with (self.subTest(installed=installed, target=target),
-                  patch.object(wine, "run_wine_completed_process", side_effect=converted) as convert,
+                  patch.object(wine, "run_wine_completed_process") as convert,
                   patch.object(wine, "run_wine_during_install", return_value=Mock(returncode=0)) as run):
                 wine.install_msi(self.app, accepted, target_release=target)
             arguments = run.call_args.kwargs["exe_args"]
-            self.assertEqual(arguments[:2], ["/i", "\\\\?\\Z:" + str(accepted.path).replace("/", "\\")])
+            self.assertEqual(arguments[0], "/i")
+            self.assertRegex(arguments[1], r"^\\\\\?\\C:\\LogosDesktopInstall-[0-9a-f]{12}\\installer\.msi$")
+            self.assertLess(len(arguments[1]), 80)
             self.assertEqual(any(arg.startswith("TRANSFORMS=") for arg in arguments), transformed)
-            self.assertEqual(convert.call_count, 1 + int(transformed))
+            convert.assert_not_called()
             self.assertIsNone(run.call_args.kwargs["timeout"])
+            self.assertEqual(list(self.drive_c.iterdir()), [])
+            accepted.check()
 
     def test_bad_target_transform_and_conversion_never_start_msi(self):
         accepted = self.accepted_msi()
@@ -168,12 +244,228 @@ class TestInstallation(unittest.TestCase):
             with patch.object(constants, "APP_ASSETS_DIR", self.root):
                 with self.assertRaisesRegex(maintenance.MaintenanceError, "transform is missing"):
                     wine.install_msi(self.app, accepted, target_release="40.1.0.1")
-            for code, output in ((1, "Z:\\wrong"), (0, "\n")):
-                with patch.object(wine, "run_wine_completed_process",
-                                  return_value=subprocess.CompletedProcess([], code, output)):
-                    with self.assertRaisesRegex(maintenance.MaintenanceError, "winepath"):
-                        wine.install_msi(self.app, accepted, target_release="40.1.0.1")
+            (Path(self.app.conf.wine_prefix) / "dosdevices/c:").unlink()
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "C drive"):
+                wine.install_msi(self.app, accepted, target_release="40.1.0.1")
         run.assert_not_called()
+
+    def test_staged_msi_preserves_acceptance_and_identical_transform(self):
+        accepted = self.accepted_msi()
+        transform = self.root / "transform 文 space.mst"
+        transform.write_bytes(b"trusted transform fixture")
+        original = accepted.path.read_bytes()
+        with maintenance.installing(self.app), wine._msi_inputs(self.app, accepted, transform) as inputs:
+            staged = inputs.accepted
+            self.assertIs(staged.spec, accepted.spec)
+            self.assertEqual((staged.sha256, staged.size, staged.evidence),
+                             (accepted.sha256, accepted.size, accepted.evidence))
+            self.assertNotEqual(staged.path.stat().st_ino, accepted.path.stat().st_ino)
+            self.assertEqual(staged.path.read_bytes(), original)
+            self.assertEqual(staged.path.with_suffix(".mst").read_bytes(), transform.read_bytes())
+            self.assertEqual(staged.path.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(staged.path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(staged.check(), staged.path)
+            self.assertIn("C:\\LogosDesktopInstall-", inputs.windows_msi)
+        self.assertFalse(staged.path.parent.exists())
+        self.assertEqual(accepted.check().read_bytes(), original)
+
+    def test_copy_tampering_and_interruption_never_publish_inputs(self):
+        accepted = self.accepted_msi()
+        original = wine._copy_msi_input
+
+        def tamper(source, directory_fd, name, size, digest, checkpoint):
+            original(source, directory_fd, name, size, digest, checkpoint)
+            os.chmod(name, 0o600, dir_fd=directory_fd)
+            descriptor = os.open(name, os.O_WRONLY, dir_fd=directory_fd)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(b"wrong staged bytes")
+
+        def cancel(source, directory_fd, name, size, digest, checkpoint):
+            original(source, directory_fd, name, size, digest, checkpoint)
+            raise UserExitedFromAsk
+
+        for copier, error in ((tamper, artifacts.ArtifactError), (cancel, UserExitedFromAsk)):
+            with self.subTest(copier=copier.__name__), patch.object(wine, "_copy_msi_input", side_effect=copier):
+                with self.assertRaises(error), maintenance.installing(self.app):
+                    with wine._msi_inputs(self.app, accepted, None):
+                        self.fail("Invalid input must not be published")
+            self.assertEqual(list(self.drive_c.iterdir()), [])
+            accepted.check()
+
+    def test_msi_copy_checks_cancellation_between_finite_chunks(self):
+        source = self.root / "copy.bin"
+        content = b"chunk data" * (256 * 1024)
+        source.write_bytes(content)
+        descriptor = os.open(self.drive_c, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            def cancel_after_chunk():
+                output = self.drive_c / "partial"
+                if output.exists() and output.stat().st_size > 0:
+                    raise UserExitedFromAsk
+
+            with self.assertRaises(UserExitedFromAsk):
+                wine._copy_msi_input(source, descriptor, "partial", len(content),
+                                     hashlib.sha256(content).hexdigest(), cancel_after_chunk)
+            self.assertLess((self.drive_c / "partial").stat().st_size, len(content))
+            self.assertEqual(source.read_bytes(), content)
+        finally:
+            os.close(descriptor)
+
+    def test_unknown_settlement_keeps_admission_then_propagates_original_error(self):
+        observed = Event()
+        settle = Event()
+        original = OSError("process metadata unavailable")
+        failures = []
+
+        def inspect(context):
+            if not observed.is_set():
+                observed.set()
+                raise original
+            if not settle.is_set():
+                raise maintenance.MaintenanceBusy("owned child still live")
+
+        def wait():
+            with maintenance.installing(self.app):
+                with patch.object(maintenance, "assert_quiescent", side_effect=inspect):
+                    try:
+                        wine._wait_for_msi_prefix(maintenance.Context.from_app(self.app))
+                    except BaseException as error:
+                        failures.append(error)
+
+        thread = Thread(target=wait)
+        thread.start()
+        try:
+            self.assertTrue(observed.wait(5))
+            with self.assertRaises(maintenance.MaintenanceBusy):
+                maintenance.Lease(maintenance.Context.from_app(self.app))
+        finally:
+            settle.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [original])
+
+    def test_changed_transform_and_cancel_before_copy_leave_cache_untouched(self):
+        accepted = self.accepted_msi()
+        transform = self.root / "trusted.mst"
+        transform.write_bytes(b"trusted")
+        copier = wine._copy_msi_input
+
+        def change_transform(source, directory_fd, name, size, digest, checkpoint):
+            copier(source, directory_fd, name, size, digest, checkpoint)
+            if name == "installer.mst":
+                transform.write_bytes(b"changed")
+
+        with patch.object(wine, "_copy_msi_input", side_effect=change_transform):
+            with self.assertRaises(artifacts.ArtifactError), maintenance.installing(self.app):
+                with wine._msi_inputs(self.app, accepted, transform):
+                    self.fail("Changed trusted source must refuse")
+        self.app.checkpoint.side_effect = UserExitedFromAsk
+        with self.assertRaises(UserExitedFromAsk), patch.object(wine, "_copy_msi_input") as copy:
+            with wine._msi_inputs(self.app, accepted, None):
+                self.fail("Canceled staging must refuse")
+        copy.assert_not_called()
+        self.assertEqual(list(self.drive_c.iterdir()), [])
+        accepted.check()
+
+    def test_msi_staging_rejects_escaped_c_and_preexisting_directory_symlink(self):
+        accepted = self.accepted_msi()
+        drive = Path(self.app.conf.wine_prefix) / "dosdevices/c:"
+        drive.unlink()
+        drive.symlink_to(self.root)
+        with self.assertRaisesRegex(maintenance.MaintenanceError, "inside"), maintenance.installing(self.app):
+            with wine._msi_inputs(self.app, accepted, None):
+                self.fail("Escaped C mapping must refuse")
+        drive.unlink()
+        drive.symlink_to(self.drive_c)
+        planted = self.drive_c / "LogosDesktopInstall-0123456789ab"
+        planted.symlink_to(accepted.path.parent, target_is_directory=True)
+        with patch.object(wine.secrets, "token_hex", return_value="0123456789ab"):
+            with self.assertRaises(maintenance.MaintenanceError), maintenance.installing(self.app):
+                with wine._msi_inputs(self.app, accepted, None):
+                    self.fail("Existing directory entry must refuse")
+        self.assertTrue(planted.is_symlink())
+        accepted.check()
+
+    def test_staging_capacity_and_source_change_refuse_before_execution(self):
+        accepted = self.accepted_msi()
+        with patch.object(wine.os, "fstatvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=4096)):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "available"), maintenance.installing(self.app):
+                with wine._msi_inputs(self.app, accepted, None):
+                    self.fail("Insufficient capacity must refuse")
+        accepted.path.chmod(0o600)
+        accepted.path.write_bytes(b"changed original")
+        with self.assertRaises(artifacts.ArtifactError), patch.object(wine, "run_wine_during_install") as run:
+            wine.install_msi(self.app, accepted, target_release="39.0.0.0")
+        run.assert_not_called()
+        self.assertEqual(list(self.drive_c.iterdir()), [])
+
+    def test_installer_keeps_inputs_and_admission_until_detached_child_settles(self):
+        accepted = self.accepted_msi()
+        for outcome in (0, 23, "cancel"):
+            with self.subTest(outcome=outcome):
+                ready = self.root / "child-ready"
+                capture = self.root / "child-hash"
+                ready.unlink(missing_ok=True)
+                capture.unlink(missing_ok=True)
+                binary = self.root / "capture-launcher"
+                child = (
+                    "import hashlib,time\nfrom pathlib import Path\n"
+                    f"Path({str(ready)!r}).write_text('ready')\n"
+                    "time.sleep(.5)\n"
+                    f"Path({str(capture)!r}).write_text(hashlib.sha256(Path(__import__('sys').argv[1]).read_bytes()).hexdigest())\n"
+                )
+                binary.write_text(
+                    f"#!{sys.executable}\nimport subprocess,sys\nfrom pathlib import Path\n"
+                    "assert sys.argv[1:3] == ['msiexec', '/i']\n"
+                    f"assert sys.argv[3].startswith({'\\\\?\\C:\\LogosDesktopInstall-'!r})\n"
+                    f"source=Path({str(self.drive_c)!r}).joinpath(*sys.argv[3][7:].split('\\\\'))\n"
+                    f"subprocess.Popen([sys.executable, '-c', {child!r}, str(source)])\n"
+                    f"raise SystemExit({23 if outcome == 23 else 0})\n"
+                )
+                binary.chmod(0o700)
+                self.app.conf.wine64_binary = str(binary)
+                environment = dict(os.environ, WINEPREFIX=self.app.conf.wine_prefix)
+                failures = []
+
+                def consume():
+                    try:
+                        wine.install_msi(self.app, accepted, target_release="39.0.0.0")
+                    except BaseException as error:
+                        failures.append(error)
+
+                def cancel_after_spawn(app, wine_binary, **kwargs):
+                    with (self.root / "cancel-launcher.log").open("w+") as output:
+                        wine.run_wine_process(app, wine_binary, output, output, exe=kwargs["exe"],
+                                              exe_args=kwargs["exe_args"], detach_on_close=False)
+                        raise UserExitedFromAsk
+
+                with patch.object(wine, "get_wine_env", return_value=environment), ExitStack() as stack:
+                    if outcome == "cancel":
+                        stack.enter_context(patch.object(
+                            wine, "run_wine_during_install", side_effect=cancel_after_spawn,
+                        ))
+                    thread = Thread(target=consume)
+                    thread.start()
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(ready.exists(), failures)
+                    self.assertTrue(list(self.drive_c.glob("LogosDesktopInstall-*/installer.msi")))
+                    with self.assertRaises(maintenance.MaintenanceBusy):
+                        maintenance.Lease(maintenance.Context.from_app(self.app))
+                    thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                diagnostic = self.root / "cancel-launcher.log"
+                self.assertTrue(capture.exists(), diagnostic.read_text() if diagnostic.exists() else failures)
+                self.assertEqual(capture.read_text(), accepted.sha256)
+                self.assertEqual(list(self.drive_c.iterdir()), [])
+                if outcome == 0:
+                    self.assertEqual(failures, [])
+                else:
+                    self.assertEqual(len(failures), 1)
+                    expected = UserExitedFromAsk if outcome == "cancel" else maintenance.MaintenanceError
+                    self.assertIsInstance(failures[0], expected)
+                accepted.check()
 
     def test_windows_installer_paths_require_successful_absolute_conversion(self):
         for code, output, allowed in ((0, "Z:\\long path 文\\target.msi\n", True),
@@ -200,6 +492,7 @@ class TestInstallation(unittest.TestCase):
         def acquire(url, name, *args, **kwargs):
             self.assertIn("/40.1.0.1/", url)
             self.assertEqual(name, "Logos_v40.1.0.1-x64.msi")
+            self.assertEqual(kwargs["msi_expectation"], artifacts.MsiExpectation("Logos", "40.1.0.1"))
             conf.faithlife_product_release = "38.0.0.0"
             return accepted
 
@@ -321,6 +614,117 @@ class TestInstallation(unittest.TestCase):
             with self.assertRaisesRegex(maintenance.MaintenanceError, "below minimum"):
                 utils.set_appimage_symlink(self.app, source)
         self.assertEqual([runtime._snapshot(path) for path in sum(runtime._targets(self.app), [])], before)
+
+    def test_explicit_recommendation_preserves_real_config_on_unavailable_source_and_provider(self):
+        selected = Path(self.app.conf._overrides.config_path)
+        overrides = EphemeralConfiguration.load_from_path(str(selected))
+        with patch.object(Config, "_create_network_requests_with_hook", return_value=Mock()):
+            self.app.conf = Config(overrides, self.app)
+        conf = self.app.conf
+        conf._overrides.runtime_selection = {"wine_binary": "prior explicit override"}
+        original = selected.read_bytes(), conf._raw.wine_binary, dict(conf._overrides.runtime_selection)
+        for source in (
+            releases.WineTargetLookup(status="offline", message="Wine source offline"),
+            releases.WineTargetLookup(releases.WineTarget("11.20", "devel", "a" * 40), "ok"),
+        ):
+            conf._network.wine_release_target.return_value = source
+            conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(
+                status="unavailable", message="Wine devel 11.20 unavailable from community AppImage provider",
+            )
+            with patch.object(utils, "current_native_wine", return_value=None):
+                with self.assertRaises(maintenance.MaintenanceError):
+                    conf.wine_binary = constants.WINE_RECOMMENDED_SIGIL
+            self.assertEqual((selected.read_bytes(), conf._raw.wine_binary,
+                              conf._overrides.runtime_selection), original)
+
+    def test_explicit_recommendation_can_select_an_already_validated_current_native_provider(self):
+        selected = Path(self.app.conf._overrides.config_path)
+        overrides = EphemeralConfiguration.load_from_path(str(selected))
+        with patch.object(Config, "_create_network_requests_with_hook", return_value=Mock()):
+            self.app.conf = Config(overrides, self.app)
+        conf = self.app.conf
+        candidate = self.root / "external-native/wine"
+        candidate.parent.mkdir()
+        candidate.write_bytes(b"fixture, version and pair probes mocked")
+        candidate.chmod(0o700)
+        conf._network.wine_release_target.return_value = releases.WineTargetLookup(
+            releases.WineTarget("11.20", "devel", "a" * 40), "ok",
+        )
+        with patch.object(utils, "current_native_wine", return_value=str(candidate)):
+            conf.wine_binary = constants.WINE_RECOMMENDED_SIGIL
+        self.assertEqual(conf.wine_binary, str(candidate))
+        self.assertEqual(conf.wine_binary_code, "Custom")
+        conf._network.wine_appimage_release.assert_not_called()
+        conf._network.wine_release_target.reset_mock()
+        conf._network.wine_appimage_release.side_effect = AssertionError("No current AppImage provider")
+        with (patch.object(system, "check_incompatibilities"), patch.object(utils, "install_dependencies"),
+              patch.object(installer, "check_system_compatibility")):
+            installer.ensure_choices(self.app)
+            installer.ensure_appimage_download(self.app)
+        conf._network.wine_appimage_release.assert_not_called()
+        conf._network.wine_release_target.assert_not_called()
+
+    def prepare_unselected_recommended_config(self):
+        selected = Path(self.app.conf._overrides.config_path)
+        document = json.loads(selected.read_bytes())
+        document.update(wine_binary=None, WINE_EXE=None)
+        selected.write_text(json.dumps(document))
+        overrides = EphemeralConfiguration.load_from_path(str(selected))
+        with patch.object(Config, "_create_network_requests_with_hook", return_value=Mock()):
+            self.app.conf = Config(overrides, self.app)
+        self.app.ask = Mock(return_value=constants.WINE_RECOMMENDED_SIGIL)
+        conf = self.app.conf
+        conf._network.wine_release_target.return_value = releases.WineTargetLookup(
+            releases.WineTarget("11.20", "devel", "a" * 40), "ok",
+        )
+        release = network.SoftwareReleaseInfo("11.20", "https://example.invalid/current.AppImage",
+                                              name="current.AppImage")
+        conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(release, "ok")
+        return selected
+
+    def test_recommended_install_prepares_dependencies_before_activation_probe(self):
+        self.prepare_unselected_recommended_config()
+        source = self.root / "current.AppImage"
+        source.write_bytes(appimage())
+        accepted = artifacts.import_local(source, Path(self.app.conf.installer_binary_dir),
+                                          artifacts.ArtifactSpec("local:fixture", source.name, "appimage"))
+        phases = []
+
+        def prerequisites(app):
+            self.app.ask.assert_not_called()
+            phases.append("prerequisites")
+
+        def probe(app, binary):
+            self.assertEqual(phases, ["prerequisites"])
+            phases.append("activation probe")
+
+        with (patch.object(system, "check_incompatibilities"),
+              patch.object(utils, "install_dependencies", side_effect=prerequisites),
+              patch.object(utils, "current_native_wine", return_value=None),
+              patch.object(utils, "get_wine_options", return_value=[constants.WINE_RECOMMENDED_SIGIL]),
+              patch.object(network, "logos_reuse_download", return_value=accepted),
+              patch.object(installer, "check_system_compatibility"),
+              patch.object(wine, "require_compatible", side_effect=probe)):
+            installer.ensure_appimage_download(self.app)
+        self.assertEqual(phases, ["prerequisites", "activation probe"])
+        self.assertEqual(Path(self.app.conf.wine_binary).name, "current.AppImage")
+
+    def test_prerequisite_refusal_preserves_pending_recommendation_and_original_selection(self):
+        selected = self.prepare_unselected_recommended_config()
+        self.app.conf._overrides.runtime_selection = {"wine_binary": "prior effective override"}
+        before = selected.read_bytes(), self.app.conf._raw.wine_binary, dict(
+            self.app.conf._overrides.runtime_selection,
+        )
+        with (patch.object(system, "check_incompatibilities"),
+              patch.object(utils, "install_dependencies", side_effect=UserExitedFromAsk("prerequisites refused")),
+              patch.object(runtime, "activate") as activate):
+            with self.assertRaises(UserExitedFromAsk):
+                installer.ensure_appimage_download(self.app)
+        self.assertEqual((selected.read_bytes(), self.app.conf._raw.wine_binary,
+                          self.app.conf._overrides.runtime_selection), before)
+        self.app.ask.assert_not_called()
+        self.app.conf._network.wine_release_target.assert_not_called()
+        activate.assert_not_called()
 
     def test_two_switches_persist_through_fresh_config_and_matching_consumers(self):
         selected_config = Path(self.app.conf._overrides.config_path)
@@ -510,6 +914,7 @@ class TestWinePolicy(unittest.TestCase):
             ((8, 16, "devel"), "29.0.0.0", True), ((9, 9, "staging"), "40.1.0.1", False),
             ((9, 10, "staging"), "40.1.0.1", True), ((10, 0, "stable"), "40.1.0.1", True),
             ((10, 8, "staging"), "40.1.0.1", True), ((11, 19, "devel"), "40.1.0.1", True),
+            ((11, 20, "devel"), "40.1.0.1", True), ((25, 0, "stable"), "40.1.0.1", True),
             ((12, 0, "proton"), "40.1.0.1", False),
         ):
             with self.subTest(release=release, target=target):
@@ -520,7 +925,9 @@ class TestWinePolicy(unittest.TestCase):
         for output, code, expected in (
             (b"wine-10.8 (Staging)\n", 0, wine.WineRelease(10, 8, "staging")),
             (b"wine-11.19\n", 0, wine.WineRelease(11, 19, "devel")),
-            (b"wine-10.0-rc5\n", 0, wine.WineRelease(10, 0, "stable")),
+            (b"wine-11.20\n", 0, wine.WineRelease(11, 20, "devel")),
+            (b"wine-11.0.2\n", 0, wine.WineRelease(11, 0, "stable", (2,))),
+            (b"wine-10.0-rc5\n", 0, wine.WineRelease(10, 0, "devel", rc=5)),
             (b"wine-10.0\n", 2, None), (b"wine-10.0 (Proton unknown)\n", 0, None),
             (b"not Wine", 0, None), (b"wine-0.1", 0, None),
         ):
@@ -528,3 +935,74 @@ class TestWinePolicy(unittest.TestCase):
                   patch.object(wine.runtime, "executable", return_value="/fixture/wine"),
                   patch.object(processes, "capture", return_value=(output, code))):
                 self.assertEqual(wine.get_wine_release("/fixture/wine")[0], expected)
+
+    def test_channel_flavor_and_full_version_are_independent_facts(self):
+        for output, number, channel, flavor in (
+            ("wine-11.20", "11.20", "devel", "upstream"),
+            ("wine-10.8 (Staging)", "10.8", "devel", "staging"),
+            ("wine-11.0.2 (Stable)", "11.0.2", "stable", "upstream"),
+            ("wine-11.0-rc2", "11.0rc2", "rc", "upstream"),
+            ("wine-11.0-rc2 (Staging)", "11.0rc2", "rc", "staging"),
+        ):
+            with self.subTest(output=output):
+                facts = compatibility.parse_wine_version(output)
+                self.assertEqual(str(facts.version), number)
+                self.assertEqual(facts.channel, channel)
+                self.assertEqual(facts.flavor, flavor)
+
+        for output in ("wine-11.20 (Proton)", "wine-11.20 (vendor)", "wine-11.20-1",
+                       "wine-11.20\nextra", "wine-11.20 (stable)", "wine-11.0-rc1 (stable)"):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                compatibility.parse_wine_version(output)
+
+        for version, channel in (("11.0.2", "stable"), ("wine-11.20", "devel"),
+                                 ("11.01", "devel"), ("11.0-rc2", "rc")):
+            self.assertEqual(wine.get_devel_or_stable(version), channel)
+
+    def test_legacy_policy_reasons_and_product_nine_minimum_are_preserved(self):
+        for facts, reason in (
+            (wine.WineRelease(7, 0, "stable"), "Wine 7 requires staging"),
+            (wine.WineRelease(8, 0, "staging"), "Wine 8.0 will not work"),
+            (wine.WineRelease(8, 15, "devel"), "Wine 8 requires staging or devel 8.16 or later"),
+            (wine.WineRelease(9, 0, "stable"), "Wine 9 requires devel or staging"),
+            (wine.WineRelease(25, 0, "vendor"), "Unrecognized Wine branch: vendor"),
+        ):
+            with self.subTest(facts=facts):
+                self.assertEqual(wine.check_wine_rules(facts, None, "9"), (False, reason))
+
+        self.assertTrue(wine.check_wine_rules(wine.WineRelease(7, 0, "staging"), None, "9")[0])
+        allowed, reason = wine.check_wine_rules(wine.WineRelease(11, 20, "devel"), None, "10")
+        self.assertTrue(allowed)
+        self.assertIn("not native-validated", reason)
+        with self.assertRaises(maintenance.MaintenanceError):
+            wine.check_wine_rules(wine.WineRelease(11, 20, "devel"), "bad target", "10")
+
+    def test_recommended_comparison_preserves_patch_and_rc_order(self):
+        for installed, recommended, status in (
+            ("wine-11.0.2", "11.0.1", 2),
+            ("wine-11.0.2", "11.0.2", 1),
+            ("wine-11.0-rc2", "11.0", 0),
+            ("wine-11.0-rc2", "11.0-rc1", 2),
+        ):
+            app = SimpleNamespace(conf=SimpleNamespace(
+                wine_binary="/fixture/wine", wine_appimage_recommended_version=recommended,
+            ))
+            with (
+                self.subTest(installed=installed, recommended=recommended),
+                patch.object(runtime, "executable", return_value="/fixture/wine"),
+                patch.object(wine, "get_wine_release", return_value=(
+                    compatibility.parse_wine_version(installed), "yes",
+                )),
+            ):
+                self.assertEqual(utils.compare_recommended_appimage_version(app)[0], status)
+
+    def test_failed_bounded_probe_is_not_an_identified_version(self):
+        with (
+            patch.object(runtime, "executable", return_value="/fixture/wine"),
+            patch.object(processes, "capture", side_effect=processes.CaptureError("output limit")) as capture,
+        ):
+            result, reason = wine.get_wine_release("/fixture/wine")
+        self.assertIsNone(result)
+        self.assertIn("output limit", reason)
+        self.assertEqual(capture.call_args.kwargs["limit"], 16384)
+        self.assertEqual(capture.call_args.kwargs["timeout"], 15)

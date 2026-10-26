@@ -10,21 +10,111 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, maintenance, main, network, system, utils, wine
+from ou_dedetai import constants, maintenance, main, network, releases, system, utils, wine
 from ou_dedetai.config import Config, EphemeralConfiguration
 
 
+class TestDistributionDiscovery(unittest.TestCase):
+    def test_cold_file_discovery_never_uses_command_fallbacks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "os-release"
+            legacy = root / "fixture-release"
+            legacy.write_text("")
+            for identity, version in (("ubuntu", "24.04"), ("fedora", "43"),
+                                      ("arch", ""), ("steamos", "3.7")):
+                with self.subTest(identity=identity):
+                    release.write_text(f'ID={identity}\nVERSION_ID="{version}"\n')
+                    distribution = system.distro.LinuxDistribution(
+                        os_release_file=str(release), distro_release_file=str(legacy),
+                        include_lsb=system.DISTRIBUTION.include_lsb,
+                        include_uname=system.DISTRIBUTION.include_uname,
+                        include_oslevel=system.DISTRIBUTION.include_oslevel,
+                    )
+                    with (patch.object(system, "DISTRIBUTION", distribution),
+                          patch("subprocess.check_output", side_effect=AssertionError("implicit discovery child"))):
+                        self.assertEqual(system.get_os(), (identity, version))
+                        self.assertEqual(distribution.major_version(), version.split(".")[0])
+
+
 class TestPackageAdapters(unittest.TestCase):
-    def manager(self, family, os_name="fixture"):
+    def manager(self, family, os_name="fixture", major_version="42"):
         def lookup(name):
             return f"/usr/bin/{name}" if name == family else None
 
         with (
             patch.object(system.shutil, "which", side_effect=lookup),
-            patch.object(system.distro, "id", return_value=os_name),
-            patch.object(system.distro, "major_version", return_value="42"),
+            patch.object(system.DISTRIBUTION, "id", return_value=os_name),
+            patch.object(system.DISTRIBUTION, "major_version", return_value=major_version),
         ):
             return system.get_package_manager()
+
+    def test_apt_appimage_prerequisite_preserves_fuse2_abi_across_t64_rename(self):
+        cases = (
+            ("ubuntu", "22", "libfuse2"),
+            ("ubuntu", "24", "libfuse2t64"),
+            ("ubuntu", "26", "libfuse2t64"),
+            ("debian", "12", "libfuse2"),
+            ("debian", "13", "libfuse2t64"),
+            ("debian", "9", "libfuse2"),
+            ("linuxmint", "21", "libfuse2"),
+            ("linuxmint", "22", "libfuse2t64"),
+            ("elementary", "7", "libfuse2"),
+            ("elementary", "8", "libfuse2t64"),
+            ("elementary", "10", "libfuse2t64"),
+            ("ubuntu", "", "libfuse2"),
+            ("fixture", "26", "libfuse2"),
+        )
+        for os_name, major_version, expected in cases:
+            with self.subTest(os_name=os_name, major_version=major_version):
+                packages = self.manager("apt", os_name, major_version).packages.split()
+                self.assertEqual([name for name in packages if name.startswith("libfuse")], [expected])
+                self.assertIn("p7zip-full", packages)
+                self.assertIn("winbind", packages)
+
+    def test_ubuntu_prerequisite_failures_propagate_without_success_status(self):
+        manager = self.manager("apt", "ubuntu", "26")
+        app = SimpleNamespace(
+            conf=SimpleNamespace(skip_install_system_dependencies=False),
+            approve=Mock(return_value=True), status=Mock(), superuser_command="sudo",
+        )
+        installed = "\n".join(f"ii  {name} 1 amd64" for name in manager.packages.split()
+                              if name != "libfuse2t64")
+        installed += "\nii  libfuse3-4 3.18 amd64\n"
+        query = subprocess.CompletedProcess(manager.query, 0, installed)
+        failure = subprocess.CalledProcessError(100, ["apt", "install"])
+        for outcome in (None, subprocess.CompletedProcess([], 100), failure):
+            with (
+                self.subTest(outcome=outcome),
+                patch.object(system, "get_package_manager", return_value=manager),
+                patch.object(system, "get_os", return_value=("ubuntu", "26.04")),
+                patch.object(system.DISTRIBUTION, "id", return_value="ubuntu"),
+                patch.object(system, "run_command", side_effect=[query, query, outcome]) as run,
+                self.assertRaises(maintenance.MaintenanceError),
+            ):
+                system.install_dependencies(app)
+            self.assertEqual(run.call_args.args[0], ["sudo", "apt", "install", "-y", "libfuse2t64"])
+            self.assertEqual(run.call_count, 3)
+            self.assertNotIn(unittest.mock.call("All dependencies are met.", 100), app.status.call_args_list)
+
+    def test_ubuntu_prerequisite_query_failure_stops_before_approval(self):
+        manager = self.manager("apt", "ubuntu", "26")
+        app = SimpleNamespace(
+            conf=SimpleNamespace(skip_install_system_dependencies=False),
+            approve=Mock(), status=Mock(),
+        )
+        failure = subprocess.CalledProcessError(2, manager.query)
+        for outcome in (None, subprocess.CompletedProcess([], 2), failure):
+            with (
+                self.subTest(outcome=outcome),
+                patch.object(system, "get_package_manager", return_value=manager),
+                patch.object(system, "run_command", side_effect=[outcome]) as run,
+                self.assertRaises(maintenance.MaintenanceError),
+            ):
+                system.install_dependencies(app)
+            run.assert_called_once_with(manager.query)
+            app.approve.assert_not_called()
+            app.status.assert_not_called()
 
     def test_family_queries_match_names_in_both_modes(self):
         outputs = {
@@ -55,7 +145,7 @@ class TestPackageAdapters(unittest.TestCase):
             with (
                 self.subTest(result=result),
                 patch.object(system, "get_package_manager", return_value=manager),
-                patch.object(system.distro, "id", return_value="arch"),
+                patch.object(system.DISTRIBUTION, "id", return_value="arch"),
                 patch.object(system.shutil, "which", return_value="/fixture/AppImageLauncher"),
                 patch.object(system, "run_command", side_effect=[owner, result]) as run,
                 self.assertRaises(maintenance.MaintenanceError) as caught,
@@ -73,7 +163,7 @@ class TestPackageAdapters(unittest.TestCase):
         )
         with (
             patch.object(system, "get_package_manager", return_value=manager),
-            patch.object(system.distro, "id", return_value="steamos"),
+            patch.object(system.DISTRIBUTION, "id", return_value="steamos"),
             patch.object(system, "query_packages", side_effect=[["fuse2"], [], [], []]),
             patch.object(system, "run_command") as run,
         ):
@@ -85,7 +175,7 @@ class TestPackageAdapters(unittest.TestCase):
             run.assert_not_called()
         with (
             patch.object(system, "get_package_manager", return_value=manager),
-            patch.object(system.distro, "id", return_value="steamos"),
+            patch.object(system.DISTRIBUTION, "id", return_value="steamos"),
             patch.object(system.shutil, "which", return_value="/fixture/AppImageLauncher"),
             patch.object(system, "run_command") as run,
             self.assertRaisesRegex(maintenance.MaintenanceError, "SteamOS-supported"),
@@ -99,6 +189,73 @@ class TestWineDiscovery(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         path.chmod(0o700)
+
+    def test_current_native_recommendation_requires_exact_pair_and_stable_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old, current = root / "old/wine", root / "current/wine"
+            for path in (old, current, current.parent / "wineserver", old.parent / "wineserver"):
+                self.executable(path, "fixture bytes, not executed")
+            app = SimpleNamespace(checkpoint=Mock(), conf=SimpleNamespace(
+                wine_binary_files=[str(old), str(current)], _overrides=SimpleNamespace(),
+                faithlife_product_release="40.0.0.0", faithlife_product_version="10",
+            ))
+            target = releases.WineTarget("11.20", "devel", "a" * 40)
+
+            def version(path):
+                return (wine.WineRelease(11, 19 if path == str(old) else 20, "devel"), "yes")
+
+            with (patch.object(wine, "get_wine_release", side_effect=version),
+                  patch.object(wine, "check_wine_version_and_branch", return_value=(True, "")) as pair):
+                self.assertEqual(utils.current_native_wine(app, target), str(current))
+                pair.assert_called_once_with("40.0.0.0", str(current), "10",
+                                             server=str(current.parent / "wineserver"))
+            with (patch.object(wine, "get_wine_release", side_effect=version),
+                  patch.object(wine, "check_wine_version_and_branch", return_value=(False, "mismatch"))):
+                self.assertIsNone(utils.current_native_wine(app, target))
+
+            def mutate(*args, **kwargs):
+                (current.parent / "wineserver").write_text("changed while probing")
+                return True, ""
+
+            with (patch.object(wine, "get_wine_release", side_effect=version),
+                  patch.object(wine, "check_wine_version_and_branch", side_effect=mutate)):
+                self.assertIsNone(utils.current_native_wine(app, target))
+
+    def test_discovery_pairs_full_patch_and_rc_identity_without_requiring_staging_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher, server = root / "wine", root / "wineserver"
+            app = SimpleNamespace(conf=SimpleNamespace(
+                _overrides=SimpleNamespace(custom_binary_path=str(root)), faithlife_product_version="10",
+            ))
+            for wine_output, server_output, allowed in (
+                ("wine-11.20", "Wine 11.20", True),
+                ("wine-10.8 (Staging)", "Wine 10.8", True),
+                ("wine-11.0.2", "Wine 11.0.2", True),
+                ("wine-11.0.2", "Wine 11.0.1", False),
+                ("wine-11.0-rc2", "Wine 11.0-rc2", True),
+                ("wine-11.0-rc2 (Staging)", "Wine 11.0-rc2", True),
+                ("wine-11.0-rc2", "Wine 11.0-rc1", False),
+                ("wine-11.0-rc2", "Wine 11.0", False),
+                ("wine-11.20", "Wine 11.20 (Proton)", False),
+                ("wine-11.20 (vendor)", "Wine 11.20", False),
+            ):
+                self.executable(launcher, f"#!/bin/sh\nprintf '{wine_output}\\n'\n")
+                self.executable(server, f"#!/bin/sh\nprintf '{server_output}\\n'\n")
+                with (
+                    self.subTest(wine=wine_output, server=server_output),
+                    patch.dict(os.environ, HOME=str(root), PATH=str(root / "absent")),
+                ):
+                    self.assertEqual(utils.find_wine_binary_files(app, "40.0.0.0"),
+                                     [str(launcher)] if allowed else [])
+
+            self.executable(server, "#!/bin/sh\nprintf 'Wine 11.20\\n'\nexit 2\n")
+            self.executable(launcher, "#!/bin/sh\nprintf 'wine-11.20\\n'\n")
+            allowed, reason = wine.check_wine_version_and_branch("40.0.0.0", str(launcher), "10",
+                                                                server=str(server))
+            self.assertFalse(allowed)
+            self.assertIn("matching wineserver", reason)
 
     def test_real_local_probes_expand_globs_and_leave_environment_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:

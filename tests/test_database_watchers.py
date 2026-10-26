@@ -169,3 +169,56 @@ class TestDatabaseWatchers(unittest.TestCase):
             finally:
                 stop.set()
                 worker.join(2)
+
+    def test_missing_schema_can_arrive_after_startup_deadline_without_fake_rows(self):
+        self.path.unlink()
+        sqlite3.connect(self.path).close()
+        stop, health = threading.Event(), database.WatcherHealth()
+        worker = threading.Thread(target=database.watch_db, args=(
+            str(self.path), ["UPDATE policy SET value=0 WHERE value != 0"], stop, health,
+        ))
+        worker.start()
+        try:
+            time.sleep(3.2)
+            self.assertTrue(worker.is_alive())
+            self.assertFalse(health.ready.is_set())
+            self.assertTrue(health.error)
+            with self.connect(self.path) as connection:
+                tables = connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()
+                self.assertEqual(tables, (0,))
+                connection.execute("CREATE TABLE policy (value INTEGER)")
+            self.assertTrue(health.ready.wait(3))
+            self.assertFalse(health.error)
+            with self.connect(self.path) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM policy").fetchone(), (0,))
+                connection.execute("INSERT INTO policy VALUES (5)")
+            with self.connect(self.path) as connection:
+                self.corrected(connection)
+        finally:
+            stop.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+
+    def test_ready_is_revoked_on_failed_reconciliation_then_restored(self):
+        stop, health = threading.Event(), database.WatcherHealth()
+        worker = threading.Thread(target=database.watch_db, args=(
+            str(self.path), ["UPDATE policy SET value=0 WHERE value != 0"], stop, health,
+        ))
+        worker.start()
+        try:
+            self.assertTrue(health.ready.wait(3))
+            with self.connect(self.path) as connection:
+                connection.execute("ALTER TABLE policy RENAME TO unavailable")
+            deadline = time.monotonic() + 3
+            while health.ready.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(health.ready.is_set())
+            self.assertTrue(health.error)
+            with self.connect(self.path) as connection:
+                connection.execute("ALTER TABLE unavailable RENAME TO policy")
+            self.assertTrue(health.ready.wait(3))
+            self.assertFalse(health.error)
+        finally:
+            stop.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())

@@ -26,6 +26,8 @@ frontend and shared-service boundaries.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for source setup and focused checks.
 See [CONFIGURATION.md](CONFIGURATION.md) for profile selection, setting precedence,
 legacy files, atomic saves and explicit recovery commands.
+See [COMPATIBILITY.md](COMPATIBILITY.md) for the current Wine policy, tested runtime
+versions and known graphics, scrolling and feature limitations.
 
 ## Support
 

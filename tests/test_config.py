@@ -365,6 +365,163 @@ with patch.object(config_store.Target,'publish',pause):
         first.reload()
         self.assertEqual(first.backup_dir, self.root / "second/backups")
 
+    def test_installed_version_cache_tracks_system_metadata_without_changing_target(self):
+        product = Path(self.document["WINEPREFIX"]) / "drive_c/users/fixture/AppData/Local/Logos"
+        system = product / "System"
+        system.mkdir(parents=True)
+        metadata = system / "Logos.deps.json"
+
+        def version_file(path, version):
+            path.write_text(json.dumps({"libraries": {f"Logos/{version}": {}}}))
+
+        version_file(metadata, "46.2.0.5")
+        self.path.write_text(json.dumps(dict(self.document, faithlife_product_release="46.2.0.0005")))
+        before = self.path.read_bytes()
+        conf = configuration(self.path)
+        with patch.object(utils, "get_current_logos_version", wraps=utils.get_current_logos_version) as read:
+            for _ in range(10):
+                self.assertEqual(conf.installed_faithlife_product_release, "46.2.0.5")
+            self.assertEqual(read.call_count, 1)
+
+            pending = product / "Pending"
+            pending.mkdir()
+            version_file(pending / metadata.name, "54.3.0.5")
+            self.assertEqual(conf.installed_faithlife_product_release, "46.2.0.5")
+            self.assertEqual(read.call_count, 1)
+
+            old_stat = metadata.stat()
+            os.utime(pending / metadata.name, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+            (pending / metadata.name).replace(metadata)
+            for _ in range(10):
+                self.assertEqual(conf.installed_faithlife_product_release, "54.3.0.5")
+            self.assertEqual(read.call_count, 2)
+
+            version_file(metadata, "46.2.0.5")
+            self.assertEqual(conf.installed_faithlife_product_release, "46.2.0.5")
+            self.assertEqual(read.call_count, 3)
+            self.assertEqual(conf.refresh_installed_faithlife_product_release(), "46.2.0.5")
+            self.assertEqual(read.call_count, 4)
+
+            metadata.unlink()
+            self.assertIsNone(conf.installed_faithlife_product_release)
+            version_file(metadata, "54.3.0.5")
+            self.assertEqual(conf.installed_faithlife_product_release, "54.3.0.5")
+        self.assertEqual(conf.faithlife_product_release, "46.2.0.0005")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_conditional_restore_preserves_stored_presence_and_alias_edits(self):
+        names = ("faithlife_product_release", "TARGET_RELEASE_VERSION")
+        for original in ({}, {names[0]: None}, {names[1]: "46.2.0.0005"}):
+            for edit in (None, "legacy", "removed_alias"):
+                with self.subTest(original=original, edit=edit):
+                    document = dict(self.document, **original)
+                    self.path.write_text(json.dumps(document))
+                    conf = configuration(self.path)
+                    receipt = conf._change(faithlife_product_release="54.3.0.0005")
+                    previous = {name: receipt.previous[name] for name in names if name in receipt.previous}
+                    published = {name: receipt.document[name] for name in names if name in receipt.document}
+                    current = json.loads(self.path.read_text())
+                    current["external_sentinel"] = {"preserved": True}
+                    if edit == "legacy":
+                        current[names[1]] = "50.0.0.0"
+                    elif edit == "removed_alias":
+                        current.pop(names[1])
+                    self.path.write_text(json.dumps(current))
+
+                    conflicts = conf.restore_changes(previous, published)
+                    saved = json.loads(self.path.read_text())
+                    expected = current if edit else dict(current, **original)
+                    if edit is None:
+                        for name in names:
+                            if name not in original:
+                                expected.pop(name, None)
+                    self.assertEqual(saved, expected)
+                    self.assertEqual(conflicts, (names[0],) if edit else ())
+                    self.assertEqual(conf._raw._saved, config_store.canonical(saved, self.path))
+                    self.assertEqual(conf._raw.faithlife_product_release,
+                                     config_store.canonical(saved, self.path).get(names[0]))
+
+    def test_conditional_restore_rejects_edit_after_target_snapshot(self):
+        conf = configuration(self.path)
+        names = ("faithlife_product_release", "TARGET_RELEASE_VERSION")
+        receipt = conf._change(faithlife_product_release="54.3.0.0005")
+        previous = {name: receipt.previous[name] for name in names if name in receipt.previous}
+        published = {name: receipt.document[name] for name in names if name in receipt.document}
+        stage = config_store.Target.stage
+        edited = []
+
+        def edit_after_snapshot(target, content):
+            stage(target, content)
+            if target.path == self.path:
+                document = json.loads(self.path.read_text())
+                document["faithlife_product_release"] = "50.0.0.0"
+                document["external_sentinel"] = "later edit"
+                edited.append(document)
+                self.path.write_text(json.dumps(document))
+
+        with patch.object(config_store.Target, "stage", edit_after_snapshot):
+            with self.assertRaisesRegex(config_store.ConfigurationError, "changed before publication"):
+                conf.restore_changes(previous, published)
+        self.assertEqual(json.loads(self.path.read_text()), edited[0])
+        self.assertEqual(list(self.root.glob(".config-*")), [])
+
+    def test_conditional_restore_resolves_later_relative_and_legacy_install_paths(self):
+        names = ("faithlife_product_release", "TARGET_RELEASE_VERSION")
+        for legacy_only in (False, True):
+            with self.subTest(legacy_only=legacy_only):
+                self.path.write_text(json.dumps(self.document))
+                conf = configuration(self.path)
+                receipt = conf._change(faithlife_product_release="54.3.0.0005")
+                previous = {name: receipt.previous[name] for name in names if name in receipt.previous}
+                published = {name: receipt.document[name] for name in names if name in receipt.document}
+                current = json.loads(self.path.read_text())
+                if legacy_only:
+                    current.pop("install_dir")
+                    current["INSTALLDIR"] = "installation"
+                else:
+                    current["install_dir"] = "installation"
+                self.path.write_text(json.dumps(current))
+                target_class = config_store.Target
+
+                def owned_target(path):
+                    self.assertTrue(Path(path).is_relative_to(self.root))
+                    return target_class(path)
+
+                with patch.object(config_store, "Target", side_effect=owned_target):
+                    self.assertEqual(conf.restore_changes(previous, published), ())
+                saved = json.loads(self.path.read_text())
+                self.assertEqual((saved.get("install_dir"), saved.get("INSTALLDIR")),
+                                 (current.get("install_dir"), current.get("INSTALLDIR")))
+                self.assertEqual(conf.install_dir, str(self.install))
+                self.assertEqual(conf._raw.install_dir, str(self.install))
+                self.assertEqual(configuration(self.path).install_dir, str(self.install))
+                portable = self.install / constants.PORTABLE_CONFIG_NAME
+                portable_conf = configuration(portable)
+                self.assertEqual(portable_conf.install_dir, conf.install_dir)
+                self.assertEqual(portable_conf.wine_prefix, conf.wine_prefix)
+                self.assertEqual(config_store.selection_identity(portable_conf._raw._saved),
+                                 config_store.selection_identity(conf._raw._saved))
+                portable_document = json.loads(portable.read_text())
+                self.assertEqual("install_dir" in portable_document, "install_dir" in current)
+                self.assertEqual(portable_document["INSTALLDIR"], str(self.install))
+
+    def test_migration_resolves_relative_installation_against_source_directory(self):
+        source = self.root / "legacy/old.conf"
+        source.parent.mkdir()
+        install = source.parent / "relative-install"
+        install.mkdir()
+        source.write_text("FLPRODUCT=Logos\nINSTALLDIR=relative-install\n")
+        original = source.read_bytes()
+        destination = self.root / "destination/new.json"
+        destination.parent.mkdir()
+        conf = configuration(source)
+        conf._overrides.config_destination = str(destination)
+        conf._change(curses_color_scheme="Dark")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(conf.install_dir, str(install))
+        self.assertEqual(json.loads(destination.read_text())["install_dir"], str(install))
+        self.assertEqual((install / constants.PORTABLE_CONFIG_NAME).read_bytes(), destination.read_bytes())
+
     def test_empty_explicit_path_and_symlink_target_fail_without_touching_other_profile(self):
         with self.assertRaises(config_store.ConfigurationError):
             EphemeralConfiguration.load_from_path("")

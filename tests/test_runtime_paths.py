@@ -9,9 +9,9 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import artifacts, constants, control, installer, network, paths, utils, wine
+from ou_dedetai import artifacts, constants, control, installer, maintenance, network, paths, releases, utils, wine
 from ou_dedetai.config import Config, PersistentConfiguration
-from tests.artifact_fixtures import appimage
+from tests.artifact_fixtures import appimage, msi
 
 
 def fixture_config(install):
@@ -23,7 +23,7 @@ def fixture_config(install):
     )
     config._overrides = SimpleNamespace(
         install_dir=None, installer_binary_dir=None, wine_appimage_path=None, faithlife_product_version=None,
-        config_path=str(install.parent / "selected.json"), wine_appimage_link_file_name=None,
+        config_path=str(install.parent / "selected.json"), wine_appimage_link_file_name=None, wine_prefix=None,
     )
     config._write = Mock()
     config.app = SimpleNamespace(conf=config, ask=Mock())
@@ -32,6 +32,167 @@ def fixture_config(install):
 
 
 class TestRuntimePaths(unittest.TestCase):
+    def test_helper_decodes_streams_separately_without_hiding_bad_stdout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = fixture_config(Path(directory) / "install")
+            binary = Path(directory) / "runtime"
+            binary.write_text(
+                f"#!{sys.executable}\nimport os,sys\n"
+                "os.write(1, b'bad\\xff' if sys.argv[1] == 'bad' else 'path 文\\r\\n'.encode())\n"
+                "os.write(2, b'clean diagnostic' if sys.argv[1] == 'bad' else b'diagnostic\\xff\\r\\n')\n"
+                "raise SystemExit(23 if sys.argv[1] == 'failure' else 0)\n"
+            )
+            binary.chmod(0o700)
+            with patch.object(wine, "get_wine_env", return_value=dict(os.environ)):
+                for argument, code in (("good", 0), ("failure", 23)):
+                    result = wine.run_wine_completed_process(config.app, str(binary), exe_args=[argument])
+                    self.assertIsInstance(result, subprocess.CompletedProcess)
+                    self.assertEqual(result.returncode, code)
+                    self.assertEqual(result.stdout, "path 文\n")
+                    self.assertEqual(result.stderr, "diagnostic\\xff\n")
+                    self.assertEqual(result.args, [str(binary), argument])
+                with self.assertRaises(maintenance.MaintenanceError) as raised:
+                    wine.run_wine_completed_process(config.app, str(binary), exe_args=["bad"])
+                self.assertIsInstance(raised.exception.__cause__, UnicodeDecodeError)
+
+    def test_helper_timeout_and_spawn_failure_stay_domain_failures(self):
+        for error in (subprocess.TimeoutExpired(["/fixture/wine"], 60), OSError("spawn refused")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(wine, "_wine_invocation", return_value=(["/fixture/wine"], {})),
+                patch.object(wine.subprocess, "run", side_effect=error) as run,
+            ):
+                with self.assertRaises(maintenance.MaintenanceError) as raised:
+                    wine.run_wine_completed_process.__wrapped__(None, "/fixture/wine")
+                self.assertIs(raised.exception.__cause__, error)
+                self.assertEqual(run.call_args.kwargs["timeout"], 60)
+                self.assertTrue(run.call_args.kwargs["capture_output"])
+
+    def test_long_paths_use_current_verified_drive_and_preserve_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = fixture_config(root / "install")
+            mapped = root / "mapped"
+            source = mapped / ("a" * 90) / ("b" * 90) / ("c" * 90) / "file 文 space.msi"
+            source.parent.mkdir(parents=True)
+            source.touch()
+            alias = root / "alias"
+            alias.symlink_to(mapped, target_is_directory=True)
+            drives = Path(config.wine_prefix) / "dosdevices"
+            drives.mkdir(parents=True)
+            drive = drives / "z:"
+            drive.symlink_to(mapped, target_is_directory=True)
+            with patch.object(wine, "run_wine_completed_process") as helper:
+                converted = wine.windows_path(config.app, "/fixture/wine", alias / source.relative_to(mapped))
+                self.assertEqual(converted, "\\\\?\\Z:\\" + "\\".join(source.relative_to(mapped).parts))
+                drive.unlink()
+                drive.symlink_to(root, target_is_directory=True)
+                self.assertEqual(
+                    wine.windows_path(config.app, "/fixture/wine", source),
+                    "\\\\?\\Z:\\" + "\\".join(source.relative_to(root).parts),
+                )
+                helper.assert_not_called()
+
+    def test_long_paths_refuse_missing_wrong_and_reused_drive_maps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = fixture_config(root / "install")
+            source = root / ("a" * 90) / ("b" * 90) / ("c" * 90) / "input.msi"
+            source.parent.mkdir(parents=True)
+            source.touch()
+            drives = Path(config.wine_prefix) / "dosdevices"
+            drives.mkdir(parents=True)
+            wrong = root / "wrong"
+            wrong.mkdir()
+            with patch.object(wine, "run_wine_completed_process") as helper:
+                for target in (None, wrong, root, wrong):
+                    drive = drives / "z:"
+                    if drive.is_symlink():
+                        drive.unlink()
+                    if target is not None:
+                        drive.symlink_to(target, target_is_directory=True)
+                    if target == root:
+                        self.assertTrue(wine.windows_path(config.app, "/fixture/wine", source).startswith("\\\\?\\Z:"))
+                    else:
+                        with self.assertRaises(maintenance.MaintenanceError):
+                            wine.windows_path(config.app, "/fixture/wine", source)
+                other = fixture_config(root / "other-install")
+                with self.assertRaises(maintenance.MaintenanceError):
+                    wine.windows_path(other.app, "/fixture/wine", source)
+                helper.assert_not_called()
+
+    def test_long_paths_select_mapped_ancestor_without_assuming_z(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = fixture_config(root / "install")
+            source = root / ("a" * 90) / ("b" * 90) / ("c" * 90) / "input 文.msi"
+            source.parent.mkdir(parents=True)
+            source.touch()
+            drives = Path(config.wine_prefix) / "dosdevices"
+            drives.mkdir(parents=True)
+            (drives / "d:").symlink_to(root)
+            (drives / "e:").symlink_to(source.parent)
+            with patch.object(wine, "run_wine_completed_process") as helper:
+                self.assertEqual(wine.windows_path(config.app, "/fixture/wine", source), "\\\\?\\E:\\input 文.msi")
+                helper.assert_not_called()
+
+    def test_installer_paths_reject_unrepresentable_components_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = fixture_config(root / "install")
+            parent = root / ("a" * 90) / ("b" * 90) / ("c" * 90)
+            parent.mkdir(parents=True)
+            drives = Path(config.wine_prefix) / "dosdevices"
+            drives.mkdir(parents=True)
+            (drives / "z:").symlink_to(root)
+            for name in ("line\nbreak.msi", "stream:input.msi", "back\\slash", 'quote".msi',
+                         "wild*.msi", "trailing.", "trailing ", "CON.msi", "LPT1", "文" * 128):
+                with self.subTest(name=name), patch.object(wine, "run_wine_completed_process") as helper:
+                    source = parent / name
+                    if len(os.fsencode(name)) <= 255:
+                        source.touch()
+                    with self.assertRaises(maintenance.MaintenanceError):
+                        wine.windows_path(config.app, "/fixture/wine", source)
+                    helper.assert_not_called()
+
+    def test_long_accepted_msi_reaches_installer_as_one_exact_text_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = fixture_config(root / "install")
+            config._overrides.agreed_to_faithlife_terms = False
+            config.app.status = Mock()
+            config.app.approve_or_exit = Mock(return_value=True)
+            source = root / "input.msi"
+            source.write_bytes(msi())
+            store = root / ("a" * 90) / ("b" * 90) / "store 文 space"
+            accepted = artifacts.import_local(source, store, artifacts.ArtifactSpec("local:input", "input.msi", "msi"))
+            self.assertGreater(len(str(accepted.path)), 260)
+            drives = Path(config.wine_prefix) / "dosdevices"
+            drives.mkdir(parents=True)
+            (drives / "z:").symlink_to(root)
+            drive_c = Path(config.wine_prefix) / "drive_c"
+            drive_c.mkdir()
+            (drives / "c:").symlink_to(drive_c)
+            config.app.checkpoint = Mock()
+            with (
+                patch.object(wine, "run_wine_completed_process") as helper,
+                patch.object(wine, "run_wine_during_install", return_value=Mock(returncode=0)) as install,
+            ):
+                wine.install_msi(config.app, accepted, target_release="39.0.0.0")
+                arguments = install.call_args.kwargs["exe_args"]
+                self.assertEqual(arguments[0], "/i")
+                self.assertRegex(arguments[1], r"^\\\\\?\\C:\\LogosDesktopInstall-[0-9a-f]{12}\\installer\.msi$")
+                self.assertEqual(arguments[2:], ["/passive"])
+                self.assertTrue(all(isinstance(argument, str) for argument in arguments))
+                self.assertEqual(list(drive_c.iterdir()), [])
+                helper.assert_not_called()
+                install.reset_mock()
+                accepted.path.chmod(0o600)
+                accepted.path.write_bytes(b"changed")
+                with self.assertRaises(artifacts.ArtifactError):
+                    wine.install_msi(config.app, accepted, target_release="39.0.0.0")
+                install.assert_not_called()
+
     def test_component_rules_and_serialization_preserve_external_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             install = Path(directory) / "Logos 文"
@@ -118,12 +279,8 @@ class TestRuntimePaths(unittest.TestCase):
             self.assertEqual(config.wine64_binary, str(root / "second/data/bin/missing"))
 
     def test_recommended_and_experimental_reach_installer_consumer(self):
-        for choice, prerelease, filename in (
-            (constants.WINE_RECOMMENDED_SIGIL, True, "stable.AppImage"),
-            (constants.WINE_BETA_SIGIL, True, "beta.AppImage"),
-            (constants.WINE_BETA_SIGIL, False, "stable.AppImage"),
-        ):
-            with self.subTest(choice=choice, prerelease=prerelease), tempfile.TemporaryDirectory() as directory:
+        for choice in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
+            with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config = fixture_config(root / "install")
                 cache_base = root / "cache"
@@ -131,22 +288,20 @@ class TestRuntimePaths(unittest.TestCase):
                 config._download_dir = None
                 config._raw.faithlife_product_version = "10"
                 config._network = Mock()
-                beta = network.SoftwareReleaseInfo("2", "https://example.invalid/beta.AppImage", name="beta.AppImage")
-                config._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
-                    latest=network.SoftwareReleaseInfo(
-                        "1", "https://example.invalid/stable.AppImage", name="stable.AppImage",
-                    ),
-                    pre_release=beta if prerelease else None,
+                filename = "wine-devel_11.20-x86_64.AppImage"
+                selected = network.SoftwareReleaseInfo("11.20", f"https://example.invalid/{filename}", name=filename)
+                config._network.wine_release_target.return_value = releases.WineTargetLookup(
+                    releases.WineTarget("11.20", "devel", "a" * 40), "ok",
                 )
+                config._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
                 config._raw.wine_binary = choice
-                self.assertEqual(config.wine_binary, str(root / "install/data/bin" / filename))
-                config.app.ask.assert_not_called()
                 app = SimpleNamespace(
                     checkpoint=Mock(),
                     conf=config, installer_step=0, installer_step_count=0, status=Mock(), _config_updated_event=Mock(),
                 )
+                config.app = app
 
-                def transfer(url, name, directory, **kwargs):
+                def transfer(url, name, directory, app, **kwargs):
                     source = root / "selected.AppImage"
                     source.write_bytes(appimage())
                     return artifacts.import_local(
@@ -157,14 +312,18 @@ class TestRuntimePaths(unittest.TestCase):
                     patch.object(installer, "ensure_sys_deps"),
                     patch.object(installer, "check_system_compatibility"),
                     patch.object(wine, "require_compatible"),
+                    patch.object(utils, "current_native_wine", return_value=None),
                     patch.object(installer.network, "logos_reuse_download", side_effect=transfer) as download,
                     patch.multiple(constants, CACHE_BASE=cache_base, CACHE_DIR=str(cache)),
                 ):
+                    selected_path = config.wine_binary
                     installer.ensure_appimage_download(app)
                 download.assert_called_once_with(
                     f"https://example.invalid/{filename}", filename, config.installer_binary_dir,
-                    app=app, kind="appimage", digest=None, size=None,
+                    app, kind="appimage", digest=None, size=None,
                 )
+                self.assertEqual(config.wine_binary, selected_path)
+                config._network.wine_appimage_versions.assert_not_called()
                 self.assertEqual(Path(config.wine_binary).name, filename)
                 self.assertEqual(artifacts.installed(config.wine_binary, "appimage").path.read_bytes(), appimage())
 

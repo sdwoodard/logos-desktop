@@ -13,6 +13,20 @@ from unittest.mock import patch
 from ou_dedetai import adoption, config_store, constants, desktop
 
 
+class TestMimeEnvironment(unittest.TestCase):
+    def test_default_query_excludes_stale_token_and_preserves_other_environment(self):
+        environment = {"XDG_ACTIVATION_TOKEN": "synthetic-stale-token", "LANG": "C.UTF-8"}
+        result = subprocess.CompletedProcess([], 0, b"fixture.desktop\n")
+        with (patch.dict(os.environ, environment, clear=True),
+              patch.object(desktop.shutil, "which", return_value="/fixture/xdg-mime"),
+              patch.object(desktop.subprocess, "run", return_value=result) as run):
+            self.assertEqual(desktop._default("x-scheme-handler/synthetic"), "fixture.desktop")
+        run.assert_called_once_with(
+            ["/fixture/xdg-mime", "query", "default", "x-scheme-handler/synthetic"],
+            env={"LANG": "C.UTF-8"}, capture_output=True, timeout=5, check=True,
+        )
+
+
 class TestDesktopIntegration(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -51,7 +65,7 @@ class TestDesktopIntegration(unittest.TestCase):
                 text = item.after.decode()
                 self.assertIn('"-c"', text)
                 self.assertIn('selected Space 文%%u.json', text)
-                self.assertIn('"/usr/bin/env" "--"', text)
+                self.assertIn('Exec=/usr/bin/env "--"', text)
         mime = self.root / 'config/mimeapps.list'
         self.assertIn(handler, mime.read_text())
         edited = plan.files[0].path
@@ -232,9 +246,71 @@ entry.launch_uris(['logos4:fixture-only'],None)
                          ['literal%u', '-c', str(config), '--wine', r'C:\Logos Space\Logos.exe',
                           'logos4:fixture-only'])
 
-    def test_proven_legacy_handler_handoff_records_and_restores_prior_default(self):
-        from ou_dedetai.installer import desktop_exec
+    def assert_legacy_handoff(self, directory, command_template):
+        install = self.root / directory
+        config = self.root / 'selected.json'
+        config.write_text(json.dumps({'install_dir': str(install), 'faithlife_product': 'Logos'}))
+        original_config = config.read_bytes()
+        launcher = [str(install / constants.BINARY_NAME)]
+        entries = self.root / 'share/applications'
+        entries.mkdir(parents=True)
+        legacy = entries / 'Logos-url-handler.desktop'
+        command = command_template.format(root=self.root, binary=constants.BINARY_NAME)
+        legacy.write_bytes(('[Desktop Entry]\r\nType=Application\r\nName=Logos URL Handler\r\n'
+                            'Exec=' + command + '\r\n# Preserve original bytes\r\n').encode())
+        original = legacy.read_bytes()
+        mime = self.root / 'config/mimeapps.list'
+        mime.parent.mkdir()
+        prior_mime = ('# Original associations\r\n[Default Applications]\r\n'
+                      + ''.join(f'{scheme}={legacy.name};\r\n' for scheme in desktop.SCHEMES)
+                      + '[Added Associations]\r\ntext/plain=fixture-editor.desktop;\r\n').encode()
+        mime.write_bytes(prior_mime)
 
+        def query(scheme):
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(mime)
+            return parser.get('Default Applications', scheme, fallback='').rstrip(';')
+
+        with patch.object(desktop, '_default', side_effect=query):
+            plan = desktop.preview(config, launcher, windows_executable=r'C:\Logos.exe',
+                                   data_home=self.root / 'share', config_home=self.root / 'config')
+            self.assertEqual(len(plan.files), 4)
+            self.assertEqual(plan.issues, ())
+            self.assertEqual(dict(plan.checks), {config: original_config, legacy: original})
+            self.assertEqual(desktop.adopt(plan).state, 'committed')
+            handler = next(item.path.name for item in plan.files if item.path.name.endswith('-url.desktop'))
+            self.assertTrue(all(query(scheme) == handler for scheme in desktop.SCHEMES))
+            self.assertEqual(legacy.read_bytes(), original)
+            result = desktop.rollback(plan.journal)
+            self.assertTrue(all(query(scheme) == legacy.name for scheme in desktop.SCHEMES))
+        self.assertEqual(result.state, 'rolled-back')
+        self.assertEqual(result.conflicts, ())
+        self.assertEqual(mime.read_bytes(), prior_mime)
+        self.assertEqual(legacy.read_bytes(), original)
+        self.assertEqual(config.read_bytes(), original_config)
+
+    def test_proven_legacy_handler_handoff_records_and_restores_prior_default(self):
+        self.assert_legacy_handoff(
+            'installation', r'{root}/installation/{binary} "--wine" "C:\\\\Logos.exe" %u',
+        )
+
+    def test_historical_safe_launcher_handoff_restores_exact_bytes_and_defaults(self):
+        self.assert_legacy_handoff(
+            'installation', r'"{root}/installation/{binary}" "--wine" "C:\\\\Logos.exe" %u',
+        )
+
+    def test_historical_complex_launcher_handoff_restores_exact_bytes_and_defaults(self):
+        self.assert_legacy_handoff(
+            'Space 文 $`', r'"{root}/Space 文 \\$\\`/{binary}" "--wine" "C:\\\\Logos.exe" %u',
+        )
+
+    def test_historical_percent_env_handoff_restores_exact_bytes_and_defaults(self):
+        self.assert_legacy_handoff(
+            '100% launcher',
+            r'"/usr/bin/env" "--" "{root}/100%% launcher/{binary}" "--wine" "C:\\\\Logos.exe" %u',
+        )
+
+    def test_legacy_recognition_rejects_mismatched_profile_and_nonexact_entries(self):
         install = self.root / 'installation'
         config = self.root / 'selected.json'
         config.write_text(json.dumps({'install_dir': str(install), 'faithlife_product': 'Logos'}))
@@ -242,23 +318,33 @@ entry.launch_uris(['logos4:fixture-only'],None)
         entries = self.root / 'share/applications'
         entries.mkdir(parents=True)
         legacy = entries / 'Logos-url-handler.desktop'
-        command = desktop_exec([*launcher, '--wine', r'C:\Logos.exe'], accepts_url=True)
-        legacy.write_text('[Desktop Entry]\nType=Application\nName=Logos URL Handler\nExec=' + command + '\n')
-        original = legacy.read_bytes()
-        self.defaults.update(dict.fromkeys(desktop.SCHEMES, legacy.name))
-        plan = desktop.preview(config, launcher, windows_executable=r'C:\Logos.exe',
-                               data_home=self.root / 'share', config_home=self.root / 'config')
-        self.assertEqual(len(plan.files), 4)
-
-        def query(scheme):
-            parser = configparser.ConfigParser(interpolation=None)
-            parser.read(self.root / 'config/mimeapps.list')
-            return parser.get('Default Applications', scheme, fallback=legacy.name).rstrip(';')
-
-        with patch.object(desktop, '_default', side_effect=query):
-            desktop.adopt(plan)
-            self.assertEqual(legacy.read_bytes(), original)
-            result = desktop.rollback(plan.journal)
-        self.assertEqual(result.state, 'rolled-back')
-        self.assertFalse((self.root / 'config/mimeapps.list').exists())
-        self.assertEqual(legacy.read_bytes(), original)
+        # Both accepted representations are frozen templates, independent of the formatter.
+        commands = (
+            r'{root}/installation/{binary} "--wine" "C:\\\\Logos.exe" %u',
+            r'"{root}/installation/{binary}" "--wine" "C:\\\\Logos.exe" %u',
+        )
+        for template in commands:
+            command = template.format(root=self.root, binary=constants.BINARY_NAME)
+            for name, mutation, selected, entry_type, entry_name in (
+                ('other-profile', command, [str(self.root / 'other' / constants.BINARY_NAME)],
+                 'Application', 'Logos URL Handler'),
+                ('wrong-executable', command.replace('/installation/', '/other/'), launcher,
+                 'Application', 'Logos URL Handler'),
+                ('extra-argument', command + ' "--extra"', launcher, 'Application', 'Logos URL Handler'),
+                ('different-type', command, launcher, 'Link', 'Logos URL Handler'),
+                ('different-name', command, launcher, 'Application', 'Other URL Handler'),
+                ('different-filename', command, launcher, 'Application', 'Logos URL Handler'),
+            ):
+                with self.subTest(template=template, case=name):
+                    content = (f'[Desktop Entry]\nType={entry_type}\nName={entry_name}\n'
+                               f'Exec={mutation}\n').encode()
+                    legacy.write_bytes(content)
+                    previous = 'other.desktop' if name == 'different-filename' else legacy.name
+                    self.defaults.update(dict.fromkeys(desktop.SCHEMES, previous))
+                    plan = desktop.preview(config, selected, windows_executable=r'C:\Logos.exe',
+                                           data_home=self.root / 'share', config_home=self.root / 'config')
+                    self.assertEqual(len(plan.files), 3)
+                    self.assertEqual(len(plan.issues), 2)
+                    self.assertEqual(plan.checks, ())
+                    self.assertFalse((self.root / 'config').exists())
+                    self.assertEqual(legacy.read_bytes(), content)

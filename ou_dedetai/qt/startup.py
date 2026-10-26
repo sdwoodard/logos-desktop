@@ -6,6 +6,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from ou_dedetai import instance, processes, updates
+from .activation import activate_window, show_initial_window, take_startup_token
 from .services import Services
 from .theme import Theme
 from .window import MainWindow
@@ -29,6 +30,7 @@ def start(config, function=None, *, install_only=False):
 
 
 def _start(config, function=None, *, install_only=False):
+    startup_token = take_startup_token()
     processes.resume()
     application = QApplication.instance() or QApplication([sys.argv[0]])
     application.setApplicationName("LogosDesktop")
@@ -39,22 +41,13 @@ def _start(config, function=None, *, install_only=False):
     if install_only:
         window.navigation.setCurrentRow(4)
     window.closed.connect(application.quit)
-    window.show()
+    try:
+        show_initial_window(window, startup_token)
+    finally:
+        del startup_token
 
-    def activate(_token):
-        if window._closing or window.app.stop_requested.is_set():
-            return
-        handle = window.windowHandle()
-        # PySide's Wayland interface has no activation-token setter. Let Qt
-        # request activation through the compositor rather than changing env.
-        if window.isMinimized():
-            window.showNormal()
-        else:
-            window.show()
-        window.raise_()
-        window.activateWindow()
-        if handle is not None:
-            handle.requestActivate()
+    def activate(token):
+        activate_window(window, token)
 
     def poll_activation():
         if window._closing or window.app.stop_requested.is_set():

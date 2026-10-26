@@ -13,7 +13,7 @@ import threading
 
 from ou_dedetai import backup, backup_store, constants, control, installer, maintenance
 from ou_dedetai import adoption, desktop, doctor, network, processes, support
-from ou_dedetai import config_store, repair, runtime, updates, utils, wine
+from ou_dedetai import config_store, releases, repair, runtime, updates, utils, wine
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
 from ou_dedetai.logos import State
@@ -40,16 +40,20 @@ class Services:
         if self._doctor_profile != conf.config_file_path:
             self.doctor_report = ""
         raw = conf._raw
+        profile = conf.config_file_path
+        previous = self.snapshot()
+        selected_runtime = doctor.stored(conf, "wine_appimage_path") or doctor.stored(conf, "wine_binary")
         snapshot = Installation(
             raw.faithlife_product or "Logos", "Unknown",
-            raw.wine_binary or "Not selected", conf._overrides.install_dir or raw.install_dir or "",
+            str(selected_runtime or "Not selected"), conf._overrides.install_dir or raw.install_dir or "",
             installed=False, running=app.logos.logos_state == State.RUNNING,
             state=app.logos.logos_state.name.title(), indexing=app.logos.indexing_state.name.title(),
-            health="Choose Install or use an existing installation profile.", profile=conf.config_file_path,
+            health="Choose Install or use an existing installation profile.", profile=profile,
             backup=str(doctor.selected_paths(conf)[2] or ""), product_channel=conf.faithlife_product_release_channel,
             controller_channel=conf.app_release_channel, logging=conf.faithlife_product_logging,
             selected=bool(raw.install_dir and raw.faithlife_product == "Logos"),
-            runtimes=self.snapshot().runtimes,
+            runtimes=previous.runtimes if previous.profile == profile else (),
+            wine_status=self._wine_status(conf, selected_runtime),
         )
         try:
             executable = conf.logos_exe
@@ -71,8 +75,52 @@ class Services:
             snapshot = replace(snapshot, health=f"Inspection failed for this profile: {error}")
 
         with self._lock:
+            if app.conf is not conf or conf._raw is not raw or conf.config_file_path != profile:
+                return Result("succeeded", "Discarded refresh for a changed installation profile")
             self._snapshot = snapshot
         return Result("succeeded", "Installation state refreshed")
+
+    @staticmethod
+    def _wine_status(conf, selected):
+        """Project cached release facts without probing the selected runtime or refreshing metadata."""
+        parts = [releases.WINE_RECOMMENDATION_POLICY]
+        if selected in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
+            parts.append("Selected recommendation has not been resolved.")
+        elif selected:
+            provider = "AppImage" if str(selected).lower().endswith(".appimage") else "native/custom Wine"
+            parts.append(f"Selected provider: {provider} (version not checked).")
+
+        source = conf._network.wine_release_target(refresh=False)
+        if source.target is None:
+            parts.append(f"Published Wine release: {source.status}. Provider availability has not been checked.")
+            return " ".join(parts)
+
+        target = source.target
+        channel = "development" if target.channel == "devel" else target.channel
+        label = f"Wine {channel} {target.version}"
+        if source.status != "ok" or source.stale or source.checked is None:
+            state = "stale" if source.stale else "not checked"
+            if source.status != "ok":
+                state = f"{source.status}, {state}"
+            parts.append(f"Last known target: {label} ({state}). "
+                         "Provider availability is unknown.")
+            return " ".join(parts)
+
+        parts.append(f"Published target: {label}.")
+        provider = conf._network.wine_appimage_release(refresh=False)
+        if provider.stale:
+            state = "stale, availability unverified"
+        elif provider.status == "ok":
+            if provider.checked is None:
+                state = "not checked"
+            elif provider.release is None or provider.release.version != target.version:
+                state = "unknown for this target"
+            else:
+                state = "available"
+        else:
+            state = "not checked" if provider.status == "unchecked" else provider.status
+        parts.append(f"AppImage provider {releases.WINE_REPOSITORY}: {state}.")
+        return " ".join(parts)
 
     @staticmethod
     def _product_update(conf, installed):
@@ -89,7 +137,7 @@ class Services:
         errors = [item["summary"] for item in report["checks"] if item["status"] == "error"]
         if errors:
             raise maintenance.MaintenanceError("Installation preflight failed:\n" + "\n".join(errors))
-        if not app.approve("Review installation preflight", self.doctor_report):
+        if app.ask(self.doctor_report + "\n\nReview installation preflight", ["OK", "Cancel"]) != "OK":
             raise UserExitedFromAsk
 
     @staticmethod
@@ -477,9 +525,27 @@ class Services:
                     if not network.is_newer_product_release(installed, target):
                         raise maintenance.MaintenanceError(
                             "The target is not newer than the installed version. Check releases again")
-                    app.conf._change(**self._release_changes(app.conf, target))
-                    self._validate_release_document(app.conf, target, app.conf._raw._saved)
-                    installer.install(app)
+                    changes = self._release_changes(app.conf, target)
+                    publication = app.conf._change(**changes)
+                    fields = set(changes) | {config_store.ALIASES[field] for field in changes}
+                    previous = {
+                        field: publication.previous[field] for field in fields if field in publication.previous
+                    }
+                    published = {
+                        field: publication.document[field] for field in fields if field in publication.document
+                    }
+                    try:
+                        self._validate_release_document(app.conf, target, app.conf._raw._saved)
+                        installer.install(app)
+                    except BaseException:
+                        try:
+                            conflicts = app.conf.restore_changes(previous, published)
+                            if conflicts:
+                                logging.warning("Product update rollback preserved later edits to fields: %s",
+                                                ", ".join(conflicts))
+                        except Exception:
+                            logging.exception("Cannot restore product selection after failed update")
+                        raise
                 return Result("succeeded", f"Logos updated to {target}")
 
             if name == "runtime_update":
@@ -533,9 +599,14 @@ class Services:
         return self._settled(run)
 
     def discover(self, app, cancel):
+        conf, raw = app.conf, app.conf._raw
+        profile = conf.config_file_path
         choices = utils.get_wine_options(app)
         app.checkpoint()
         with self._lock:
+            if (app.conf is not conf or conf._raw is not raw or conf.config_file_path != profile
+                    or self._snapshot.profile != profile):
+                return Result("succeeded", "Discarded Wine discovery for a changed installation profile")
             self._snapshot = replace(self._snapshot, runtimes=tuple(choices))
         return Result("succeeded", "Wine runtimes discovered")
 

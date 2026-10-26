@@ -1,4 +1,5 @@
 import json
+import hashlib
 import multiprocessing
 import os
 from pathlib import Path
@@ -10,9 +11,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import artifacts, constants, control, installer, maintenance, network, runtime, system, utils, wine
+from ou_dedetai import (
+    artifacts, constants, control, installer, maintenance, network, releases, runtime, system, utils, wine,
+)
 from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
-from tests.artifact_fixtures import appimage, msi, winetricks_zip
+from ou_dedetai.app import UserExitedFromAsk
+from tests.artifact_fixtures import appimage, msi, product_msi, winetricks_zip
 from tests.test_artifacts import response
 
 
@@ -90,6 +94,22 @@ class TestArtifactConsumers(unittest.TestCase):
         links, configs = runtime._targets(self.app)
         return [runtime._snapshot(path) for path in (*links, *configs)]
 
+    def prepare_msi_drive(self):
+        prefix = Path(self.app.conf.wine_prefix)
+        drive = prefix / "drive_c"
+        drive.mkdir(parents=True)
+        devices = prefix / "dosdevices"
+        devices.mkdir()
+        (devices / "c:").symlink_to("../drive_c")
+        return drive
+
+    def staged_msi_path(self, argument):
+        self.assertTrue(argument.startswith("\\\\?\\C:\\LogosDesktopInstall-"))
+        parts = argument.removeprefix("\\\\?\\C:\\").split("\\")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[1], "installer.msi")
+        return Path(self.app.conf.wine_prefix) / "drive_c" / Path(*parts)
+
     def test_appimage_acquisition_pins_one_descriptor_across_refresh(self):
         conf = self.app.conf
         conf.wine_binary = str(Path(conf.installer_binary_dir) / "wine.AppImage")
@@ -110,6 +130,77 @@ class TestArtifactConsumers(unittest.TestCase):
         acquire.assert_called_once_with(selected.download_url, selected.name, conf.installer_binary_dir,
                                         app=self.app, kind="appimage", digest=None, size=123)
         activate.assert_called_once_with(self.app, accepted)
+
+    def recommended(self):
+        target = releases.WineTarget("11.20", "devel", "a" * 40)
+        selected = network.SoftwareReleaseInfo(
+            "11.20", "https://example.invalid/wine-devel_11.20-x86_64.AppImage",
+            name="wine-devel_11.20-x86_64.AppImage", size=123,
+        )
+        self.app.conf._network.wine_release_target.return_value = releases.WineTargetLookup(target, "ok")
+        self.app.conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
+        self.app.conf.wine_binary_files = []
+        return selected
+
+    def test_recommended_installer_consumes_exact_descriptor_without_raw_catalog(self):
+        selected = self.recommended()
+        accepted = self.accepted("appimage", appimage(), selected.name)
+        self.app.conf._network.wine_appimage_release.side_effect = [
+            releases.ReleaseLookup(selected, "ok"),
+            releases.ReleaseLookup(status="unavailable", message="provider changed"),
+        ]
+        with patch.object(network, "logos_reuse_download", return_value=accepted) as acquire:
+            installer.select_recommended_wine(self.app)
+        self.app.conf._network.wine_appimage_release.assert_called_once()
+        self.app.conf._network.wine_appimage_versions.assert_not_called()
+        acquire.assert_called_once_with(selected.download_url, selected.name,
+                                        self.app.conf.installer_binary_dir, self.app,
+                                        kind="appimage", digest=selected.digest, size=selected.size)
+        self.assertEqual(Path(self.app.conf._raw.wine_binary).name, selected.name)
+
+    def test_recommendation_failures_keep_saved_and_effective_selection(self):
+        selected = self.recommended()
+        accepted = self.accepted("appimage", appimage(), selected.name)
+        self.app.conf._overrides.runtime_selection = {"wine_binary": "explicit prior runtime"}
+        override = dict(self.app.conf._overrides.runtime_selection)
+        before = self.state()
+        raw = self.app.conf._raw.wine_binary
+        for failure in (artifacts.ArtifactError("acquisition"), UserExitedFromAsk("cancelled")):
+            with self.subTest(failure=failure), patch.object(network, "download_recommended_appimage",
+                                                            side_effect=failure):
+                with self.assertRaises(type(failure)):
+                    installer.select_recommended_wine(self.app)
+            self.assertEqual(self.state(), before)
+            self.assertEqual(self.app.conf._raw.wine_binary, raw)
+            self.assertEqual(self.app.conf._overrides.runtime_selection, override)
+
+        with (patch.object(network, "download_recommended_appimage", return_value=accepted),
+              patch.object(wine, "require_compatible", side_effect=maintenance.MaintenanceError("incompatible"))):
+            with self.assertRaises(maintenance.MaintenanceError):
+                installer.select_recommended_wine(self.app)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.app.conf._raw.wine_binary, raw)
+        self.assertEqual(self.app.conf._overrides.runtime_selection, override)
+
+        original = runtime.os.replace
+        config = Path(self.app.conf._overrides.config_path)
+        failed = False
+
+        def replace(source, target, **kwargs):
+            nonlocal failed
+            if Path(target) == config and not failed:
+                failed = True
+                raise OSError("intended activation publication failure")
+            return original(source, target, **kwargs)
+
+        with (patch.object(network, "download_recommended_appimage", return_value=accepted),
+              patch.object(runtime.os, "replace", side_effect=replace)):
+            with self.assertRaises(artifacts.ArtifactError):
+                installer.select_recommended_wine(self.app)
+        self.assertTrue(failed)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.app.conf._raw.wine_binary, raw)
+        self.assertEqual(self.app.conf._overrides.runtime_selection, override)
 
     def test_icu_acquisition_pins_version_url_digest_and_size(self):
         conf = self.app.conf
@@ -137,24 +228,33 @@ class TestArtifactConsumers(unittest.TestCase):
         home = self.root / "HOME"
         home.mkdir()
         (home / "Logos.msi").write_bytes(b"stale HOME MSI")
+        self.prepare_msi_drive()
         prefix = Path(conf.wine_prefix)
-        prefix.mkdir()
         (prefix / "system.reg").write_bytes(b"fixture initialized prefix")
         process = Mock(returncode=0)
+        content = product_msi(release=conf.faithlife_product_release)
+        consumed_paths = []
+
+        def consume(*args, **kwargs):
+            consumed = self.staged_msi_path(kwargs["exe_args"][1])
+            self.assertEqual(consumed.read_bytes(), content)
+            consumed_paths.append(consumed)
+            return process
+
         with (
             patch.object(installer, "ensure_winetricks_executable"),
             patch.object(artifacts.requests, "head", return_value=response()),
-            patch.object(artifacts.requests, "get", return_value=response(msi())),
+            patch.object(artifacts.requests, "get", return_value=response(content)),
             patch.object(Path, "home", return_value=home),
             patch.object(wine, "disable_winemenubuilder"), patch.object(wine, "set_renderer"),
             patch.object(wine, "set_fontsmoothing_to_rgb"), patch.object(wine, "install_fonts"),
             patch.object(wine, "enforce_icu_data_files"),
-            patch.object(wine, "run_wine_during_install", return_value=process) as run,
+            patch.object(wine, "run_wine_during_install", side_effect=consume) as run,
         ):
             installer.ensure_product_installed(self.app)
-        args = run.call_args.kwargs["exe_args"]
-        consumed = Path(args[1])
-        self.assertEqual(consumed.read_bytes(), msi())
+        run.assert_called_once()
+        consumed, = consumed_paths
+        self.assertFalse(consumed.parent.exists())
         self.assertNotEqual(consumed, target)
         self.assertEqual(target.read_bytes(), b"stale installed MSI")
         self.assertEqual((home / "Logos.msi").read_bytes(), b"stale HOME MSI")
@@ -234,7 +334,7 @@ class TestArtifactConsumers(unittest.TestCase):
         selected = Path(self.app.conf.install_dir) / self.app.conf._raw.wine_binary
         self.assertEqual(selected.read_bytes(), source.read_bytes())
 
-    def test_winetricks_ignores_stale_executable_and_consumes_accepted_archive(self):
+    def test_custom_winetricks_ignores_stale_executable_and_consumes_accepted_archive(self):
         target = Path(self.app.conf.installer_binary_dir) / "winetricks"
         target.write_bytes(b"unaccepted legacy script")
         script = b"#!/bin/sh\n# offline fixture\nexit 0\n"
@@ -242,9 +342,71 @@ class TestArtifactConsumers(unittest.TestCase):
             patch.object(artifacts.requests, "head", return_value=response()),
             patch.object(artifacts.requests, "get", return_value=response(winetricks_zip(script))),
         ):
-            executable = system.ensure_winetricks(self.app)
+            executable = system.ensure_winetricks(self.app, version="20250102")
         self.assertEqual(Path(executable).read_bytes(), script)
         self.assertEqual(target.resolve(), Path(executable))
+
+    def test_default_winetricks_pin_applies_to_acquisition_and_cached_generation(self):
+        script = b"#!/bin/sh\n# synthetic default fixture, never executed\nexit 0\n"
+        digest = hashlib.sha256(script).hexdigest()
+        _, configs = runtime._targets(self.app)
+        config_before = [runtime._snapshot(path) for path in configs]
+        raw = self.app.conf._raw._as_dict()
+        with (
+            patch.object(constants, "WINETRICKS_SHA256", digest),
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(script)) as request,
+            patch.object(network, "logos_reuse_download", wraps=network.logos_reuse_download) as acquire,
+        ):
+            selected = Path(system.ensure_winetricks(self.app))
+        accepted = artifacts.installed(selected, "winetricks")
+        self.assertEqual(accepted.sha256, digest)
+        url = (f"https://raw.githubusercontent.com/Winetricks/winetricks/{constants.WINETRICKS_VERSION}"
+               "/src/winetricks")
+        self.assertEqual(acquire.call_args.args[0], url)
+        self.assertEqual(acquire.call_args.kwargs["digest"].value, digest)
+        self.assertEqual(acquire.call_args.kwargs["kind"], "winetricks")
+        self.assertEqual(request.call_args.args[0], url)
+        target = Path(self.app.conf.installer_binary_dir) / "winetricks"
+        before = os.readlink(target)
+        with (patch.object(constants, "WINETRICKS_SHA256", digest),
+              patch.object(network, "logos_reuse_download", side_effect=AssertionError("Cache should be reused"))):
+            self.assertEqual(Path(system.ensure_winetricks(self.app)), selected)
+
+        with (
+            patch.object(constants, "WINETRICKS_SHA256", "0" * 64),
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(script)),
+        ):
+            with self.assertRaises(artifacts.ArtifactError):
+                system.ensure_winetricks(self.app)
+        self.assertEqual(os.readlink(target), before)
+        self.assertEqual(selected.read_bytes(), script)
+        self.assertEqual([runtime._snapshot(path) for path in configs], config_before)
+        self.assertEqual(self.app.conf._raw._as_dict(), raw)
+
+    def test_appimage_winetricks_remains_provider_owned_without_standalone_pin(self):
+        accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        self.app.conf.wine_binary_code = "AppImage"
+        self.app.conf.wine_appimage_path = accepted.path
+        with (patch.object(constants, "WINETRICKS_SHA256", "0" * 64),
+              patch.object(network, "logos_reuse_download", side_effect=AssertionError("No standalone download"))):
+            selected = Path(system.ensure_winetricks(self.app))
+        self.assertEqual(selected.name, "winetricks")
+        self.assertEqual(selected.resolve(), accepted.path)
+
+    def test_default_winetricks_rejects_wrong_script_against_the_production_pin(self):
+        target = Path(self.app.conf.installer_binary_dir) / "winetricks"
+        original = b"previous standalone selection"
+        target.write_bytes(original)
+        with (
+            patch.object(artifacts.requests, "head", return_value=response()),
+            patch.object(artifacts.requests, "get", return_value=response(b"#!/bin/sh\n# wrong release\nexit 0\n")),
+        ):
+            with self.assertRaisesRegex(artifacts.ArtifactError, "digest mismatch"):
+                system.ensure_winetricks(self.app)
+        self.assertFalse(target.is_symlink())
+        self.assertEqual(target.read_bytes(), original)
 
     def test_rejected_icu_never_reaches_extraction_or_prefix_copy(self):
         with (
@@ -391,10 +553,12 @@ class TestArtifactConsumers(unittest.TestCase):
         self.assertTrue(saved["faithlife_product_logging"])
 
     def test_real_msi_reader_and_competing_publisher_keep_consumption_identity(self):
+        self.prepare_msi_drive()
         accepted = self.accepted("msi", msi(), "Logos.msi")
         gate, captured = self.root / "read-now", self.root / "read-hash"
         started = Event()
         errors = []
+        consumed_paths = []
         reader_code = (
             "from pathlib import Path\nimport hashlib,sys,time\n"
             "source,gate,capture=map(Path,sys.argv[1:])\n"
@@ -405,9 +569,12 @@ class TestArtifactConsumers(unittest.TestCase):
         )
 
         def spawn(*args, **kwargs):
-            self.assertEqual(kwargs["exe_args"][1], str(accepted.path))
+            consumed = self.staged_msi_path(kwargs["exe_args"][1])
+            self.assertNotEqual(consumed, accepted.path)
+            self.assertEqual(consumed.read_bytes(), accepted.check().read_bytes())
+            consumed_paths.append(consumed)
             process = subprocess.Popen([sys.executable, "-B", "-c", reader_code,
-                                        str(accepted.path), str(gate), str(captured)])
+                                        str(consumed), str(gate), str(captured)])
             started.set()
             return process
 
@@ -444,6 +611,9 @@ class TestArtifactConsumers(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(captured.read_text(), accepted.sha256)
+        self.assertEqual(accepted.check().read_bytes(), msi())
+        consumed, = consumed_paths
+        self.assertFalse(consumed.parent.exists())
         with maintenance.artifact_use(exclusive=True):
             pass
 
@@ -464,8 +634,9 @@ class TestArtifactConsumers(unittest.TestCase):
         self.assertEqual(target.resolve(), accepted.path)
         script = b"#!/bin/sh\nexit 0\n"
         with (
+            patch.object(constants, "WINETRICKS_SHA256", hashlib.sha256(script).hexdigest()),
             patch.object(artifacts.requests, "head", return_value=response()),
-            patch.object(artifacts.requests, "get", return_value=response(winetricks_zip(script))),
+            patch.object(artifacts.requests, "get", return_value=response(script)),
         ):
             selected = Path(system.ensure_winetricks(self.app))
         self.assertEqual(selected.read_bytes(), script)

@@ -41,11 +41,7 @@ def ensure_choices(app: App):
     logging.debug(f"> {app.conf.faithlife_product_release=}")
     logging.debug(f"> {app.conf.install_dir=}")
     logging.debug(f"> {app.conf.installer_binary_dir=}")
-    logging.debug(f"> {app.conf.wine_appimage_path=}")
-    logging.debug(f"> {app.conf.wine_appimage_recommended_url=}")
-    logging.debug(f"> {app.conf.wine_appimage_recommended_file_name=}")
-    logging.debug(f"> {app.conf.wine_binary_code=}")
-    logging.debug(f"> {app.conf.wine_binary=}")
+    # Runtime resolution waits until the dependency phase has completed.
     logging.debug(f"> {app.conf.faithlife_product_icon_path}")
     logging.debug(f"> {app.conf.faithlife_installer_download_url}")
     app.status("Install is running…")
@@ -198,6 +194,27 @@ def check_system_compatibility(app: App):
     check_opengl(app=app)
 
 
+@maintenance.changes_installation
+def select_recommended_wine(app: App):
+    """Prepare an exact current runtime before publishing the user's new selection."""
+    source = app.conf._network.wine_release_target()
+    if source.status != "ok" or source.stale or source.target is None:
+        raise maintenance.MaintenanceError(source.message)
+    native = utils.current_native_wine(app, source.target)
+    app.checkpoint()
+    if native is not None:
+        app.conf.wine_binary = native
+        return
+
+    lookup = app.conf._network.wine_appimage_release()
+    if (lookup.status != "ok" or lookup.stale or lookup.release is None
+            or lookup.release.version != source.target.version):
+        raise maintenance.MaintenanceError(lookup.message or "Current Wine AppImage is unavailable")
+    accepted = network.download_recommended_appimage(app, lookup.release)
+    app.checkpoint()
+    runtime.activate(app, accepted)
+
+
 def ensure_appimage_download(app: App):
     app.installer_step_count += 1
     ensure_sys_deps(app=app)
@@ -290,6 +307,7 @@ def ensure_product_installer_download(app: App):
         str(Path(app.conf.install_dir) / "data"),
         app=app,
         kind="msi",
+        msi_expectation=artifacts.MsiExpectation(product, release),
     )
     return ProductInstaller(release, accepted)
 
@@ -325,10 +343,6 @@ def ensure_wineprefix_config(app: App):
     # Force winemenubuilder.exe='' in registry.
     logging.debug("Setting wineprefix registry to ignore winemenubuilder.exe.")
     wine.disable_winemenubuilder(app=app, wine64_binary=app.conf.wine64_binary)
-
-    # Force renderer=gdi in registry.
-    logging.debug("Setting renderer=gdi in wineprefix registry.")
-    wine.set_renderer(app=app, wine64_binary=app.conf.wine64_binary, value='gdi')
 
     # Force fontsmooth=rgb in registry.
     logging.debug("Setting fontsmoothing=rgb in wineprefix registry.")
@@ -478,17 +492,21 @@ def create_wine_appimage_symlinks(app: App):
 
 def desktop_exec(arguments: list[str], *, accepts_url: bool = False) -> str:
     """Serialize argv using both Desktop Entry string and Exec escaping rules."""
-    if not arguments or "=" in arguments[0]:
+    if not arguments or not arguments[0] or "=" in arguments[0]:
         raise ValueError("Desktop executable is missing or contains an equal sign")
 
-    # GIO checks the first token before expanding literal percent field codes.
-    if "%" in arguments[0]:
-        arguments = ["/usr/bin/env", "--", *arguments]
-
-    quoted = []
     for argument in arguments:
         if any(ord(character) < 32 or ord(character) == 127 for character in argument):
             raise ValueError("Desktop arguments cannot contain control characters")
+
+    # KDE's xdg-mime lookup does not resolve a quoted executable token.
+    # Keep complex paths as arguments, also avoiding GIO's percent-token lookup.
+    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./+-"
+           for character in arguments[0]):
+        arguments = ["/usr/bin/env", "--", *arguments]
+
+    quoted = [arguments[0]]
+    for argument in arguments[1:]:
         escaped = argument.replace("%", "%%")
         for character in ("\\", '"', "`", "$"):
             escaped = escaped.replace(character, "\\" + character)

@@ -7,7 +7,6 @@ import json
 import os
 import stat
 from pathlib import Path
-import webbrowser
 
 from ou_dedetai import constants
 from ou_dedetai import maintenance, backup_store
@@ -243,7 +242,7 @@ def get_support(app: App, cancel=None) -> str | None:
     except UserExitedFromAsk:
         return output_path
     if answer == "Open private project issue":
-        webbrowser.open(constants.REPOSITORY_NEW_ISSUE_LINK)
+        system.run_command(["xdg-open", constants.REPOSITORY_NEW_ISSUE_LINK], timeout=10, check=False)
     elif answer == "Show links":
         app.info(
             "Private project links:\n"

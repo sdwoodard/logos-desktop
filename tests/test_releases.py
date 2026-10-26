@@ -22,7 +22,103 @@ def release_item(version="1.1.0", *, repository=None, prerelease=False, name=Non
              "browser_download_url": f"https://github.com/{repository}/releases/download/{quote(tag)}/{quote(name)}"}
     return {"id": identity, "tag_name": tag, "draft": False, "prerelease": prerelease,
             "published_at": f"2026-10-{identity:02d}T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
-            "assets": [asset]}
+             "assets": [asset]}
+
+
+def wine_source_responses(channel="devel"):
+    data = json.loads((Path(__file__).parent / "data/wine-release-metadata.json").read_text())
+    fixture = data[channel]
+    commit, version, tag_sha = fixture["commit"], fixture["version"], fixture["tag_sha"]
+    api, raw = releases.WINE_SOURCE_API, releases.WINE_SOURCE_RAW
+    branch = "master" if channel == "devel" else "stable"
+    return {
+        f"{api}/commits?sha={branch}&path=ANNOUNCE.md&per_page=100": json.dumps([
+            {"sha": commit, "commit": {"message": fixture["message"],
+                                       "verification": {"verified": False, "reason": "unsigned"}}},
+        ]).encode(),
+        f"{raw}/{commit}/VERSION": fixture["VERSION"].encode(),
+        f"{raw}/{commit}/ANNOUNCE.md": fixture["ANNOUNCE.md"].encode(),
+        f"{api}/git/ref/tags/wine-{version}": json.dumps({
+            "ref": f"refs/tags/wine-{version}", "object": {"type": "tag", "sha": tag_sha},
+        }).encode(),
+        f"{api}/git/tags/{tag_sha}": json.dumps({
+            "sha": tag_sha, "tag": f"wine-{version}", "object": {"type": "commit", "sha": commit},
+            "verification": {"verified": False, "reason": "unknown_key"},
+        }).encode(),
+    }
+
+
+class TestWineSourcePolicy(unittest.TestCase):
+    def test_retained_released_channels_require_pinned_documents_and_tag(self):
+        for channel, version in (("devel", "11.20"), ("stable", "11.0")):
+            responses = wine_source_responses(channel)
+            request = Mock(side_effect=responses.__getitem__)
+            with self.subTest(channel=channel):
+                target = releases.fetch_wine_target(channel, request)
+                self.assertEqual(target.version, version)
+                self.assertEqual(target.channel, channel)
+                self.assertEqual(request.call_count, 5)
+                self.assertFalse(any("/master/VERSION" in call.args[0] for call in request.call_args_list))
+
+    def test_rcs_edits_and_later_master_work_do_not_become_releases(self):
+        responses = wine_source_responses()
+        history_url = next(iter(responses))
+        history = json.loads(responses[history_url])
+        history[:0] = [{"sha": "a" * 40, "commit": {"message": message}} for message in (
+            "Release 12.0-rc1.", "Update ANNOUNCE.md", "Start 12.1 development", "Release 12.0.",
+        )]
+        responses[history_url] = json.dumps(history).encode()
+        self.assertEqual(releases.fetch_wine_target("devel", responses.__getitem__).version, "11.20")
+
+    def test_newest_invalid_release_is_not_replaced_with_an_older_one(self):
+        for field in ("VERSION", "ANNOUNCE.md", "tag_commit", "tag_ref", "commit_sha"):
+            responses = wine_source_responses()
+            history_url = next(iter(responses))
+            history = json.loads(responses[history_url])
+            history.append({"sha": "b" * 40, "commit": {"message": "Release 11.19."}})
+            responses[history_url] = json.dumps(history).encode()
+            if field in ("VERSION", "ANNOUNCE.md"):
+                url = next(url for url in responses if url.endswith("/" + field))
+                responses[url] = b"Wine version 11.21\n" if field == "VERSION" else b"Unreleased development tree"
+            elif field == "commit_sha":
+                history[0]["sha"] = "master/../../untrusted"
+                responses[history_url] = json.dumps(history).encode()
+            else:
+                url = next(url for url in responses if "/git/tags/" in url or "/git/ref/" in url)
+                data = json.loads(responses[url])
+                if field == "tag_ref":
+                    data["ref"] = "refs/heads/master"
+                else:
+                    data["object"] = {"type": "commit", "sha": "c" * 40}
+                responses[url] = json.dumps(data).encode()
+            with self.subTest(field=field), self.assertRaises(artifacts.ArtifactError):
+                releases.fetch_wine_target("devel", responses.__getitem__)
+
+    def test_exact_provider_ignores_github_flags_and_refuses_older_assets(self):
+        target = releases.WineTarget("11.20", "devel", "a" * 40)
+        data = json.loads((Path(__file__).parent / "data/wine-release-metadata.json").read_text())
+        result = releases.fetch_wine_appimage(target, lambda url: json.dumps(data["provider"]).encode())
+        self.assertIsNone(result.latest)
+        self.assertIn("11.20", result.message)
+        self.assertIn(releases.WINE_REPOSITORY, result.message)
+        for prerelease in (False, True):
+            item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY, prerelease=prerelease,
+                                name="wine-devel_11.20-x86_64.AppImage")
+            result = releases.fetch_wine_appimage(target, lambda url: json.dumps([item]).encode())
+            self.assertEqual(result.latest.tag, "11.20-devel")
+
+    def test_bad_preferred_flavor_is_not_hidden_by_staging(self):
+        target = releases.WineTarget("11.20", "devel", "a" * 40)
+        upstream = release_item("11.20-devel", repository=releases.WINE_REPOSITORY,
+                                name="wine-devel_11.20-x86_64.AppImage")
+        staging = release_item("11.20-staging", repository=releases.WINE_REPOSITORY,
+                               name="wine-staging_11.20-x86_64.AppImage")
+        for broken in (dict(upstream, assets=[]),):
+            result = releases.fetch_wine_appimage(target, lambda url: json.dumps([broken, staging]).encode())
+            self.assertEqual(result.status, "unavailable")
+            self.assertIsNone(result.latest)
+        result = releases.fetch_wine_appimage(target, lambda url: json.dumps([staging]).encode())
+        self.assertEqual(result.latest.tag, "11.20-staging")
 
 
 class TestReleasePolicy(unittest.TestCase):
@@ -127,6 +223,74 @@ class TestReleaseRefresh(unittest.TestCase):
         self.client = network.NetworkRequests(hook=self.hook)
         self.catalog = releases.select([release_item()], constants.REPOSITORY_SLUG)
 
+    def test_wine_source_cache_channels_force_failure_and_reload(self):
+        responses = wine_source_responses() | wine_source_responses("stable")
+        with patch.object(network, "_net_get", side_effect=responses.__getitem__) as fetch:
+            with patch.object(network.time, "time", return_value=1000):
+                self.assertEqual(self.client.wine_release_target().target.version, "11.20")
+                self.assertEqual(self.client.wine_release_target("stable").target.version, "11.0")
+                self.client.wine_release_target()
+                self.assertEqual(fetch.call_count, 10)
+                self.client.wine_release_target(force=True)
+                self.assertEqual(fetch.call_count, 15)
+
+        loaded = network.NetworkRequests()
+        with patch.object(network.time, "time", return_value=1001), patch.object(network, "_net_get") as fetch:
+            self.assertEqual(loaded.wine_release_target().target.version, "11.20")
+            fetch.assert_not_called()
+        with patch.object(network.time, "time", return_value=50000), patch.object(
+            network, "_net_get", side_effect=artifacts.MetadataError("offline"),
+        ) as fetch:
+            result = loaded.wine_release_target()
+            self.assertTrue(result.stale)
+            self.assertEqual(result.target.version, "11.20")
+            self.assertEqual(result.checked, 1000)
+            unavailable = loaded.wine_appimage_release()
+            self.assertIsNone(unavailable.release)
+            self.assertTrue(unavailable.stale)
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_wine_exact_provider_cache_isolated_from_old_catalog(self):
+        old = release_item("10.8-staging", repository=releases.WINE_REPOSITORY,
+                           name="wine-staging_10.8-x86_64.AppImage")
+        self.client._cache.release_entries[releases.policy_key(releases.WINE_REPOSITORY)] = {
+            "catalog": releases.serialize(releases.select([old], releases.WINE_REPOSITORY)),
+            "checked": 1000, "status": "ok",
+        }
+        responses = wine_source_responses()
+        item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY, prerelease=True,
+                            name="wine-devel_11.20-x86_64.AppImage")
+        responses[f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1"] = (
+            json.dumps([old, item]).encode()
+        )
+        with patch.object(network.time, "time", return_value=1000), patch.object(
+            network, "_net_get", side_effect=responses.__getitem__,
+        ) as fetch:
+            self.assertEqual(self.client.wine_appimage_release().release.version, "11.20")
+            self.client.wine_appimage_release()
+            self.assertEqual(fetch.call_count, 6)
+        loaded = network.NetworkRequests()
+        with patch.object(network.time, "time", return_value=1001), patch.object(network, "_net_get") as fetch:
+            result = loaded.wine_appimage_release()
+            self.assertEqual(result.release.tag, "11.20-devel")
+            self.assertFalse(result.stale)
+            fetch.assert_not_called()
+
+    def test_missing_current_provider_is_fresh_unavailable_not_older_recommendation(self):
+        responses = wine_source_responses()
+        fixture = json.loads((Path(__file__).parent / "data/wine-release-metadata.json").read_text())
+        responses[f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1"] = (
+            json.dumps(fixture["provider"]).encode()
+        )
+        with patch.object(network.time, "time", return_value=1000), patch.object(
+            network, "_net_get", side_effect=responses.__getitem__,
+        ):
+            result = self.client.wine_appimage_release()
+        self.assertEqual(result.status, "unavailable")
+        self.assertFalse(result.stale)
+        self.assertIsNone(result.release)
+        self.assertIn("11.20", result.message)
+
     def test_same_instance_expires_and_force_refresh_preserves_hooks(self):
         with patch.object(network, "_get_release_data", return_value=self.catalog) as fetch:
             with patch.object(network.time, "time", return_value=1000):
@@ -203,21 +367,24 @@ class TestReleaseRefresh(unittest.TestCase):
             fetch.assert_called_once()
 
     def test_expired_wine_failure_cannot_publish_a_current_comparison(self):
-        item = release_item("10.8-staging", repository=releases.WINE_REPOSITORY,
-                            name="wine-staging_10.8-x86_64.AppImage")
-        catalog = releases.select([item], releases.WINE_REPOSITORY)
+        responses = wine_source_responses()
+        item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY,
+                            name="wine-devel_11.20-x86_64.AppImage")
+        responses[f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1"] = (
+            json.dumps([item]).encode()
+        )
         with patch.object(network.time, "time", return_value=1000), patch.object(
-            network, "_get_release_data", return_value=catalog,
+            network, "_net_get", side_effect=responses.__getitem__,
         ):
-            self.client.wine_appimage_versions()
+            self.client.wine_appimage_release()
         config = object.__new__(Config)
         config._raw = PersistentConfiguration(wine_binary="fixture.AppImage", wine_binary_code="AppImage")
         config._network = self.client
         with patch.object(network.time, "time", return_value=50000), patch.object(
-            network, "_get_release_data", return_value=releases.GithubSoftwareReleasesInfo(None, None, "offline"),
+            network, "_net_get", side_effect=artifacts.MetadataError("offline"),
         ), patch("ou_dedetai.utils.compare_recommended_appimage_version") as compare:
             config.refresh_release_snapshots()
-            self.assertEqual(self.client.wine_appimage_versions(refresh=False).status, "stale")
+            self.assertTrue(self.client.wine_appimage_release(refresh=False).stale)
         compare.assert_not_called()
         self.assertEqual(config._recommended_wine_status[0], -1)
         self.assertIn("stale", config._recommended_wine_status[1])

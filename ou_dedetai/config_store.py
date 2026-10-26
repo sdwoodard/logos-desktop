@@ -241,6 +241,8 @@ class Target:
 class Saved:
     document: dict
     warning: str = ""
+    previous: dict | None = None
+    conflicts: tuple[str, ...] = ()
 
 
 def context(document, overrides=None):
@@ -274,6 +276,8 @@ class Prepared:
     targets: list
     backups: list
     source: Target | None
+    previous: dict
+    conflicts: tuple[str, ...] = ()
 
     def validate(self):
         if self.source is not None:
@@ -294,8 +298,33 @@ class Prepared:
             os.fsync(target.fd)
 
 
+def _restore_fields(stored, previous, published):
+    """Keep later edits to either spelling of an operation-owned field."""
+    document = copy.deepcopy(stored)
+    reverse = {alias: name for name, alias in ALIASES.items()}
+    fields = {reverse.get(name, name) for name in previous.keys() | published.keys()}
+    conflicts = []
+    for field in sorted(fields):
+        names = (field, ALIASES[field]) if field in ALIASES else (field,)
+        if any(
+            (name in stored) != (name in published)
+            or type(stored.get(name)) is not type(published.get(name))
+            or stored.get(name) != published.get(name)
+            for name in names
+        ):
+            conflicts.append(field)
+            continue
+        for name in names:
+            if name in previous:
+                document[name] = copy.deepcopy(previous[name])
+            else:
+                document.pop(name, None)
+    return document, tuple(conflicts)
+
+
 @contextmanager
-def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None):
+def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None,
+            restoration=None):
     """Share input validation and destination ownership with runtime activation."""
     path = absolute_path(path)
     source_path = absolute_path(source_path) if source_path is not None else path
@@ -307,19 +336,26 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
             source.validate()
             if source.previous is None or source.previous != source_bytes or primary.previous is not None:
                 raise ConfigurationError("Legacy migration source or destination changed. Reload before saving")
-            document = canonical(decode(source.previous, source_path), source_path)
+            stored = decode(source.previous, source_path)
         else:
-            document = canonical(decode(primary.previous, path), path) if primary.previous is not None else {}
+            stored = decode(primary.previous, path) if primary.previous is not None else {}
+        document = canonical(stored, source_path)
         require_ready(document, overrides)
         if expected is not None and selection_identity(document) != selection_identity(expected):
             raise ConfigurationError("Selected installation changed on disk. Reload before saving")
-        document = apply_changes(document, changes, path)
-        require_ready(document, overrides)
+        conflicts = ()
+        if restoration is None:
+            document = apply_changes(document, changes, path)
+        else:
+            # Canonicalizing the output would erase a later edit to a legacy alias.
+            document, conflicts = _restore_fields(stored, *restoration)
+        resolved = canonical(document, path)
+        require_ready(resolved, overrides)
         if validator is not None:
-            validator(document)
+            validator(resolved)
         content = encode(document)
         targets = [primary]
-        install = document.get("install_dir")
+        install = resolved.get("install_dir")
         if install:
             from . import constants
 
@@ -345,13 +381,23 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
         if len(roles) != len(set(roles)):
             raise ConfigurationError("Configuration destinations conflict with source or recovery-copy paths")
         backups = [(stack.enter_context(Target(path)), value, immutable) for path, value, immutable in backup_specs]
-        prepared = Prepared(document, content, targets, backups, source)
+        prepared = Prepared(document, content, targets, backups, source, stored, conflicts)
         for target in targets:
-            target.stage(content)
+            target_content = content
+            if target is not primary:
+                portable_document = copy.deepcopy(document)
+                # Installation paths are relative to the profile containing them.
+                for name in ("install_dir", "INSTALLDIR"):
+                    value = portable_document.get(name)
+                    if isinstance(value, str) and value.strip():
+                        portable_document[name] = str(absolute_path(value, base=path.parent))
+                target_content = encode(portable_document)
+            target.stage(target_content)
         yield prepared
 
 
-def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None):
+def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None,
+         restoration=None):
     """Caller holds configuration_lock. A returned result means primary committed."""
     path = absolute_path(path)
     source_path = absolute_path(source_path) if source_path is not None else path
@@ -360,7 +406,7 @@ def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, 
     try:
         with prepare(
             path, changes, source_path=source_path, source_bytes=source_bytes, overrides=overrides, expected=expected,
-            validator=validator,
+            validator=validator, restoration=restoration,
         ) as prepared:
             document = prepared.document
             primary = prepared.targets[0]
@@ -377,10 +423,11 @@ def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, 
                     os.fsync(target.fd)
                 except (OSError, ValueError, maintenance.MaintenanceError, artifacts.ArtifactError) as error:
                     warnings.append(f"Saved {path}, but portable configuration {target.path} failed: {error}")
-            return Saved(document, "\n".join(warnings))
+            return Saved(document, "\n".join(warnings), prepared.previous, prepared.conflicts)
     except maintenance.RecoveryRequired:
         raise
     except (OSError, TypeError, ValueError, maintenance.MaintenanceError, artifacts.ArtifactError) as error:
         if committed:
-            return Saved(document, f"Saved {path}, but configuration cleanup failed: {error}")
+            return Saved(document, f"Saved {path}, but configuration cleanup failed: {error}",
+                         prepared.previous, prepared.conflicts)
         raise ConfigurationError(f"Configuration could not be saved: {path}: {error}") from error

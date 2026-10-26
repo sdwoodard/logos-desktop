@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ou_dedetai.constants import APP_IMAGE_DIR, PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE, PROMPT_OPTION_NEW_FILE
-from ou_dedetai import adoption, constants
+from ou_dedetai import adoption, constants, releases
 from .app import QtApp
 from .bridge import Bridge
 from .dialogs import DialogHost
@@ -38,6 +38,7 @@ class Installation:
     product_update: str = "Not checked"
     runtimes: tuple[str, ...] = ()
     selected: bool = False
+    wine_status: str = releases.WINE_RECOMMENDATION_POLICY + " Availability has not been checked."
 
 
 @dataclass(frozen=True)
@@ -488,7 +489,8 @@ class MainWindow(QMainWindow):
                     f"Configuration: {self.snapshot.profile}\nLocation: {self.snapshot.path}\n"
                     f"Wine: {self.snapshot.runtime}\nLogos: {self.snapshot.version}\n"
                     f"Process: {self.snapshot.state}\nIndexer: {self.snapshot.indexing}\n"
-                    f"Release policy: stable\nController: {constants.APP_RELEASE_VERSION or 'private, unversioned'}")
+                    f"Logos/LogosDesktop updates: stable\n{self.snapshot.wine_status}\n"
+                    f"Controller: {constants.APP_RELEASE_VERSION or 'private, unversioned'}")
                 self.maintenance.backups.detail.setText(
                     "Save a verified copy of your Logos data.\n"
                     + (f"Folder: {Path(self.snapshot.backup).name}" if self.snapshot.backup
@@ -498,13 +500,16 @@ class MainWindow(QMainWindow):
                     self.profile_settings.load(self.snapshot)
                     self._settings_profile = self.snapshot.profile
                 self.profile_settings.runtime.setText(self.snapshot.runtime)
+                self.profile_settings.wine_status.setText(self.snapshot.wine_status)
+                self.maintenance.wine_status.setText(self.snapshot.wine_status)
                 for page in (self.maintenance, self.diagnostics):
                     for name, button in page.buttons.items():
                         allowed = name in ("check", "refresh", "open_log", "support", "edit_config", "dependencies",
                                             "controller_update", "doctor", "open_logs")
                         allowed = allowed or (name == "repair" and self.snapshot.selected)
                         button.setEnabled(self.app.active is None and (allowed or self.snapshot.installed))
-                        button.setToolTip("Wait for the current operation" if self.app.active is not None else "")
+                        tooltip = self.snapshot.wine_status if name == "runtime_update" else ""
+                        button.setToolTip("Wait for the current operation" if self.app.active is not None else tooltip)
                 running_states = ("Starting", "Running", "Stopping")
                 process_busy = self.snapshot.state in running_states or self.snapshot.indexing in running_states
                 self.profile_settings.choose_profile.setEnabled(self.app.active is None and not process_busy)

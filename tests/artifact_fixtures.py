@@ -1,6 +1,7 @@
 """Small public-format fixtures without proprietary executable content."""
 
 import io
+import random
 from base64 import b64decode
 import struct
 import uuid
@@ -93,3 +94,266 @@ def winetricks_zip(script=b"#!/bin/sh\nexit 0\n"):
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr("winetricks-test/src/winetricks", script)
     return output.getvalue()
+
+
+def pe_header(machine=0x8664):
+    content = bytearray(512)
+    content[:2] = b"MZ"
+    struct.pack_into("<I", content, 60, 128)
+    content[128:132] = b"PE\0\0"
+    struct.pack_into("<HH", content, 132, machine, 1)
+    struct.pack_into("<H", content, 148, 240)
+    struct.pack_into("<H", content, 152, 0x20b)
+    return bytes(content)
+
+
+def mszip_cabinet(*, machine=0x8664, member="root_exe", compression=1, alias_offset=None, image=None,
+                 second_image=None):
+    """Put the synthetic PE in a later block with shared dictionary references."""
+    primary = pe_header(machine) if image is None else image
+    prefix = bytearray(random.Random(13).randbytes(40000))
+    prefix[20000:20000 + len(primary)] = primary
+    content = bytes(prefix) + primary
+    if second_image is not None:
+        content += second_image
+    blocks = []
+    history = b""
+    for offset in range(0, len(content), 32768):
+        raw = content[offset:offset + 32768]
+        compressor = zlib.compressobj(wbits=-15, zdict=history) if history else zlib.compressobj(wbits=-15)
+        packed = b"CK" + compressor.compress(raw) + compressor.flush()
+        sizes = struct.pack("<HH", len(packed), len(raw))
+
+        def csum(data):
+            result = 0
+            stop = len(data) - len(data) % 4
+            for (value,) in struct.iter_unpack("<I", data[:stop]):
+                result ^= value
+            return result ^ int.from_bytes(data[stop:], "big")
+
+        blocks.append(struct.pack("<I", csum(packed) ^ csum(sizes)) + sizes + packed)
+        history = (history + raw)[-32768:]
+    file = struct.pack("<II4H", len(primary), len(prefix), 0, 0, 0, 0) + member.encode() + b"\0"
+    if alias_offset is not None:
+        file += struct.pack("<II4H", len(primary), alias_offset, 0, 0, 0, 0) + b"alias_exe\0"
+    if second_image is not None:
+        assert alias_offset is None
+        file += struct.pack("<II4H", len(second_image), len(prefix) + len(primary), 0, 0, 0, 0) + b"alias_exe\0"
+    data_offset = 44 + len(file)
+    size = data_offset + sum(map(len, blocks))
+    count = 2 if alias_offset is not None or second_image is not None else 1
+    header = struct.pack("<4s5IBB5H", b"MSCF", 0, size, 0, 44, 0, 3, 1, 1, count, 0, 0, 0)
+    return header + struct.pack("<IHH", data_offset, len(blocks), compression) + file + b"".join(blocks)
+
+
+def product_msi(*, architecture="Intel", product="Logos", product_name=None, release="54.3.0.5",
+                product_version="54.3.5", cabinet=None, directory="Logos", duplicate=False, pending=False,
+                filename=None, duplicate_filename=None, root_alias=None, extra_properties=(),
+                root_parent="LocalAppDataFolder", extra_directories=(), extra_components=(), extra_files=(),
+                summary_override=None):
+    """Small public MSI tables and a checksummed MSZIP cabinet, without vendor data."""
+    strings = []
+
+    def reference(value):
+        if value is None:
+            return 0
+        encoded = value.encode("cp1252")
+        if encoded not in strings:
+            strings.append(encoded)
+        return strings.index(encoded) + 1
+
+    schemas = {
+        "Property": [("Property", 0xd48), ("Value", 0xdff)],
+        "Directory": [("Directory", 0xd48), ("Directory_Parent", 0xd48), ("DefaultDir", 0xdff)],
+        "Component": [("Component", 0xd48), ("Directory_", 0xd48)],
+        "File": [("File", 0xd48), ("Component_", 0xd48), ("FileName", 0xdff),
+                 ("FileSize", 0x104), ("Version", 0xd48), ("Attributes", 0x102), ("Sequence", 0x102)],
+        "Media": [("DiskId", 0x102), ("LastSequence", 0x102), ("Cabinet", 0xdff)],
+    }
+    records = {
+        "Property": [("ProductName", product_name or f"{product} Bible Study"), ("ProductVersion", product_version)],
+        "Directory": [("TARGETDIR", None, "SourceDir"), ("LocalAppDataFolder", "TARGETDIR", "."),
+                      ("INSTALLFOLDER", root_parent, directory)],
+        "Component": [("main", "INSTALLFOLDER")],
+        "File": [("root_exe", "main", f"{product}.exe" if filename is None else filename, 512, release, 512, 1)],
+        "Media": [(1, 1, "#product.cab")],
+    }
+    records["Property"].extend(extra_properties)
+    records["Directory"].extend(extra_directories)
+    records["Component"].extend(extra_components)
+    records["File"].extend(extra_files)
+    if extra_files:
+        records["Media"] = [(1, max(row[-1] for row in records["File"]), "#product.cab")]
+    if duplicate or duplicate_filename is not None:
+        other = f"{product}.exe" if duplicate_filename is None else duplicate_filename
+        records["File"].append(("second_exe", "main", other, 512, release, 512, 1))
+    if root_alias is not None:
+        records["Directory"].append(("SECONDROOT", "LocalAppDataFolder", root_alias))
+    if pending:
+        records["Directory"].append(("System", "INSTALLFOLDER", "Pending"))
+        records["Component"].append(("pending", "System"))
+        records["File"].insert(0, ("alias_exe", "pending", f"{product}.exe", 512, "54.3.0.5", 512, 2))
+        records["Media"] = [(1, 2, "#product.cab")]
+
+    def column_bytes(values, widths):
+        return b"".join(int(row[column]).to_bytes(width, "little")
+                        for column, width in enumerate(widths) for row in values)
+
+    columns = []
+    table_ids = []
+    streams = {}
+    for table, schema in schemas.items():
+        table_id = reference(table)
+        table_ids.append((table_id,))
+        for number, (label, kind) in enumerate(schema, 1):
+            columns.append((table_id, number + 0x8000, reference(label), kind + 0x8000))
+        values = []
+        widths = [2 if kind & 0x800 else kind & 255 for _, kind in schema]
+        for record in records[table]:
+            values.append([reference(value) if kind & 0x800 else (value + (1 << (width * 8 - 1)))
+                           for value, (_, kind), width in zip(record, schema, widths)])
+        streams[table] = column_bytes(values, widths)
+    streams["_Tables"] = column_bytes(table_ids, [2])
+    streams["_Columns"] = column_bytes(columns, [2, 2, 2, 2])
+    streams["_StringPool"] = struct.pack("<HH", 1252, 0) + b"".join(
+        struct.pack("<HH", len(value), 1) for value in strings
+    )
+    streams["_StringData"] = b"".join(strings)
+    template = (architecture + ";1033\0").encode()
+    value = struct.pack("<II", 30, len(template)) + template
+    value += b"\0" * (-len(value) % 4)
+    section = struct.pack("<8I", 48 + len(value), 3, 1, 32, 7, 40, 15, 40 + len(value))
+    section += struct.pack("<IhH", 2, 1252, 0) + value + struct.pack("<II", 3, 10)
+    summary = struct.pack("<HHI16sI", 0xfffe, 0, 0, b"\0" * 16, 1)
+    summary += uuid.UUID("F29F85E0-4FF9-1068-AB91-08002B27B3D9").bytes_le + struct.pack("<I", 48) + section
+    streams["\x05SummaryInformation"] = summary if summary_override is None else summary_override
+    if cabinet is None:
+        cabinet = mszip_cabinet(alias_offset=40000 if pending else None)
+    streams["product.cab"] = cabinet
+    return compound_msi(streams)
+
+
+def summary_properties(properties):
+    """Build a property catalog with caller-supplied typed payloads."""
+    start = 8 + len(properties) * 8
+    catalog = bytearray()
+    payload = bytearray()
+    for identifier, value in properties:
+        catalog.extend(struct.pack("<II", identifier, start + len(payload)))
+        payload.extend(value)
+        payload.extend(b"\0" * (-len(payload) % 4))
+    section = struct.pack("<II", start + len(payload), len(properties)) + catalog + payload
+    header = struct.pack("<HHI16sI", 0xfffe, 0, 0, b"\0" * 16, 1)
+    header += uuid.UUID("F29F85E0-4FF9-1068-AB91-08002B27B3D9").bytes_le + struct.pack("<I", 48)
+    return header + section
+
+
+def directory_msi(*, count=8, sectors=None, nested=False, cycle=False, fat_count=1):
+    """Allocation-only CFB fixture for rejection before third-party parsing."""
+    end, free = 0xfffffffe, 0xffffffff
+    sectors = (count + 3) // 4 if sectors is None else sectors
+    assert count <= sectors * 4 and fat_count + sectors < 127 and fat_count <= 110
+    header = bytearray(512)
+    header[:8] = bytes.fromhex("d0cf11e0a1b11ae1")
+    struct.pack_into("<5H", header, 24, 0x3e, 3, 0xfffe, 9, 6)
+    difat_count = 1 if fat_count > 109 else 0
+    first_difat = fat_count + sectors if difat_count else end
+    struct.pack_into("<9I", header, 40, 0, fat_count, fat_count, 0, 4096, end, 0, first_difat, difat_count)
+    references = list(range(min(fat_count, 109)))
+    struct.pack_into("<109I", header, 76, *references, *([free] * (109 - len(references))))
+    fat = [free] * 128
+    fat[:fat_count] = [0xfffffffd] * fat_count
+    for index in range(fat_count, fat_count + sectors):
+        fat[index] = index + 1 if index + 1 < fat_count + sectors else end
+    if difat_count:
+        fat[first_difat] = 0xfffffffc
+    directory = bytearray(sectors * 512)
+    for index in range(count):
+        offset = index * 128
+        name = (f"node{index}\0").encode("utf-16le")
+        directory[offset:offset + len(name)] = name
+        following = index + 1 if index + 1 < count else (1 if cycle else free)
+        child = following if nested or index == 0 else free
+        right = free if nested or index == 0 else following
+        struct.pack_into("<HBBIII", directory, offset + 64, len(name), 5 if index == 0 else 1,
+                         1, free, right, child)
+        struct.pack_into("<IQ", directory, offset + 116, end, 0)
+    allocation = struct.pack("<128I", *fat) + struct.pack("<128I", *([free] * 128)) * (fat_count - 1)
+    difat = struct.pack("<128I", 109, *([free] * 126), end) if difat_count else b""
+    return bytes(header) + allocation + directory + difat
+
+
+def compound_msi(streams):
+    """Pack a small mixed mini/regular-stream MSI in a single-FAT CFB file."""
+    end, free, fat = 0xfffffffe, 0xffffffff, 0xfffffffd
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
+
+    def encoded(name):
+        if name.startswith("\x05"):
+            return name
+        result = "" if name == "product.cab" else "\u4840"
+        for offset in range(0, len(name), 2):
+            first = alphabet.index(name[offset])
+            if offset + 1 < len(name):
+                result += chr(0x3800 + first + 64 * alphabet.index(name[offset + 1]))
+            else:
+                result += chr(0x4800 + first)
+        return result
+
+    directory_sectors = (len(streams) + 4) // 4
+    directory = bytearray(directory_sectors * 512)
+    mini_fat = [free] * 128
+    mini_data = bytearray()
+    regular = []
+    entries = []
+    for name, content in streams.items():
+        if len(content) < 4096:
+            first = len(mini_data) // 64
+            count = (len(content) + 63) // 64
+            for index in range(first, first + count):
+                mini_fat[index] = index + 1 if index + 1 < first + count else end
+            mini_data.extend(content.ljust(count * 64, b"\0"))
+            entries.append((encoded(name), first, len(content)))
+        else:
+            entries.append((encoded(name), None, len(content)))
+            regular.append((len(entries) - 1, content))
+    mini_start = 2 + directory_sectors
+    mini_count = (len(mini_data) + 511) // 512
+    data = bytearray(mini_data.ljust(mini_count * 512, b"\0"))
+    fat_entries = [free] * 128
+    fat_entries[0] = fat
+
+    def chain(first, count):
+        for index in range(first, first + count):
+            fat_entries[index] = index + 1 if index + 1 < first + count else end
+
+    chain(1, directory_sectors)
+    fat_entries[1 + directory_sectors] = end
+    chain(mini_start, mini_count)
+    for entry_index, content in regular:
+        first = mini_start + len(data) // 512
+        count = (len(content) + 511) // 512
+        chain(first, count)
+        name, _, size = entries[entry_index]
+        entries[entry_index] = name, first, size
+        data.extend(content.ljust(count * 512, b"\0"))
+
+    def entry(index, name, kind, first, size, right=free, child=free):
+        raw = bytearray(128)
+        text = (name + "\0").encode("utf-16le")
+        raw[:len(text)] = text
+        struct.pack_into("<HBBIII", raw, 64, len(text), kind, 1, free, right, child)
+        if index == 0:
+            raw[80:96] = uuid.UUID("000C1084-0000-0000-C000-000000000046").bytes_le
+        struct.pack_into("<IQ", raw, 116, first, size)
+        directory[index * 128:(index + 1) * 128] = raw
+
+    entry(0, "Root Entry", 5, mini_start, len(mini_data), child=1)
+    for index, (name, first, size) in enumerate(entries, 1):
+        entry(index, name, 2, first, size, right=index + 1 if index < len(entries) else free)
+    header = bytearray(512)
+    header[:8] = bytes.fromhex("d0cf11e0a1b11ae1")
+    struct.pack_into("<HHHHH", header, 24, 0x3e, 3, 0xfffe, 9, 6)
+    struct.pack_into("<9I", header, 40, 0, 1, 1, 0, 4096, 1 + directory_sectors, 1, end, 0)
+    struct.pack_into("<109I", header, 76, 0, *([free] * 108))
+    return bytes(header) + struct.pack("<128I", *fat_entries) + directory + struct.pack("<128I", *mini_fat) + data

@@ -163,28 +163,16 @@ def get_winebin_code_and_desc(app: App, binary) -> Tuple[str, str | None]:
     """
     # Set binary code, description, and path based on path
     codes = {
-        "Recommended": "Use the recommended AppImage",
+        "Recommended": "Use the current released Wine development version from an available provider",
         "AppImage": "AppImage of Wine64",
-        "System": (
-            "Use the system binary (i.e., /usr/bin/wine64). "
-            "WINE must be 7.18-staging or later, or 8.16-devel or later, and cannot be version 8.0."
-        ),
+        "System": "Use an installed system Wine binary that meets the configured product requirements.",
         "Proton": "Install using the Steam Proton fork of WINE.",
         "PlayOnLinux": "Install using a PlayOnLinux WINE64 binary.",
         "Custom": "Use a WINE64 binary from another directory.",
     }
-    # TODO: The GUI currently cannot distinguish between the recommended
-    # AppImage and another on the system. We need to add some manner of making
-    # this distinction in the GUI, which is why the wine binary codes exist.
-    # Currently the GUI only accept an array with a single element, the binary
-    # itself; this will need to be modified to a two variable array, at the
-    # least, even if we hide the wine binary code, but it might be useful to
-    # tell the GUI user that a particular AppImage/binary is recommended.
-    # Below is my best guess for how to do this with the single element array…
-    # Does it work?
     if isinstance(binary, Path):
         binary = str(binary)
-    if binary == f"{app.conf.installer_binary_dir}/{app.conf.wine_appimage_recommended_file_name}":
+    if binary == constants.WINE_RECOMMENDED_SIGIL:
         code = "Recommended"
     elif binary.lower().endswith('.appimage'):
         code = "AppImage"
@@ -212,7 +200,6 @@ def get_wine_options(app: App) -> List[str]:
     os_name, _ = system.get_os()
     if os_name != "alpine":
         wine_binary_options.append(constants.WINE_RECOMMENDED_SIGIL)
-        wine_binary_options.append(constants.WINE_BETA_SIGIL)
         wine_binary_options.extend(appimages)
 
     sorted_binaries = sorted(list(set(binaries)))
@@ -221,6 +208,38 @@ def get_wine_options(app: App) -> List[str]:
     wine_binary_options.extend(sorted_binaries)
     logging.debug(f"{wine_binary_options=}")
     return wine_binary_options
+
+
+def current_native_wine(app: App, target):
+    """Prefer an exact installed target without installing or changing its files."""
+    from . import artifacts
+
+    for candidate in app.conf.wine_binary_files:
+        app.checkpoint()
+        try:
+            selected = wine.native_launcher(candidate)
+            server = str(Path(selected).parent / "wineserver")
+            override = getattr(app.conf._overrides, "wineserver_binary", None)
+            if isinstance(override, str):
+                server = app.conf._absolute_from_install_dir(override)
+
+            files = (Path(selected), Path(server))
+            before = [(path.resolve(strict=True), artifacts.regular_hash(path.resolve(strict=True))) for path in files]
+            facts, _ = wine.get_wine_release(selected)
+            if facts is None or facts.version != Version(target.version):
+                continue
+            compatible, _ = wine.check_wine_version_and_branch(
+                app.conf.faithlife_product_release, selected, app.conf.faithlife_product_version, server=server,
+            )
+            after = [(path.resolve(strict=True), artifacts.regular_hash(path.resolve(strict=True))) for path in files]
+            if not compatible or before != after:
+                continue
+            logging.info("Current installed native Wine %s: %s SHA256 %s, %s SHA256 %s",
+                         target.version, selected, before[0][1], server, before[1][1])
+            return selected
+        except (OSError, ValueError, artifacts.ArtifactError, maintenance.MaintenanceError) as error:
+            logging.info("Cannot recommend native Wine candidate %s: %s", candidate, error)
+    return None
 
 
 # FIXME: This function is not used and should probably be removed.
@@ -334,7 +353,7 @@ def compare_recommended_appimage_version(app: App):
         return -1, str(error)
     wine_release, error_message = wine.get_wine_release(wine_exe_path)
     if wine_release is not None and wine_release is not False:
-        current_version = Version(f"{wine_release.major}.{wine_release.minor}")
+        current_version = wine_release.version
         logging.debug(f"Current wine release: {current_version}")
 
         try:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, control, installer, maintenance, network, paths, utils, wine
+from ou_dedetai import constants, control, installer, maintenance, network, paths, releases, utils, wine
 from ou_dedetai.config import PersistentConfiguration
 
 
@@ -266,10 +266,16 @@ class TestUninstallBoundaries(unittest.TestCase):
         config = fixture_config(self.install)
         config._overrides.config_path = str(self.config)
         config._network = Mock()
-        config._network.wine_appimage_versions.return_value = network.GithubSoftwareReleasesInfo(
-            network.SoftwareReleaseInfo("1", "https://example.invalid/stable.AppImage", name="stable.AppImage"), None,
+        target = releases.WineTarget("11.20", "devel", "a" * 40)
+        filename = "wine-devel_11.20-x86_64.AppImage"
+        selected = network.SoftwareReleaseInfo("11.20", f"https://example.invalid/{filename}", name=filename)
+        config._network.wine_release_target.return_value = releases.WineTargetLookup(target, "ok")
+        config._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
+        config._network.wine_appimage_versions.side_effect = AssertionError(
+            "Reinstallation must use the exact published target, not the old provider catalog",
         )
         self.app.conf = config
+        config.app = self.app
         self.assertEqual(config.download_dir, str(self.cache))
         config._wine_user = "stale-user"
         control.uninstall(self.app)
@@ -279,9 +285,7 @@ class TestUninstallBoundaries(unittest.TestCase):
         config._raw = PersistentConfiguration(
             install_dir=str(self.install), faithlife_product="Logos", faithlife_product_version="10",
         )
-        config.wine_binary = constants.WINE_RECOMMENDED_SIGIL
-
-        def transfer(url, filename, directory, **kwargs):
+        def transfer(url, filename, directory, app, **kwargs):
             from ou_dedetai import artifacts
             from tests.artifact_fixtures import appimage
 
@@ -293,14 +297,23 @@ class TestUninstallBoundaries(unittest.TestCase):
             patch.object(installer, "ensure_sys_deps"),
             patch.object(installer, "check_system_compatibility"),
             patch.object(wine, "require_compatible"),
-            patch.object(installer.network, "logos_reuse_download", side_effect=transfer),
+            patch.object(utils, "current_native_wine", return_value=None),
+            patch.object(installer.network, "logos_reuse_download", side_effect=transfer) as acquire,
         ):
             self.app.installer_step = self.app.installer_step_count = 0
             self.app.checkpoint = Mock()
+            self.app._config_updated_event.reset_mock()
+            config.wine_binary = constants.WINE_RECOMMENDED_SIGIL
             installer.ensure_appimage_download(self.app)
         from tests.artifact_fixtures import appimage
 
-        self.assertEqual((self.cache / "stable.AppImage").read_bytes(), appimage())
+        acquire.assert_called_once_with(selected.download_url, selected.name, config.installer_binary_dir,
+                                        self.app, kind="appimage", digest=selected.digest, size=selected.size)
+        self.assertIs(self.app.conf, config)
+        self.app._config_updated_event.set.assert_called()
+        self.assertEqual((self.cache / filename).read_bytes(), appimage())
+        self.assertEqual(Path(config.wine_binary).name, filename)
+        config._network.wine_appimage_versions.assert_not_called()
         paths.validate_cache_directory(self.cache, self.base, require_marker=True)
 
     def test_failed_removal_preserves_replacement_and_exposes_recovery_tree(self):

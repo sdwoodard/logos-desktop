@@ -18,6 +18,7 @@ from . import wine
 # Linux comm exposes at most 15 bytes of a Windows executable's process name.
 INDEXER_PROCESS_NAMES = {"logosindexer.exe", "verbumindexer.exe"}
 INDEXER_PROCESS_NAMES |= {name[:15] for name in INDEXER_PROCESS_NAMES}
+_CURRENT_POLICY_TARGET = object()
 
 
 class State(Enum):
@@ -35,6 +36,15 @@ class RunResult:
 
 
 @dataclass
+class RunPolicies:
+    configuration: object
+    target: tuple[Path, str] | None = None
+    paths: tuple[Path, ...] = ()
+    pending: bool = True
+    error: str = ""
+
+
+@dataclass
 class ManagedRun:
     context: maintenance.Context
     process: subprocess.Popen
@@ -46,6 +56,7 @@ class ManagedRun:
     members: dict = field(default_factory=dict)
     direct_worker: bool = False
     result: RunResult | None = None
+    policies: RunPolicies | None = None
 
 
 class LogosManager:
@@ -80,9 +91,14 @@ class LogosManager:
                 raise maintenance.MaintenanceBusy("Controller is closing")
             if self._monitor_thread is not None and self._monitor_thread.is_alive():
                 return
+            self._next_scan = 0
 
             def observe():
-                while not self._closed.wait(1):
+                while True:
+                    # Wake at the scan deadline without delaying explicit transitions.
+                    delay = min(1, max(0, self._next_scan - time.monotonic()))
+                    if self._closed.wait(delay):
+                        return
                     try:
                         self.monitor()
                     except Exception:
@@ -135,22 +151,28 @@ class LogosManager:
             self._watcher_stopping = False
 
     @maintenance.uses_owner
-    def _watch_database(self, path, sql):
+    def _watch_database(self, path, sql, *, wait_ready=True):
         path = Path(path).resolve()
         with self._watcher_lock:
-            if self._closed.is_set() or self._watcher_stopping:
+            if (self._closed.is_set() or self._watcher_stopping
+                    or getattr(self.app, "_closing", self._closed).is_set()):
                 raise maintenance.MaintenanceBusy("Controller is closing")
             old = self._watchers.get(path)
             if old and old[1].is_alive():
                 if self._watcher_policies.get(path) != tuple(sql):
                     raise maintenance.MaintenanceBusy("Stop the current database policy before replacing it")
-                return
-            stop = threading.Event()
-            health = database.WatcherHealth()
-            thread = maintenance.spawn(self.app, database.watch_db, str(path), sql, stop, health)
-            self._watchers[path] = (stop, thread)
-            self._watcher_policies[path] = tuple(sql)
-            self._watcher_health[path] = health
+                stop, thread = old
+                health = self._watcher_health[path]
+            else:
+                stop = threading.Event()
+                previous = self._watcher_health.get(path)
+                health = database.WatcherHealth(error=previous.error if previous else "")
+                thread = maintenance.spawn(self.app, database.watch_db, str(path), sql, stop, health)
+                self._watchers[path] = (stop, thread)
+                self._watcher_policies[path] = tuple(sql)
+                self._watcher_health[path] = health
+        if not wait_ready:
+            return path
         deadline = time.monotonic() + 3
         while not health.ready.wait(0.1):
             if self._closed.is_set() or time.monotonic() >= deadline:
@@ -158,6 +180,154 @@ class LogosManager:
                 raise maintenance.MaintenanceBusy("Database protection was not ready. Launch cancelled")
         if health.error:
             raise maintenance.MaintenanceError(f"Database protection failed: {health.error}")
+        if not thread.is_alive():
+            raise maintenance.MaintenanceError("Database protection worker stopped before launch")
+        return path
+
+    def _policy_target(self, configuration):
+        directory = configuration._logos_appdata_dir
+        if directory is None:
+            return None
+        context = maintenance.Context.from_app(self.app, prompt=False)
+        try:
+            root = Path(directory).resolve()
+            data = root / "Data"
+            if (context.product not in ("Logos", "Verbum")
+                    or not root.is_relative_to(context.prefix)
+                    or not data.resolve().is_relative_to(context.prefix)):
+                raise maintenance.MaintenanceError("Database protection needs the selected installation's data")
+            identities = [path for path in data.iterdir() if path.is_dir()]
+            if len(identities) > 1 or (identities and identities[0].resolve().parent != data.resolve()):
+                raise maintenance.MaintenanceError("Database protection cannot select between data folders")
+        except FileNotFoundError:
+            return None
+        except maintenance.MaintenanceError:
+            raise
+        except (OSError, RuntimeError):
+            raise maintenance.MaintenanceError(
+                "Database protection could not inspect the selected data folders",
+            ) from None
+        if not identities:
+            return None
+        return root, identities[0].name
+
+    def _policy_paths(self, target):
+        if target is None:
+            return ()
+        root, identity = target
+        try:
+            paths = ((root / "Data" / identity / "UpdateManager/Updates.db").resolve(),
+                     (root / "Documents" / identity / "LocalUserPreferences/PreferencesManager.db").resolve())
+        except (OSError, RuntimeError):
+            raise maintenance.MaintenanceError(
+                "Database protection could not inspect the selected database paths",
+            ) from None
+        prefix = maintenance.Context.from_app(self.app, prompt=False).prefix
+        if any(not path.is_relative_to(prefix) for path in paths):
+            raise maintenance.MaintenanceError("Database protection path is outside the selected installation")
+        return paths
+
+    def _policies_ready(self, policies):
+        statements = self._policy_statements(False)
+        return len(policies.paths) == 2 and all(
+            path in self._watchers and self._watchers[path][1].is_alive()
+            and self._watcher_health[path].ready.is_set() and not self._watcher_health[path].error
+            and self._watcher_policies[path] == tuple(sql)
+            for path, sql in zip(policies.paths, statements, strict=True))
+
+    def _policy_status(self):
+        run = self._runs.get("logos")
+        if run is None or run.policies is None:
+            return ""
+        policies = run.policies
+        try:
+            current = (self.app.conf is policies.configuration
+                       and maintenance.Context.from_app(self.app, prompt=False) == run.context)
+        except maintenance.MaintenanceError:
+            current = False
+        if not current:
+            return "Database protection paused. Installation selection changed"
+        if policies.error:
+            return policies.error
+        if policies.pending or not self._policies_ready(policies):
+            return "Database protection pending. Waiting for application data"
+        return ""
+
+    def _policy_run_current(self, run, policies):
+        if (self._closed.is_set() or getattr(self.app, "_closing", self._closed).is_set()
+                or self.app.logos is not self
+                or self._runs.get("logos") is not run or run.policies is not policies
+                or self.app.conf is not policies.configuration or run.stopped
+                or run.empty_since is not None or self.logos_state != State.RUNNING):
+            return False
+        try:
+            current_context = maintenance.Context.from_app(self.app, prompt=False)
+        except maintenance.MaintenanceError:
+            return False
+        if current_context != run.context:
+            return False
+        return run.process.poll() is None or any(
+            self._exclusive_member(process, "logos", run.context) for process in run.members.values())
+
+    def _attach_run_policies(self):
+        # Profile selection holds this lock while joining the observer. Never
+        # acquire it while holding _transition, even for the initial run lookup.
+        run = self._runs.get("logos")
+        profile_lock = getattr(self.app, "_profile_lock", None)
+        if run is None or run.policies is None or profile_lock is None:
+            return
+        if not profile_lock.acquire(blocking=False):
+            return
+        try:
+            with self._transition:
+                run = self._runs.get("logos")
+                policies = run.policies if run is not None else None
+                if policies is None or not self._policy_run_current(run, policies):
+                    return
+            preparation_error = ""
+            try:
+                target = self._policy_target(policies.configuration)
+                paths = self._policy_paths(target)
+                available = [path.parent.is_dir() and path.is_file() for path in paths]
+            except (OSError, RuntimeError):
+                preparation_error = "Database protection could not identify the selected data folders"
+
+            with self._transition:
+                if not self._policy_run_current(run, policies):
+                    return
+                was_pending = policies.pending
+                policies.pending = True
+                try:
+                    if self._watcher_stopping:
+                        self.stop_watchers(timeout=0)
+                    if preparation_error:
+                        self.stop_watchers(timeout=0)
+                        policies.error = preparation_error
+                        return
+                    current_target = self._policy_target(policies.configuration)
+                    if current_target != target or self._policy_paths(current_target) != paths:
+                        self.stop_watchers(timeout=0)
+                        policies.error = "Application data changed. Retrying database protection"
+                        return
+                    if (not was_pending and target == policies.target and paths == policies.paths and all(available)
+                            and self._policies_ready(policies)):
+                        policies.pending, policies.error = False, ""
+                        return
+                    if policies.target != target or policies.paths != paths:
+                        self.stop_watchers(timeout=0)
+                        policies.target, policies.paths, policies.error = target, paths, ""
+                    if target is None:
+                        return
+                    for path, sql, exists in zip(paths, self._policy_statements(False), available, strict=True):
+                        if exists:
+                            self._watch_database(path, sql, wait_ready=False)
+                    policies.pending = not all(available) or not self._policies_ready(policies)
+                    if not policies.pending:
+                        policies.error = ""
+                except (OSError, RuntimeError):
+                    policies.error = "Database protection could not attach. Retrying"
+        finally:
+            profile_lock.release()
 
     def get_logos_pids(self, context=None):
         context = context or maintenance.Context.from_app(self.app, prompt=False)
@@ -165,7 +335,26 @@ class LogosManager:
         expected = (conf.logos_exe, conf.logos_system_exe_windows_path,
                     conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path)
         groups = {exe: [] for exe in expected if exe}
-        snapshot = list(psutil.process_iter(["pid", "ppid", "name", "cmdline", "uids"]))
+        snapshot = []
+        current_uid = os.geteuid()
+        for process in psutil.process_iter():
+            try:
+                with process.oneshot():
+                    # Unknown classification must still reach strict identity checks.
+                    try:
+                        if process.uids().real != current_uid:
+                            continue
+                    except psutil.AccessDenied:
+                        pass
+                    try:
+                        if process.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                            continue
+                    except psutil.AccessDenied:
+                        pass
+                    process.info = process.as_dict(attrs=["pid", "ppid", "cmdline"])
+                snapshot.append(process)
+            except psutil.NoSuchProcess:
+                continue
         for process in snapshot:
             command = process.info.get("cmdline") or []
             matches = set(groups).intersection(command)
@@ -270,9 +459,14 @@ class LogosManager:
     def monitor(self):
         notifications = []
         with self._transition:
-            if self._closed.is_set() or time.monotonic() < self._next_scan:
+            now = time.monotonic()
+            if self._closed.is_set() or (self._context is not None and now < self._next_scan):
                 return
-            self._next_scan = time.monotonic() + 1
+            self._next_scan = now + 1
+            before_states = self.logos_state, self.indexing_state
+            before_runs = dict(self._runs)
+            had_error = bool(self.enforcement_error)
+            was_settling = any(run.empty_since is not None for run in self._runs.values())
             if not self.app.is_installed() and not self._runs:
                 return
             self.get_logos_pids()
@@ -308,11 +502,30 @@ class LogosManager:
             login_notice = self.monitor_for_potential_issues()
             if login_notice:
                 notifications.append((login_notice, None))
-            error = next((health.error for health in self._watcher_health.values() if health.error), "")
+        self._attach_run_policies()
+        with self._transition:
+            if self._closed.is_set():
+                return
+            error = (next((health.error for health in self._watcher_health.values() if health.error), "")
+                     or self._policy_status())
             if error != self.enforcement_error:
                 self.enforcement_error = error
                 message = f"Database protection unavailable: {error}" if error else "Database protection restored"
                 notifications.append((message, 0))
+            states = self.logos_state, self.indexing_state
+            steady = (states == before_states and not had_error and not self.enforcement_error
+                      and not was_settling
+                      and len(before_runs) == len(self._runs)
+                      and all(self._runs.get(role) is run for role, run in before_runs.items())
+                      and not any(run.empty_since is not None for run in self._runs.values()))
+            if steady and not self._runs and states == (State.STOPPED, State.STOPPED):
+                # External starts appear at the next idle scan, up to five seconds later.
+                self._next_scan = now + 5
+            elif (steady and State.RUNNING in states
+                  and all(state in (State.STOPPED, State.RUNNING) for state in states)
+                  and getattr(self, "_published_state", None) == (*states, "")):
+                # Keep transitions fast, then observe healthy running roles every four seconds.
+                self._next_scan = now + 4
         for message, percent in notifications:
             observe = getattr(self.app, "observe_manager", None)
             if observe is not None:
@@ -329,13 +542,13 @@ class LogosManager:
     def monitor_for_potential_issues(self):
         """Check login from the owned observer without creating a per-launch worker."""
         run = self._runs.get("logos")
-        if run is None or self._login_checked or self._login_notice:
+        if run is None or self._login_checked:
             return
         directory = self.app.conf._logos_appdata_dir
         if directory is None:
             return
         self._login_checked = get_logos_user_id(directory) is not None
-        if not self._login_checked and time.monotonic() - run.started > 105:
+        if not self._login_checked and not self._login_notice and time.monotonic() - run.started > 105:
             self._login_notice = True
             return f"Trouble signing in? Use Get Support in {constants.APP_NAME} for browser handoff help"
 
@@ -348,6 +561,7 @@ class LogosManager:
         with self._transition:
             if self._closed.is_set():
                 raise maintenance.MaintenanceBusy("Controller is closing")
+            self._next_scan = 0
             attribute = "logos_state" if role == "logos" else "indexing_state"
             if role in self._runs or getattr(self, attribute) != State.STOPPED:
                 raise maintenance.MaintenanceBusy("The requested program is already starting or running")
@@ -369,6 +583,7 @@ class LogosManager:
 
     def _launch(self, role, lease):
         context = lease.context
+        configuration = self.app.conf
         try:
             from . import repair
 
@@ -387,10 +602,19 @@ class LogosManager:
             exe = self.app.conf.logos_exe if role == "logos" else self.app.conf.logos_indexer_exe_windows_path
             if not exe:
                 raise ValueError("Could not find the installed program")
+            target, paths = None, ()
             if role == "logos":
-                self.prevent_logos_updates()
-                self.set_auto_updates(False)
-            if self._closed.is_set():
+                target = self._policy_target(configuration)
+                paths = self._policy_paths(target)
+                self.prevent_logos_updates(target=target)
+                self.set_auto_updates(False, target=target)
+                if target is not None and not self._policies_ready(RunPolicies(configuration, target, paths)):
+                    raise maintenance.MaintenanceError("Database protection did not stay ready before launch")
+                if self._policy_target(configuration) != target or self._policy_paths(target) != paths:
+                    raise maintenance.MaintenanceBusy("Application data changed before launch. Retry Start")
+            if (self._closed.is_set() or getattr(self.app, "_closing", self._closed).is_set()
+                    or self.app.conf is not configuration
+                    or maintenance.Context.from_app(self.app, prompt=False) != context):
                 raise maintenance.MaintenanceBusy("Launch cancelled because the controller is closing")
             process = wine.run_wine_application(
                 self.app,
@@ -401,6 +625,9 @@ class LogosManager:
                 raise maintenance.MaintenanceError("Wine did not start Logos")
             self.processes[exe] = process
             run = self._runs[role] = ManagedRun(context, process, lease)
+            if role == "logos":
+                run.policies = RunPolicies(configuration, target, paths, pending=target is None)
+                self.enforcement_error = self._policy_status()
             try:
                 parent = psutil.Process(process.pid)
                 pending = [parent]
@@ -414,23 +641,12 @@ class LogosManager:
         except BaseException:
             lease.close()
             raise
-        self._login_checked = self._login_notice = False
+        if role == "logos":
+            self._login_checked = self._login_notice = False
 
-    # For now enforce this all the time, ideally we wouldn't override the user's choice
-    # But risks as they are, setting it to false is safer for now.
-    # Feel free to revisit when there is less chances of it breaking an install
-    @maintenance.uses_owner
-    def set_auto_updates(self, val: bool):
-        """Edits Logos' internal db entry corresponding to the option in:
-        Program Settings -> Internet -> Automatically Download New Resources
-        """
-        if self.app.conf._logos_appdata_dir is None:
-            return
-        logos_appdata_dir = Path(self.app.conf._logos_appdata_dir)
-        logos_user_id = self.app.conf._logos_user_id
-        if not logos_user_id:
-            return None
-        db_path = logos_appdata_dir / "Documents" / logos_user_id / "LocalUserPreferences" / "PreferencesManager.db" 
+    @staticmethod
+    def _policy_statements(val):
+        """Keep SQL policy separate from the run's pinned database paths."""
         sql = (
             """UPDATE Preferences SET Data='<data """ +
             ('OptIn="true"' if val else 'OptIn="false"') +
@@ -440,42 +656,37 @@ class LogosManager:
         desired = ('<data ' + ('OptIn="true"' if val else 'OptIn="false"')
                    + ' StartDownloadHour="0" StopDownloadHour="0" MarkNewResourcesAsCloud="true" />')
         sql += " AND Data IS NOT '" + desired + "'"
-        self._watch_database(db_path, [sql])
-
-    @maintenance.uses_owner
-    def prevent_logos_updates(self):
-        """Edits Logos' internal database to remove pending installers
-        before it has a chance to apply them
-        """
-        if self.app.conf._logos_appdata_dir is None:
-            return
-        logos_appdata_dir = Path(self.app.conf._logos_appdata_dir)
-        logos_user_id = self.app.conf._logos_user_id
-        if logos_user_id is None:
-            return None
-        db_path = logos_appdata_dir / "Data" / logos_user_id / "UpdateManager" / "Updates.db"
-        # FIXME: I wonder if we can use the result of these deletion using RETURNING
-        # Then we could notify the user that there are updates.
-        # If we do that we'd have to consider if their other resources are up to date
-        # AND if their library is index and their library is prepared.
-        # Logos probably should be off for this
-        sql = [
-            # "DELETE FROM Installers WHERE 1",
-            # Cleanup the Update Ids that are associated with an application update
+        application = [
             "DELETE FROM UpdateUrls WHERE UpdateId IN " +
                 "(SELECT UpdateId FROM Updates WHERE Source='Application Update')",
-            # Cleanup database relations and removes Application Updates
-            # Fixes corrupt DBs caused by an earlier
-            # version of the software #275
-            # If we don't do this, the application will crash when it tries to update.
+            # Preserve the existing orphan-relation repair from upstream issue #275.
             "DELETE FROM Updates WHERE UpdateId NOT IN "+
                 "(SELECT UpdateId FROM UpdateUrls) OR "+
                 "Source='Application Update'",
-            # Also remove any UpdateId references that don't exist
             "UPDATE Resources SET Status=1, UpdateId=NULL WHERE UpdateId IS NOT NULL "+
                 "AND UpdateId NOT IN (SELECT UpdateId FROM Updates)"
         ]
-        self._watch_database(db_path, sql)
+        return application, [sql]
+
+    @maintenance.uses_owner
+    def set_auto_updates(self, val: bool, *, target=_CURRENT_POLICY_TARGET, wait_ready=True):
+        """Enforce the existing automatic new-resource download preference."""
+        if target is _CURRENT_POLICY_TARGET:
+            target = self._policy_target(self.app.conf)
+        if target is None:
+            return
+        return self._watch_database(self._policy_paths(target)[1], self._policy_statements(val)[1],
+                                    wait_ready=wait_ready)
+
+    @maintenance.uses_owner
+    def prevent_logos_updates(self, *, target=_CURRENT_POLICY_TARGET, wait_ready=True):
+        """Remove pending application updates using the existing repair policy."""
+        if target is _CURRENT_POLICY_TARGET:
+            target = self._policy_target(self.app.conf)
+        if target is None:
+            return
+        return self._watch_database(self._policy_paths(target)[0], self._policy_statements(False)[0],
+                                    wait_ready=wait_ready)
 
     # Also noticed if the database Data/*/CloudResourceManager/CloudResources.db 
     # table TransitionStates has a ResourceId that isn't registered in UpdateManager,
@@ -490,6 +701,7 @@ class LogosManager:
 
     def _stop(self, *, index_only):
         with self._transition:
+            self._next_scan = 0
             context = maintenance.Context.from_app(self.app, prompt=False)
             roles = ("index",) if index_only else ("logos", "index")
             attributes = ["indexing_state" if role == "index" else "logos_state" for role in roles]

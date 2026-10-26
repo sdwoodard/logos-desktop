@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 from packaging.version import Version
 
-from . import artifacts, constants
+from . import artifacts, compatibility, constants
 
 
 WINE_REPOSITORY = "FaithLife-Community/wine-appimages"
@@ -20,6 +20,94 @@ SEMVER = re.compile(r"v?(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?(?:\+[0-9A-Za-
 WINE_TAG = re.compile(r"(\d+\.\d+(?:\.\d+)?(?:-rc\d+)?)-(stable|staging|devel)\Z")
 ICU_TAG = re.compile(r"\d+\.\d+(?:-custom(?:\+\d+)?)?\Z")
 CACHE_SCHEMA = 1
+WINE_SOURCE_API = "https://api.github.com/repos/wine-mirror/wine"
+WINE_SOURCE_RAW = "https://raw.githubusercontent.com/wine-mirror/wine"
+WINE_SOURCE_POLICY = "wine-source-1"
+WINE_RECOMMENDATION_POLICY = "Recommended Wine follows published development releases."
+
+
+@dataclass(frozen=True)
+class WineTarget:
+    version: str
+    channel: str
+    commit: str
+
+    def validate(self):
+        if (not all(isinstance(value, str) for value in (self.version, self.channel, self.commit))
+                or re.fullmatch(r"\d+\.\d+(?:\.\d+)*", self.version) is None):
+            raise ValueError("Wine target version must be numeric")
+        facts = compatibility.parse_wine_version(f"wine-{self.version}")
+        if facts.channel.value != self.channel or facts.rc is not None:
+            raise ValueError("Wine target must be a released stable or development version")
+        if re.fullmatch(r"[0-9a-f]{40}", self.commit) is None:
+            raise ValueError("Wine release commit is invalid")
+        return self
+
+
+@dataclass(frozen=True)
+class WineTargetLookup:
+    target: WineTarget | None = None
+    status: str = "unchecked"
+    message: str = "Wine release information has not been checked"
+    checked: float | None = None
+    stale: bool = False
+
+
+def fetch_wine_target(channel, request):
+    """Cross-check published Wine history on its GitHub mirror, without signature claims."""
+    branches = {"devel": "master", "stable": "stable"}
+    if channel not in branches:
+        raise artifacts.ArtifactError("Unknown Wine release channel")
+    try:
+        history = json.loads(request(
+            f"{WINE_SOURCE_API}/commits?sha={branches[channel]}&path=ANNOUNCE.md&per_page=100"
+        ))
+        if not isinstance(history, list) or len(history) > 100:
+            raise ValueError("Malformed Wine release history")
+        candidates = []
+        for item in history:
+            message = item["commit"]["message"]
+            match = re.fullmatch(r"Release (\d+\.\d+(?:\.\d+)*)\.", message)
+            if match is None:
+                continue
+            facts = compatibility.parse_wine_version(f"wine-{match[1]}")
+            if facts.channel.value == channel:
+                candidates.append(WineTarget(match[1], channel, item["sha"]))
+        if not candidates:
+            raise ValueError("No released Wine target in the bounded announcement history")
+        target = max(candidates, key=lambda value: Version(value.version)).validate()
+        if sum(Version(value.version) == Version(target.version) for value in candidates) != 1:
+            raise ValueError("Wine release commit is ambiguous")
+
+        version = request(f"{WINE_SOURCE_RAW}/{target.commit}/VERSION").decode("utf-8").strip()
+        if version != f"Wine version {target.version}":
+            raise ValueError("Wine release VERSION disagrees with its release commit")
+        announcement = request(f"{WINE_SOURCE_RAW}/{target.commit}/ANNOUNCE.md").decode("utf-8")
+        intro = " ".join(announcement[:1024].split())
+        number = re.escape(target.version)
+        wording = (rf"The Wine development release {number} is now available\." if channel == "devel"
+                   else rf"(?:stable|maintenance) release (?:Wine )?{number} is now available\.")
+        if re.search(wording, intro) is None:
+            raise ValueError("Wine announcement does not identify the published target")
+
+        tag = f"wine-{target.version}"
+        reference = json.loads(request(f"{WINE_SOURCE_API}/git/ref/tags/{tag}"))
+        if reference["ref"] != f"refs/tags/{tag}":
+            raise ValueError("Wine tag reference disagrees with the target")
+        identity = reference["object"]
+        if identity["type"] == "tag":
+            tag_sha = identity["sha"]
+            if re.fullmatch(r"[0-9a-f]{40}", tag_sha) is None:
+                raise ValueError("Invalid Wine annotated tag identity")
+            annotated = json.loads(request(f"{WINE_SOURCE_API}/git/tags/{tag_sha}"))
+            if annotated["sha"] != tag_sha or annotated["tag"] != tag:
+                raise ValueError("Wine annotated tag disagrees with the target")
+            identity = annotated["object"]
+        if identity["type"] != "commit" or identity["sha"] != target.commit:
+            raise ValueError("Wine tag does not point to its release commit")
+        return target
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise artifacts.ArtifactError(f"Invalid published Wine metadata: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -210,6 +298,50 @@ def fetch(repository, request):
         return GithubSoftwareReleasesInfo(None, None, "unavailable", str(error))
     except (ValueError, KeyError, TypeError) as error:
         raise artifacts.ArtifactError("Malformed release metadata") from error
+
+
+def fetch_wine_appimage(target, request):
+    """Resolve one published base version without treating GitHub flags as Wine channels."""
+    target.validate()
+    unavailable = f"Wine {target.channel} {target.version} is unavailable from {WINE_REPOSITORY}"
+    if platform.system() != "Linux" or platform.machine().lower() not in ("x86_64", "amd64"):
+        return GithubSoftwareReleasesInfo(None, None, "incompatible", "Only Linux x86_64 assets are supported")
+    try:
+        data = []
+        for page in range(1, 6):
+            batch = json.loads(request(
+                f"https://api.github.com/repos/{WINE_REPOSITORY}/releases?per_page=100&page={page}"
+            ))
+            if not isinstance(batch, list) or len(batch) > 100 or not all(isinstance(item, dict) for item in batch):
+                raise artifacts.ArtifactError("Malformed Wine provider releases")
+            data.extend(batch)
+            if len(batch) < 100:
+                break
+        else:
+            raise artifacts.ArtifactError("Wine provider scan exceeded its page budget")
+
+        for flavor in (target.channel, "staging"):
+            tag = f"{target.version}-{flavor}"
+            matches = []
+            for item in data:
+                if item.get("tag_name") != tag:
+                    continue
+                if type(item.get("draft")) is not bool or type(item.get("prerelease")) is not bool:
+                    raise artifacts.ArtifactError("Wine provider publication flags are malformed")
+                if not item["draft"]:
+                    matches.append(item)
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise artifacts.ArtifactError("Exact Wine provider release is ambiguous")
+            name = f"wine-{flavor}_{target.version}-x86_64.AppImage"
+            selected = _asset(matches[0], WINE_REPOSITORY, target.version, name)
+            return GithubSoftwareReleasesInfo(selected, None)
+        return GithubSoftwareReleasesInfo(None, None, "empty", unavailable)
+    except artifacts.MetadataError as error:
+        return GithubSoftwareReleasesInfo(None, None, error.status, str(error), error.retry_after)
+    except (artifacts.ArtifactError, ValueError, KeyError, TypeError) as error:
+        return GithubSoftwareReleasesInfo(None, None, "unavailable", str(error))
 
 
 def serialize(catalog):

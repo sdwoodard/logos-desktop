@@ -23,6 +23,11 @@ from ou_dedetai import constants, maintenance, network
 from ou_dedetai.app import App
 
 
+# Command-based distro fallbacks inherit the C environment from operation workers.
+# Linux release files provide identity without that implicit subprocess boundary.
+DISTRIBUTION = distro.LinuxDistribution(include_lsb=False, include_uname=False, include_oslevel=False)
+
+
 def fix_ld_library_path(env: Optional[MutableMapping[str, str]]) -> dict[str, str]:
     """Removes pyinstaller bundled dynamic linked libraries when executing commands
 
@@ -351,9 +356,9 @@ def get_os() -> Tuple[str, str]:
     """
     # FIXME: Not working? Returns "Linux" on some systems? On Ubuntu 24.04 it
     # correctly returns "ubuntu".
-    os_name = distro.id()
+    os_name = DISTRIBUTION.id()
     logging.info(f"OS name: {os_name}")
-    os_release = distro.version()
+    os_release = DISTRIBUTION.version()
     logging.info(f"OS release: {os_release}")
     return os_name, os_release
 
@@ -423,8 +428,8 @@ class PackageManager:
 
 
 def get_package_manager() -> PackageManager | None:
-    major_ver = distro.major_version()
-    os_name = distro.id()
+    major_ver = DISTRIBUTION.major_version()
+    os_name = DISTRIBUTION.id()
     logging.debug(f"{os_name=}; {major_ver=}")
     # Check for package manager and associated packages.
 
@@ -450,28 +455,18 @@ def get_package_manager() -> PackageManager | None:
             "mesa-utils "  # verify opengl version
         )
 
-        # Now set the appimage packages, this has changed over time
-        # NOTE: Package names changed together for Ubuntu 24+, Debian 13+, and
-        # derivatives. This does not include an exhaustive list of distros that
-        # use 'apt', so others will have to be added as users report issues.
-        # Ref:
-        # - https://askubuntu.com/a/445496
-        # - https://en.wikipedia.org/wiki/Linux_Mint
-        # - https://en.wikipedia.org/wiki/Elementary_OS
-        # - https://github.com/which-distro/os-release/tree/main
+        # FUSE 3 does not provide the libfuse.so.2 ABI used by older AppImage
+        # runtimes. The t64 rename retains that ABI on these newer releases.
+        # https://docs.appimage.org/user-guide/troubleshooting/fuse.html
+        apt_major = int(major_ver) if major_ver.isdecimal() else 0
         if (
-            (os_name == 'debian' and major_ver >= '13')
+            (os_name == 'debian' and apt_major >= 13)
+            or (os_name == 'ubuntu' and apt_major >= 24)
+            or (os_name == 'linuxmint' and apt_major >= 22)
+            or (os_name == 'elementary' and apt_major >= 8)
         ):
             packages += (
-                "libfuse3-4 "  # appimages
-            )
-        elif (
-            (os_name == 'ubuntu' and major_ver >= '24')
-            or (os_name == 'linuxmint' and major_ver >= '22')
-            or (os_name == 'elementary' and major_ver >= '8')
-        ):
-            packages += (
-                "libfuse3-3 "  # appimages
+                "libfuse2t64 "  # appimages
             )
         else:
             packages += (
@@ -698,7 +693,7 @@ def remove_appimagelauncher(app: App):
     executable = shutil.which("AppImageLauncher")
     if executable is None:
         return
-    if distro.id() == "steamos":
+    if DISTRIBUTION.id() == "steamos":
         raise maintenance.MaintenanceError(
             "Remove AppImageLauncher using SteamOS-supported system maintenance, then retry. "
             "Automatic SteamOS package changes are not validated"
@@ -786,7 +781,7 @@ def install_dependencies(app: App, target_version=10):
         return
 
     details = f"Install: {missing}\nRemove: {conflicts}"
-    if distro.id() == "steamos":
+    if DISTRIBUTION.id() == "steamos":
         raise maintenance.MaintenanceError(
             f"Automatic SteamOS package changes are not validated.\n{details}\n"
             "Use SteamOS-supported system maintenance to resolve these dependencies, then retry. "
@@ -845,34 +840,45 @@ def ensure_winetricks(
     script_spec = artifacts.ArtifactSpec(
         f"https://github.com/Winetricks/winetricks/{version}", "winetricks", "winetricks",
     )
+    default_release = version == constants.WINETRICKS_VERSION
+    if default_release:
+        script_spec = artifacts.ArtifactSpec(
+            f"https://raw.githubusercontent.com/Winetricks/winetricks/{version}/src/winetricks",
+            "winetricks", "winetricks",
+            artifacts.Digest("sha256", constants.WINETRICKS_SHA256, "official tagged script observed over HTTPS"),
+        )
     if winetricks_path.is_symlink():
         concrete = winetricks_path.resolve()
         if concrete.name == "winetricks" and concrete.parent.parent.name == script_spec.key:
             try:
-                return str(artifacts.installed(concrete, "winetricks").path)
+                installed = artifacts.installed(concrete, "winetricks")
+                if script_spec.digest is None or installed.sha256 == script_spec.digest.value:
+                    return str(installed.path)
             except (OSError, artifacts.ArtifactError):
                 pass
 
     # Otherwise download
     if status_messages:
         app.status(f"Installing winetricks v{version}…")
-    base_url = "https://codeload.github.com/Winetricks/winetricks/zip/refs/tags"
-    zip_name = f"{version}.zip"
-    accepted = network.logos_reuse_download(
-        f"{base_url}/{version}",
-        zip_name,
-        app.conf.download_dir,
-        app=app,
-        status_messages=status_messages,
-        kind="winetricks-zip",
-    )
-    with tempfile.TemporaryDirectory(prefix="winetricks-", dir=app.conf.download_dir) as directory:
-        source = Path(directory) / "winetricks"
-        with zipfile.ZipFile(accepted.check()) as archive:
-            source.write_bytes(archive.read(artifacts.winetricks_member(archive)))
-        script = artifacts.import_local(
-            source, Path(app.conf.installer_binary_dir), script_spec,
+    if default_release:
+        script = network.logos_reuse_download(
+            script_spec.url, script_spec.name, app.conf.installer_binary_dir,
+            app=app, status_messages=status_messages, kind=script_spec.kind, digest=script_spec.digest,
         )
+    else:
+        base_url = "https://codeload.github.com/Winetricks/winetricks/zip/refs/tags"
+        zip_name = f"{version}.zip"
+        accepted = network.logos_reuse_download(
+            f"{base_url}/{version}", zip_name, app.conf.download_dir,
+            app=app, status_messages=status_messages, kind="winetricks-zip",
+        )
+        with tempfile.TemporaryDirectory(prefix="winetricks-", dir=app.conf.download_dir) as directory:
+            source = Path(directory) / "winetricks"
+            with zipfile.ZipFile(accepted.check()) as archive:
+                source.write_bytes(archive.read(artifacts.winetricks_member(archive)))
+            script = artifacts.import_local(
+                source, Path(app.conf.installer_binary_dir), script_spec,
+            )
     runtime._replace_link(winetricks_path, str(script.path))
     return str(script.path)
 

@@ -43,8 +43,11 @@ class TestProductionServices(QtCase):
         return window
 
     def test_production_bootstrap_and_snapshot_do_not_prompt_or_fetch(self):
-        with patch("ou_dedetai.metadata.request", side_effect=AssertionError("Unexpected network"), create=True):
+        with (patch("ou_dedetai.metadata.request", side_effect=AssertionError("Unexpected network"), create=True),
+              patch("ou_dedetai.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
             window = self.production_window()
+            window._render()
+            self.assertIn("has not been checked", window.snapshot.wine_status)
         self.assertFalse(window.snapshot.installed)
         self.assertEqual(window.snapshot.profile, str(self.config))
         self.assertTrue(window.maintenance.buttons["repair"].isEnabled())
@@ -52,6 +55,106 @@ class TestProductionServices(QtCase):
         self.assertNotIn("controller_update", window.maintenance.buttons)
         self.assertEqual(window.install.product.count(), 1)
         self.assertEqual(window.install.product.currentText(), "Logos")
+
+    def test_cached_wine_states_flow_from_worker_snapshot_without_probe_fetch_or_write(self):
+        from ou_dedetai import releases
+        from PySide6.QtCore import Qt
+
+        native = "/fixture/selected-wine-10.8"
+        document = json.loads(self.config.read_text())
+        document["wine_binary"] = native
+        self.config.write_text(json.dumps(document))
+        self.original = self.config.read_bytes()
+        now = time.time()
+        target = releases.WineTarget("11.20", "devel", "a" * 40)
+        source = releases.WineTargetLookup(target, "ok", checked=now)
+        asset = releases.SoftwareReleaseInfo("11.20", "https://example.invalid/current.AppImage")
+        available = releases.ReleaseLookup(asset, "ok", checked=now)
+        cases = (
+            (source, available, "available", True),
+            (source, releases.ReleaseLookup(status="unavailable", checked=now), "unavailable", True),
+            (source, replace(available, stale=True), "stale, availability unverified", True),
+            (source, replace(available, checked=None), "not checked", True),
+            (source, replace(available, release=replace(asset, version="11.21")), "unknown for this target", True),
+            (replace(source, status="offline", stale=True), available, "offline, stale", False),
+            (replace(source, checked=None), available, "not checked", False),
+            (releases.WineTargetLookup(), available, "unchecked", False),
+        )
+        with (patch("ou_dedetai.metadata.request", side_effect=AssertionError("Unexpected network")),
+              patch("ou_dedetai.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
+            window = self.production_window()
+            client = window.app.conf._network
+            for cached_source, cached_provider, expected, provider_checked in cases:
+                with (
+                    self.subTest(source=cached_source, provider=cached_provider),
+                    patch.object(client, "wine_release_target", return_value=cached_source) as read_source,
+                    patch.object(client, "wine_appimage_release", return_value=cached_provider) as read_provider,
+                ):
+                    window.start(window.services.refresh)
+                    self.pump(lambda: window.app.active is None)
+                    snapshot = window.services.snapshot()
+                    self.assertEqual(snapshot.runtime, native)
+                    self.assertIn("version not checked", snapshot.wine_status)
+                    self.assertIn(expected, snapshot.wine_status)
+                    if cached_source.target is not None:
+                        self.assertIn("Wine development 11.20", snapshot.wine_status)
+                    if provider_checked:
+                        self.assertIn(f"AppImage provider {releases.WINE_REPOSITORY}: {expected}.",
+                                      snapshot.wine_status)
+                        read_provider.assert_called_once_with(refresh=False)
+                    else:
+                        read_provider.assert_not_called()
+                    read_source.assert_called_once_with(refresh=False)
+                    read_source.side_effect = AssertionError("Rendering must use the frozen snapshot")
+                    read_provider.side_effect = AssertionError("Rendering must not read release state")
+                    window._render()
+                    self.assertEqual(window.profile_settings.wine_status.text(), snapshot.wine_status)
+                    self.assertEqual(window.maintenance.wine_status.textFormat(), Qt.TextFormat.PlainText)
+                    self.assertEqual(window.maintenance.buttons["runtime_update"].toolTip(), snapshot.wine_status)
+                    self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_refresh_and_discovery_discard_changed_profiles_and_clear_prior_choices(self):
+        from unittest.mock import Mock
+        from ou_dedetai import releases, utils
+        from ou_dedetai.config import PersistentConfiguration
+        from ou_dedetai.logos import State
+
+        client = Mock()
+        conf = SimpleNamespace(
+            config_file_path="/fixture/first.json", _raw=PersistentConfiguration(faithlife_product="Logos"),
+            _overrides=SimpleNamespace(install_dir=None), _network=client, logos_exe=None,
+            faithlife_product_release_channel="stable", app_release_channel="stable", faithlife_product_logging=False,
+        )
+        other = SimpleNamespace(config_file_path="/fixture/second.json")
+        app = SimpleNamespace(conf=conf, checkpoint=Mock(), logos=SimpleNamespace(
+            logos_state=State.STOPPED, indexing_state=State.STOPPED, enforcement_error="",
+        ))
+        services = Services()
+        services._snapshot = replace(services.snapshot(), profile=other.config_file_path, runtimes=("/other/wine",))
+        previous = services.snapshot()
+
+        def change_profile(**kwargs):
+            app.conf = other
+            return releases.WineTargetLookup()
+
+        client.wine_release_target.side_effect = change_profile
+        services.refresh(app, threading.Event())
+        self.assertIs(services.snapshot(), previous)
+        app.conf = conf
+        client.wine_release_target.side_effect = None
+        client.wine_release_target.return_value = releases.WineTargetLookup()
+        services.refresh(app, threading.Event())
+        self.assertEqual(services.snapshot().profile, conf.config_file_path)
+        self.assertEqual(services.snapshot().runtimes, ())
+        current = services.snapshot()
+
+        def changed_discovery(owner):
+            app.conf = other
+            return ["/first/wine"]
+
+        with patch.object(utils, "get_wine_options", side_effect=changed_discovery):
+            services.discover(app, threading.Event())
+        self.assertIs(services.snapshot(), current)
 
     def test_enabled_controller_update_uses_stable_exact_qt_restart_and_cleans_cancelled_stage(self):
         from unittest.mock import Mock
@@ -187,7 +290,8 @@ class TestProductionServices(QtCase):
             seen.append(owner.conf.skip_install_system_dependencies)
 
         for checked in (False, True):
-            with (patch.object(app, "approve", return_value=True), patch("ou_dedetai.installer.install", install),
+            with (patch.object(app, "approve", return_value=True), patch.object(app, "ask", return_value="OK"),
+                  patch("ou_dedetai.installer.install", install),
                   patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                       status="ok", stale=False, versions=["46.2.0.5"]))):
                 result = self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
@@ -341,7 +445,7 @@ class TestProductionServices(QtCase):
         window = self.production_window()
         app = window.app
         draft = InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine", True)
-        with patch.object(app, "approve", return_value=True):
+        with (patch.object(app, "approve", return_value=True), patch.object(app, "ask", return_value="OK")):
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="unavailable", stale=True, versions=[])):
                 with self.assertRaises(maintenance.MaintenanceError):
@@ -476,7 +580,8 @@ class TestProductionServices(QtCase):
                 with patch("ou_dedetai.installer.install", side_effect=RuntimeError("Injected MSI failure")):
                     window._action("product_update")
                     self.pump(lambda: app.active is None and bool(window.dialogs.dialogs))
-        self.assertEqual(app.conf._raw.faithlife_product_release, "46.2.0.5")
+        self.assertIsNone(app.conf._raw.faithlife_product_release)
+        self.assertNotIn("faithlife_product_release", json.loads(self.config.read_text()))
         self.assertIn("could not be completed", window.status.text())
         self.original = self.config.read_bytes()
         next(iter(window.dialogs.dialogs)).reject()
@@ -672,6 +777,7 @@ class TestProductionServices(QtCase):
         self.assertEqual(app.conf._overrides.runtime_selection, {})
         self.services.settings("", "stable", "stable")(app, threading.Event())
         with (patch.object(app, "approve", return_value=True),
+              patch.object(app, "ask", return_value="OK"),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
               patch("ou_dedetai.installer.install") as install):
@@ -719,6 +825,7 @@ class TestProductionServices(QtCase):
         self.services.settings("", "stable", "stable")(app, threading.Event())
         self.assertFalse(install.exists())
         with (patch.object(app, "approve", return_value=True),
+              patch.object(app, "ask", return_value="OK"),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
               patch("ou_dedetai.installer.install") as installer):
@@ -818,6 +925,33 @@ class TestProductionServices(QtCase):
         install.assert_not_called()
         self.assertEqual(self.config.read_bytes(), self.original)
 
+    def test_preflight_requests_review_actions_and_preserves_errors_and_cancellation(self):
+        from ou_dedetai.app import UserExitedFromAsk
+
+        window = self.production_window()
+        app = window.app
+        report = {"summary": "Fixture preflight report", "checks": []}
+        with patch("ou_dedetai.doctor.inspect", return_value=report):
+            for answer in ("OK", "Cancel", None):
+                with self.subTest(answer=answer), patch.object(app, "_ask", return_value=answer) as ask:
+                    if answer == "OK":
+                        self.services._preflight(app, app.conf)
+                    else:
+                        with self.assertRaises(UserExitedFromAsk):
+                            self.services._preflight(app, app.conf)
+                    ask.assert_called_once_with("Fixture preflight report\n\nReview installation preflight",
+                                                ["OK", "Cancel"])
+                    self.assertEqual(self.services.doctor_report, report["summary"])
+                    self.assertEqual(self.services._doctor_profile, app.conf.config_file_path)
+
+        report["checks"] = [{"status": "error", "summary": "Fixture unsupported host"}]
+        with (patch("ou_dedetai.doctor.inspect", return_value=report), patch.object(app, "_ask") as ask):
+            with self.assertRaisesRegex(maintenance.MaintenanceError,
+                                        "Installation preflight failed:\nFixture unsupported host"):
+                self.services._preflight(app, app.conf)
+            ask.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), self.original)
+
     def test_relative_backup_display_and_folder_opener_are_scoped_and_bounded(self):
         window = self.production_window()
         app = window.app
@@ -852,6 +986,7 @@ class TestProductionServices(QtCase):
             return inspect(candidate)
 
         with (patch.object(window.app, "approve", return_value=True),
+              patch.object(window.app, "ask", return_value="OK") as ask,
               patch.object(window.app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
               patch.object(doctor, "inspect", side_effect=inspect_proposal),
@@ -859,6 +994,8 @@ class TestProductionServices(QtCase):
             result = self.services.install(InstallDraft("Logos", str(destination), "/usr/bin/wine", False))(
                 window.app, threading.Event())
         self.assertEqual(seen, [(destination, destination / "data/wine64_bottle", None)])
+        ask.assert_called_once_with(self.services.doctor_report + "\n\nReview installation preflight",
+                                    ["OK", "Cancel"])
         self.assertEqual(result.outcome, "succeeded")
         install.assert_called_once_with(window.app)
         self.original = self.config.read_bytes()
@@ -917,7 +1054,6 @@ class TestProductionServices(QtCase):
                         metadata.unlink()
                     else:
                         write_version(changed)
-                    self.assertEqual(app.conf.installed_faithlife_product_release, "40.0.0.0")
                     return True
 
                 admitted_reads = []
@@ -943,6 +1079,160 @@ class TestProductionServices(QtCase):
                 install.assert_not_called()
                 self.assertEqual(app.conf.installed_faithlife_product_release, changed)
                 self.assertEqual(self.config.read_bytes(), self.original)
+
+    def test_update_failure_and_delayed_promotion_refresh_same_controller(self):
+        from ou_dedetai import utils
+        from ou_dedetai.logos import State
+        from ou_dedetai.network import ProductLookup
+
+        document = json.loads(self.config.read_text())
+        document.update(faithlife_product_version="10", faithlife_product_release="46.2.0.0005")
+        self.config.write_text(json.dumps(document))
+        self.original = self.config.read_bytes()
+        product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        system = product / "System"
+        system.mkdir(parents=True)
+        (product / "Logos.exe").write_bytes(b"public fixture launcher")
+        metadata = system / "Logos.deps.json"
+        metadata.write_text(json.dumps({"libraries": {"Logos/46.2.0.5": {}}}))
+        window = self.production_window()
+        app = window.app
+        conf = app.conf
+        self.assertEqual(self.services.snapshot().version, "46.2.0.5")
+
+        def failed_install(owner):
+            self.assertTrue(maintenance.installation_owned())
+            self.assertEqual(owner.conf.faithlife_product_release, "54.3.0.0005")
+            raise maintenance.MaintenanceError("Fixture MSI failed")
+
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok"))):
+            with patch("ou_dedetai.installer.install", side_effect=failed_install):
+                with self.assertRaisesRegex(maintenance.MaintenanceError, "Fixture MSI failed"):
+                    self.services.operation("product_update")(app, threading.Event())
+            self.assertEqual(conf.faithlife_product_release, "46.2.0.0005")
+            self.assertEqual(json.loads(self.config.read_text())["faithlife_product_release"], "46.2.0.0005")
+            self.assertEqual(self.services.snapshot().version, "46.2.0.5")
+            self.assertTrue(self.services.snapshot().product_update.startswith("Update available:"))
+
+            pending = product / "Pending"
+
+            def install_pending(owner):
+                pending.mkdir()
+                (pending / metadata.name).write_text(json.dumps({"libraries": {"Logos/54.3.0.5": {}}}))
+
+            with patch("ou_dedetai.installer.install", side_effect=install_pending):
+                window.start(self.services.operation("product_update"))
+                self.pump(lambda: app.active is None)
+            self.assertEqual(conf.faithlife_product_release, "54.3.0.0005")
+            self.assertEqual(self.services.snapshot().version, "46.2.0.5")
+
+            with patch.object(app.logos, "start") as launch:
+                window.start(self.services.operation("launch"))
+                self.pump(lambda: app.active is None)
+            launch.assert_called_once()
+            self.assertEqual(self.services.snapshot().version, "46.2.0.5")
+
+            # Vendor promotion can finish after the launch request has settled.
+            (pending / metadata.name).replace(metadata)
+            app.logos.logos_state = State.RUNNING
+            with patch.object(utils, "get_current_logos_version", wraps=utils.get_current_logos_version) as read:
+                for _ in range(2):
+                    window.start(self.services.refresh)
+                    self.pump(lambda: app.active is None)
+                    self.assertEqual(window.snapshot.version, "54.3.0.5")
+                    self.assertTrue(window.snapshot.running)
+                    self.assertTrue(window.snapshot.product_update.startswith("current:"))
+                self.assertEqual(read.call_count, 1)
+                read.side_effect = AssertionError("Rendering must use the frozen snapshot")
+                for _ in range(10):
+                    window._render()
+            app.logos.logos_state = State.STOPPED
+        self.assertIs(app.conf, conf)
+        self.assertEqual(conf.faithlife_product_release, "54.3.0.0005")
+        self.original = self.config.read_bytes()
+
+    def test_failed_update_preserves_later_selection_edits_and_primary_exception(self):
+        from ou_dedetai.network import ProductLookup
+
+        document = json.loads(self.config.read_text())
+        document.update(faithlife_product_release="46.2.0.0005",
+                        faithlife_product_release_channel="dev", app_release_channel="dev")
+        self.config.write_text(json.dumps(document))
+        self.original = self.config.read_bytes()
+        window = self.production_window()
+        app = window.app
+        failure = RuntimeError("Fixture installer failed after external edit")
+        external = {}
+
+        def failed_install(owner):
+            self.assertTrue(maintenance.installation_owned())
+            current = json.loads(self.config.read_text())
+            current["faithlife_product_release"] = "50.0.0.0"
+            current["faithlife_product_release_channel"] = "beta"
+            current["external_sentinel"] = {"preserved": [1, False]}
+            external.update(current)
+            self.config.write_text(json.dumps(current))
+            raise failure
+
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(type(app.conf), "installed_faithlife_product_release",
+                           new_callable=unittest.mock.PropertyMock, return_value="46.2.0.5"),
+              patch.object(app.conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok")),
+              patch("ou_dedetai.installer.install", side_effect=failed_install),
+              patch("ou_dedetai.qt.services.logging.warning") as report_conflict):
+            with self.assertRaises(RuntimeError) as raised:
+                self.services.operation("product_update")(app, threading.Event())
+        self.assertIs(raised.exception, failure)
+        saved = json.loads(self.config.read_text())
+        for name in ("faithlife_product_release", "TARGET_RELEASE_VERSION",
+                     "faithlife_product_release_channel", "logos_release_channel", "external_sentinel"):
+            self.assertEqual((name in saved, saved.get(name)), (name in external, external.get(name)))
+        self.assertEqual(saved["app_release_channel"], "dev")
+        self.assertNotIn("lli_release_channel", saved)
+        self.assertEqual(app.conf.faithlife_product_release, "50.0.0.0")
+        self.assertEqual(app.conf.faithlife_product_release_channel, "beta")
+        self.assertEqual(app.conf.app_release_channel, "dev")
+        self.assertEqual(app.conf._raw._saved["external_sentinel"], external["external_sentinel"])
+        self.assertTrue(any("rollback preserved later edits" in call.args[0]
+                            for call in report_conflict.call_args_list))
+        self.original = self.config.read_bytes()
+
+    def test_failed_update_keeps_primary_exception_when_rollback_publication_races(self):
+        from ou_dedetai import config_store
+        from ou_dedetai.network import ProductLookup
+
+        window = self.production_window()
+        app = window.app
+        failure = RuntimeError("Fixture installer failure")
+        stage = config_store.Target.stage
+        edited = []
+
+        def edit_during_restore(target, content):
+            stage(target, content)
+            if target.path == self.config:
+                document = json.loads(self.config.read_text())
+                document["faithlife_product_release"] = "50.0.0.0"
+                document["external_sentinel"] = "edit after rollback snapshot"
+                edited.append(document)
+                self.config.write_text(json.dumps(document))
+
+        def failed_install(owner):
+            self.stack.enter_context(patch.object(config_store.Target, "stage", edit_during_restore))
+            raise failure
+
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(type(app.conf), "installed_faithlife_product_release",
+                           new_callable=unittest.mock.PropertyMock, return_value="46.2.0.5"),
+              patch.object(app.conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok")),
+              patch("ou_dedetai.installer.install", side_effect=failed_install),
+              patch("ou_dedetai.qt.services.logging.exception") as report_failure):
+            with self.assertRaises(RuntimeError) as raised:
+                self.services.operation("product_update")(app, threading.Event())
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(json.loads(self.config.read_text()), edited[0])
+        report_failure.assert_called_once_with("Cannot restore product selection after failed update")
+        self.original = self.config.read_bytes()
 
     def test_desktop_integration_is_explicit_and_previews_profile_paths(self):
         window = self.production_window()

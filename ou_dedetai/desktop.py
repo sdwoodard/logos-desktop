@@ -69,7 +69,9 @@ def _default(scheme):
     if command is None:
         return None
     try:
-        result = subprocess.run([command, 'query', 'default', scheme], capture_output=True, timeout=5, check=True)
+        environment = {key: value for key, value in os.environ.items() if key != 'XDG_ACTIVATION_TOKEN'}
+        result = subprocess.run([command, 'query', 'default', scheme], env=environment,
+                                capture_output=True, timeout=5, check=True)
         if len(result.stdout) > 4096:
             return None
         value = result.stdout.decode('utf-8').strip()
@@ -107,6 +109,20 @@ def _entry(profile_id, name, argv, *, url=False, icon=None):
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
+def _historical_exec(arguments):
+    """Reproduce M02/M12 Exec bytes for migration after current argv validation."""
+    if '%' in arguments[0]:
+        arguments = ['/usr/bin/env', '--', *arguments]
+
+    quoted = []
+    for argument in arguments:
+        escaped = argument.replace('%', '%%')
+        for character in ('\\', '"', '`', '$'):
+            escaped = escaped.replace(character, '\\' + character)
+        quoted.append('"' + escaped.replace('\\', '\\\\') + '"')
+    return ' '.join([*quoted, '%u'])
+
+
 def _legacy_handler(previous, data, config, launcher, product, windows_executable):
     """Recognize the old direct installed launcher only with matching profile evidence."""
     from .installer import desktop_exec
@@ -127,10 +143,12 @@ def _legacy_handler(previous, data, config, launcher, product, windows_executabl
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     try:
         parser.read_string(content.decode('utf-8'))
-        expected = desktop_exec([*launcher, '--wine', windows_executable], accepts_url=True)
+        arguments = [*launcher, '--wine', windows_executable]
+        expected = desktop_exec(arguments, accepts_url=True)
+        historical = _historical_exec(arguments)
         if (parser.get('Desktop Entry', 'Type', fallback=None) != 'Application'
                 or parser.get('Desktop Entry', 'Name', fallback=None) != f'{product} URL Handler'
-                or parser.get('Desktop Entry', 'Exec', fallback=None) != expected):
+                or parser.get('Desktop Entry', 'Exec', fallback=None) not in (expected, historical)):
             return None
     except (UnicodeError, configparser.Error):
         return None

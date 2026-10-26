@@ -11,6 +11,7 @@ import hashlib
 import logging
 import lzma
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
@@ -25,7 +26,8 @@ import olefile
 import requests
 import zstandard
 
-from . import maintenance, paths
+from . import maintenance, msi, paths
+from .msi import MsiExpectation
 
 
 NETWORK_TIMEOUT = (10, 30)
@@ -73,6 +75,7 @@ class ArtifactSpec:
     kind: str
     digest: Digest | None = None
     size: int | None = None
+    msi_expectation: MsiExpectation | None = None
 
     def validate(self):
         if (not isinstance(self.url, str) or not self.url or not isinstance(self.name, str)
@@ -86,6 +89,13 @@ class ArtifactSpec:
             self.digest.validate()
         if self.size is not None and (type(self.size) is not int or self.size <= 0):
             raise ArtifactError("Invalid expected artifact size")
+        if self.msi_expectation is not None:
+            if self.kind != "msi" or not isinstance(self.msi_expectation, MsiExpectation):
+                raise ArtifactError("Invalid MSI artifact expectation")
+            try:
+                self.msi_expectation.validate()
+            except ValueError as error:
+                raise ArtifactError(str(error)) from None
 
     @property
     def key(self):
@@ -102,9 +112,10 @@ class AcceptedArtifact:
     evidence: str
 
     def check(self, checkpoint=None):
+        self.spec.validate()
         if regular_hash(self.path, checkpoint=checkpoint) != self.sha256 or self.path.stat().st_size != self.size:
             raise ArtifactError(f"Accepted artifact changed: {self.path.name}")
-        validate_format(self.path, self.spec.kind, checkpoint)
+        validate_format(self.path, self.spec.kind, checkpoint, msi_expectation=self.spec.msi_expectation)
         return self.path
 
 
@@ -352,128 +363,75 @@ def _squashfs_root(source, start, size, compression, root, inode_table, director
 
 
 def _msi_name(name):
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
-    output = []
-    for character in name.removeprefix("\u4840"):
-        code = ord(character)
-        if 0x3800 <= code < 0x4800:
-            output.extend((alphabet[(code - 0x3800) & 63], alphabet[(code - 0x3800) >> 6]))
-        elif 0x4800 <= code < 0x4840:
-            output.append(alphabet[code - 0x4800])
-        else:
-            output.append(character)
-    return "".join(output)
+    return msi.stream_name(name)
 
 
-def validate_msi(path, checkpoint=None):
+@contextmanager
+def _msi_database(path, checkpoint):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        before = msi.preflight(source, checkpoint)
+        with olefile.OleFileIO(source, raise_defects=olefile.DEFECT_INCORRECT) as database:
+            yield database
+        after = os.fstat(source.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+        ):
+            raise ArtifactError("MSI changed while being read")
+
+
+def validate_msi(path, checkpoint=None, *, expectation=None):
     try:
-        with olefile.OleFileIO(path, raise_defects=olefile.DEFECT_INCORRECT) as database:
+        with _msi_database(path, checkpoint) as database:
             if database.root.clsid.upper() != "000C1084-0000-0000-C000-000000000046":
                 raise ArtifactError("Expected a Windows Installer database")
-            names = {_msi_name(parts[0]): parts for parts in database.listdir() if len(parts) == 1}
+            if (database.root.size > msi.METADATA_LIMIT
+                    or database.num_mini_fat_sectors * database.sectorsize
+                    > msi.METADATA_LIMIT // 16 + database.sectorsize):
+                raise ArtifactError("Oversized MSI mini stream or MiniFAT")
+            streams = database.listdir()
+            if len(streams) > msi.STREAM_LIMIT:
+                raise ArtifactError("MSI stream-object budget exceeded")
+            names = {_msi_name(parts[0]): parts for parts in streams if len(parts) == 1}
+            if len(names) != sum(len(parts) == 1 for parts in streams):
+                raise ArtifactError("Duplicate MSI stream name")
             if not {"_StringPool", "_StringData", "_Tables", "_Columns"}.issubset(names):
                 raise ArtifactError("MSI database tables are missing")
+            if database.get_size("\x05SummaryInformation") > msi.HEADER_LIMIT:
+                raise ArtifactError("Oversized MSI summary")
             with database.openstream("\x05SummaryInformation") as stream:
-                summary = stream.read(48)
-            if len(summary) != 48 or summary[28:44] != bytes.fromhex("e0859ff2f94f6810ab9108002b27b3d9"):
-                raise ArtifactError("Invalid MSI summary property set")
-            template = database.getproperties("\x05SummaryInformation").get(7)
+                summary = stream.read(msi.HEADER_LIMIT + 1)
+            properties = msi.summary_information(summary, checkpoint)
+            template = properties.get(7)
             if isinstance(template, bytes):
                 template = template.decode("ascii", errors="strict")
-            if not isinstance(template, str) or template.split(";")[0] != "x64":
+            platform = template.split(";")[0] if isinstance(template, str) else None
+            if platform != "x64" and not (platform == "Intel" and expectation is not None):
                 raise ArtifactError("Expected an x64 MSI database")
-            _msi_structure(database, names)
-            for parts in database.listdir():
+            tables = msi.Database(database, names, checkpoint)
+            if expectation is not None:
+                if not isinstance(expectation, MsiExpectation):
+                    raise ArtifactError("Invalid MSI artifact expectation")
+                if re.fullmatch(r"(?:Intel|x64);[0-9]{1,5}", template) is None:
+                    raise ArtifactError("Malformed MSI platform/language template")
+                primary = msi.primary_file(tables, expectation)
+                if platform == "Intel":
+                    flags = properties.get(15, 0)
+                    if not isinstance(flags, int) or flags < 0:
+                        raise ArtifactError("Invalid MSI source flags")
+                    msi.attest(tables, primary, flags)
+            for parts in streams:
                 if checkpoint:
                     checkpoint()
-                with database.openstream(parts) as stream:
-                    while stream.read(1024 * 1024):
-                        if checkpoint:
-                            checkpoint()
-    except (OSError, ValueError, UnicodeError, struct.error) as error:
-        raise ArtifactError(f"Invalid MSI database ({type(error).__name__})") from None
-
-
-def _msi_structure(database, names):
-    """Check MSI string references and column schemas inside the CFB container."""
-    def stream(name):
-        if name not in names or database.get_size(names[name]) > 64 * 1024 * 1024:
-            raise ArtifactError("Missing or oversized MSI metadata stream")
-        with database.openstream(names[name]) as source:
-            return source.read()
-
-    pool, data = stream("_StringPool"), stream("_StringData")
-    if len(pool) < 4 or len(pool) % 4:
-        raise ArtifactError("Invalid MSI string pool")
-    width = 3 if int.from_bytes(pool[2:4], "little") & 0x8000 else 2
-    strings = [b""]
-    cursor, offset = 4, 0
-    while cursor < len(pool):
-        length, references = struct.unpack_from("<HH", pool, cursor)
-        cursor += 4
-        if not length and references:
-            if cursor + 4 > len(pool):
-                raise ArtifactError("Truncated MSI long string")
-            length = int.from_bytes(pool[cursor:cursor + 4], "little")
-            cursor += 4
-        if offset + length > len(data):
-            raise ArtifactError("MSI string pool exceeds its data")
-        strings.append(data[offset:offset + length] if references else None)
-        offset += length
-    if offset != len(data):
-        raise ArtifactError("MSI string data does not match its pool")
-
-    def text(reference):
-        if reference <= 0 or reference >= len(strings) or not strings[reference]:
-            raise ArtifactError("Invalid MSI string reference")
-        return strings[reference].decode("ascii")
-
-    def rows(content, widths):
-        row_size = sum(widths)
-        if len(content) % row_size:
-            raise ArtifactError("Invalid MSI table length")
-        count = len(content) // row_size
-        for row in range(count):
-            offset = 0
-            values = []
-            for size in widths:
-                start = offset * count + row * size
-                values.append(int.from_bytes(content[start:start + size], "little"))
-                offset += size
-            yield values
-
-    tables = [text(row[0]) for row in rows(stream("_Tables"), [width])]
-    if not tables or len(set(tables)) != len(tables) or "Property" not in tables:
-        raise ArtifactError("Invalid MSI table catalog")
-    schemas = {name: {} for name in tables}
-    for table, number, name, kind in rows(stream("_Columns"), [width, 2, width, 2]):
-        table, number, kind = text(table), number - 0x8000, kind - 0x8000
-        text(name)
-        if table not in schemas or number < 1 or number in schemas[table] or not kind & 0x100:
-            raise ArtifactError("Invalid MSI column catalog")
-        schemas[table][number] = kind
-    for table, columns in schemas.items():
-        if not columns or sorted(columns) != list(range(1, len(columns) + 1)):
-            raise ArtifactError("MSI columns are missing or unordered")
-        widths = []
-        ordered = [columns[number] for number in sorted(columns)]
-        for kind in ordered:
-            length = kind & 255
-            binary = kind & ~0x1000 == 0x900
-            if kind & 0x800 and not binary:
-                widths.append(width)
-            elif binary:
-                widths.append(2)
-            elif length in (2, 4):
-                widths.append(length)
-            else:
-                raise ArtifactError("Invalid MSI column type")
-        if table in names:
-            for row in rows(stream(table), widths):
-                for value, kind in zip(row, ordered):
-                    if kind & 0x800 and kind & ~0x1000 != 0x900 and value:
-                        if value >= len(strings) or strings[value] is None:
-                            raise ArtifactError("MSI row has an invalid string reference")
+                if database.get_size(parts) >= database.minisectorcutoff:
+                    stream = msi.SectorReader(database, parts, checkpoint)
+                    for offset in range(0, stream.size, msi.HEADER_LIMIT):
+                        stream.read(offset, min(msi.HEADER_LIMIT, stream.size - offset))
+                else:
+                    with database.openstream(parts) as stream:
+                        stream.read()
+    except (OSError, ValueError, LookupError, struct.error, zlib.error) as error:
+        raise ArtifactError(f"Invalid MSI database: {error}") from None
 
 
 def _archive_name(name):
@@ -508,7 +466,7 @@ def winetricks_member(archive, checkpoint=None):
     return candidates[0]
 
 
-def validate_format(path, kind, checkpoint=None):
+def validate_format(path, kind, checkpoint=None, *, msi_expectation=None):
     if checkpoint:
         checkpoint()
     if not path.stat().st_size:
@@ -519,7 +477,7 @@ def validate_format(path, kind, checkpoint=None):
         elif kind == "elf":
             _elf_extent(path)
         elif kind == "msi":
-            validate_msi(path, checkpoint)
+            validate_msi(path, checkpoint, expectation=msi_expectation)
         elif kind == "winetricks-zip":
             with zipfile.ZipFile(path) as archive:
                 member = winetricks_member(archive, checkpoint)
@@ -563,7 +521,7 @@ def _verify(path, spec, size=None, digest=None, checkpoint=None):
             expected.validate()
             if regular_hash(path, expected.algorithm, checkpoint).lower() != expected.value.lower():
                 raise ArtifactError("Artifact digest mismatch")
-    validate_format(path, spec.kind, checkpoint)
+    validate_format(path, spec.kind, checkpoint, msi_expectation=spec.msi_expectation)
 
 
 def _store(root):

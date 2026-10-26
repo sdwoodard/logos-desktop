@@ -124,7 +124,7 @@ class TestPrivateSupport(unittest.TestCase):
 
                 with (
                     patch.object(control.os.path, "expanduser", return_value=str(root)),
-                    patch.object(control.webbrowser, "open") as browser,
+                    patch.object(control.system, "run_command") as browser,
                 ):
                     self.assertEqual(control.get_support(app), str(archive_path))
                 self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
@@ -133,7 +133,10 @@ class TestPrivateSupport(unittest.TestCase):
                 self.assertEqual(options, ["Keep archive local", "Open private project issue", "Show links"])
                 self.assertNotIn("Upload", question)
                 if choice == "Open private project issue":
-                    browser.assert_called_once_with("https://github.com/sdwoodard/logos-desktop/issues/new")
+                    browser.assert_called_once_with(
+                        ["xdg-open", "https://github.com/sdwoodard/logos-desktop/issues/new"],
+                        timeout=10, check=False,
+                    )
                 else:
                     browser.assert_not_called()
 
@@ -181,7 +184,7 @@ class TestPrivateSupport(unittest.TestCase):
                 )
                 with (
                     boundary,
-                    patch.object(control.webbrowser, "open") as browser,
+                    patch.object(control.system, "run_command") as browser,
                     self.assertRaises(OSError),
                 ):
                     control.get_support(app)

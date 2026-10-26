@@ -16,7 +16,7 @@ else:
     QT_AVAILABLE = True
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QFileDialog
+    from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QFileDialog, QTextBrowser
     from ou_dedetai.qt.bridge import Completion, Progress, Result, Ticket
     from tests.qt_fixtures import QtCase
 
@@ -202,6 +202,222 @@ class TestQtFrontend(QtCase):
                 if action != "parent_close":
                     self.assertEqual(outcomes[-1], "succeeded" if action == "confirm" else "cancelled")
 
+    def test_binary_confirmation_returns_canonical_answers_and_defaults_to_no(self):
+        window = self.window()
+
+        def operation(app, cancel):
+            return Result("succeeded", app.ask("Install this product?", options))
+
+        for options, action, expected in (
+            (["Yes", "No"], "yes", "Yes"),
+            (["Yes", "No"], "no", "No"),
+            (["Yes", "No"], "enter", "No"),
+            (["Yes", "No"], "x", None),
+            (["Yes", "No"], "escape", None),
+            (["No", "Yes"], "no", "No"),
+        ):
+            with self.subTest(action=action, options=options):
+                window.start(operation)
+                self.pump(lambda: bool(window.dialogs.pending))
+                prompt, dialog = next(iter(window.dialogs.pending.items()))
+                self.assertIsNone(dialog.findChild(QComboBox))
+                buttons = dialog.findChild(QDialogButtonBox)
+                self.assertEqual(buttons.standardButtons(),
+                                 QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No)
+                yes = buttons.button(QDialogButtonBox.StandardButton.Yes)
+                no = buttons.button(QDialogButtonBox.StandardButton.No)
+                self.assertFalse(yes.isDefault())
+                self.assertFalse(yes.autoDefault())
+                self.assertTrue(no.isDefault())
+                self.assertFalse(prompt.done.is_set())
+                self.assertIsNone(prompt.answer)
+
+                if action == "yes":
+                    yes.click()
+                elif action == "no":
+                    no.click()
+                elif action == "enter":
+                    text = dialog.findChild(QTextBrowser)
+                    text.setFocus()
+                    QTest.keyClick(text, Qt.Key.Key_Return)
+                elif action == "x":
+                    dialog.close()
+                else:
+                    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+
+                self.pump(lambda: prompt.done.is_set() and window.app.active is None)
+                self.assertEqual(prompt.answer, expected)
+                self.assertFalse(prompt.complete("second result"))
+                self.assertFalse(window.dialogs.pending)
+                self.assertEqual(window.status.text(), expected if expected else "Operation cancelled")
+
+    def test_review_actions_accept_ok_and_cancel_without_an_automatic_answer(self):
+        window = self.window()
+
+        def operation(app, cancel):
+            return Result("succeeded", app.ask("Fixture report with no approval question", options))
+
+        for options, action in (
+            (["OK", "Cancel"], "ok"),
+            (["OK", "Cancel"], "cancel"),
+            (["OK", "Cancel"], "enter"),
+            (["OK", "Cancel"], "x"),
+            (["OK", "Cancel"], "escape"),
+            (["Cancel", "OK"], "cancel"),
+        ):
+            with self.subTest(action=action, options=options):
+                window.start(operation)
+                self.pump(lambda: bool(window.dialogs.pending))
+                prompt, dialog = next(iter(window.dialogs.pending.items()))
+                self.assertIsNone(dialog.findChild(QComboBox))
+                buttons = dialog.findChild(QDialogButtonBox)
+                self.assertEqual(buttons.standardButtons(),
+                                 QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+                cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+                self.assertFalse(ok.isDefault())
+                self.assertFalse(ok.autoDefault())
+                self.assertTrue(cancel.isDefault())
+                self.assertFalse(prompt.done.is_set())
+
+                if action == "ok":
+                    ok.click()
+                elif action == "cancel":
+                    cancel.click()
+                elif action == "enter":
+                    text = dialog.findChild(QTextBrowser)
+                    text.setFocus()
+                    QTest.keyClick(text, Qt.Key.Key_Return)
+                elif action == "x":
+                    dialog.close()
+                else:
+                    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+
+                self.pump(lambda: prompt.done.is_set() and window.app.active is None)
+                self.assertEqual(prompt.answer, "OK" if action == "ok" else None)
+                self.assertFalse(prompt.complete("second result"))
+                self.assertFalse(window.dialogs.pending)
+                self.assertEqual(window.status.text(), "OK" if action == "ok" else "Operation cancelled")
+
+    def test_question_links_activate_only_safe_https_and_preserve_unicode_plain_text(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices, QTextCursor
+
+        window = self.window()
+        target = "https://example.test/terms"
+        balanced = "https://example.test/policy_(current)"
+        question = (
+            f"\U0001f4d6 Read ({target}).\n"
+            f"\U0001f600 Other terms: {balanced}.\n"
+            "Path: /disposable/\u00e9tudes/\U0001f4da/Logos\n"
+            '<b>Literal HTML</b> <a href="file:///tmp/private">not a link</a>\n'
+            "file:///tmp/private javascript:alert(1) data:text/plain,hello custom://host\n"
+            "http://example.test/insecure https://user:secret@example.test/private"
+        )
+
+        def operation(app, cancel):
+            return Result("succeeded", app.ask(question, ["Yes", "No"]))
+
+        with patch.object(QDesktopServices, "openUrl", return_value=True) as open_url:
+            window.start(operation)
+            self.pump(lambda: bool(window.dialogs.pending))
+            prompt, dialog = next(iter(window.dialogs.pending.items()))
+            text = dialog.findChild(QTextBrowser)
+            self.assertEqual(text.toPlainText(), question)
+            open_url.assert_not_called()
+
+            anchors = []
+            block = text.document().begin()
+            while block.isValid():
+                fragment = block.begin()
+                while not fragment.atEnd():
+                    part = fragment.fragment()
+                    if part.charFormat().isAnchor():
+                        anchors.append((part.text(), part.charFormat().anchorHref()))
+                    fragment += 1
+                block = block.next()
+            self.assertEqual(anchors, [(target, target), (balanced, balanced)])
+
+            start = len(question[:question.index(target)].encode("utf-16-le")) // 2
+            cursor = QTextCursor(text.document())
+            cursor.setPosition(start)
+            cursor.setPosition(start + len(target), QTextCursor.MoveMode.KeepAnchor)
+            self.assertEqual(cursor.selectedText(), target)
+            self.assertEqual(cursor.charFormat().anchorHref(), target)
+            cursor.setPosition(start + 3)
+            text.setTextCursor(cursor)
+            text.ensureCursorVisible()
+            point = text.cursorRect().center()
+            self.assertEqual(text.anchorAt(point), target)
+            QTest.mouseClick(text.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            open_url.assert_called_once_with(QUrl(target))
+            self.assertFalse(prompt.done.is_set())
+
+            open_url.reset_mock()
+            for forbidden in ("file:///tmp/private", "javascript:alert(1)", "data:text/plain,hello",
+                              "custom://host", "http://example.test/", "https://user:secret@example.test/",
+                              "https://@example.test/", "https:///missing-host"):
+                text.anchorClicked.emit(QUrl(forbidden))
+            open_url.assert_not_called()
+
+            open_url.return_value = False
+            with patch.object(window.dialogs, "failure") as failure:
+                QTest.mouseClick(text.viewport(), Qt.MouseButton.LeftButton, pos=point)
+                open_url.assert_called_once_with(QUrl(target))
+                failure.assert_called_once()
+                self.assertNotIn(target, str(failure.call_args))
+            dialog.close()
+            self.pump(lambda: prompt.done.is_set() and window.app.active is None)
+            self.assertIsNone(prompt.answer)
+
+    def test_long_confirmation_scope_is_keyboard_readable_without_automatic_answer(self):
+        window = self.window()
+        long_path = "/disposable/" + "long-installation-component/" * 30
+        question = "\n".join([
+            f"Config: {long_path}selected.json",
+            f"Install: {long_path}Logos",
+            f"Prefix: {long_path}Logos/data/wine64_bottle",
+            *[f"Consequence {number}: review the selected installation scope." for number in range(60)],
+            "Continue with this installation? <plain text, not a link>",
+        ])
+
+        def operation(app, cancel):
+            return Result("succeeded", app.ask(question, ["Continue", "Go back"]))
+
+        window.start(operation)
+        self.pump(lambda: bool(window.dialogs.pending))
+        prompt, dialog = next(iter(window.dialogs.pending.items()))
+        text = dialog.findChild(QTextBrowser)
+        self.assertIsNotNone(text)
+        self.assertTrue(text.isReadOnly())
+        self.assertEqual(text.toPlainText(), question)
+        choice = dialog.findChild(QComboBox)
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertEqual(choice.currentIndex(), -1)
+        self.assertFalse(buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled())
+
+        dialog.resize(420, 340)
+        self.pump(lambda: text.verticalScrollBar().maximum() > 0)
+        text.setFocus()
+        QTest.keyClick(text, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(text.textCursor().selectedText().replace("\u2029", "\n"), question)
+        QTest.keyClick(text, Qt.Key.Key_Home, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(text, Qt.Key.Key_End, Qt.KeyboardModifier.ControlModifier)
+        self.pump(lambda: text.verticalScrollBar().value() > 0)
+        self.assertTrue(text.textCursor().atEnd())
+        self.assertTrue(text.viewport().rect().contains(text.cursorRect()))
+        self.assertEqual(text.horizontalScrollBar().maximum(), 0)
+        self.assertTrue(dialog.rect().contains(buttons.geometry()))
+        self.assertTrue(dialog.rect().contains(choice.geometry()))
+        self.assertFalse(prompt.done.is_set())
+        self.assertIsNone(prompt.answer)
+
+        dialog.close()
+        self.pump(lambda: prompt.done.is_set() and window.app.active is None)
+        self.assertIsNone(prompt.answer)
+        self.assertFalse(prompt.complete("second result"))
+        self.assertFalse(window.dialogs.pending)
+
     def test_picker_rejection_and_draft_controls_do_not_write_configuration(self):
         window = self.window()
         initial = window.install.destination.text()
@@ -307,6 +523,157 @@ class TestQtFrontend(QtCase):
             report.assert_called_once()
         window.bridge.post(lambda: seen.append("later"))
         self.pump(lambda: seen == ["following", "later"])
+
+
+@unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
+class TestQtActivation(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import Mock
+        from ou_dedetai.qt import activation
+
+        self.activation = activation
+        mapping = patch.dict(os.environ, {"SYNTHETIC_WORKER_MARKER": "preserved"}, clear=True)
+        mapping.start()
+        self.addCleanup(mapping.stop)
+        self.addCleanup(activation.take_startup_token)
+        activation.take_startup_token()
+        self.window = Mock()
+        self.window._closing = False
+        self.window.app.stop_requested = threading.Event()
+        self.window.testAttribute.return_value = False
+        self.window.isMinimized.return_value = False
+        self.handle = self.window.windowHandle.return_value
+
+    def c_token(self):
+        from PySide6.QtCore import QProcessEnvironment
+        return QProcessEnvironment.systemEnvironment().value(self.activation.TOKEN_VARIABLE)
+
+    def assert_token_absent(self):
+        self.assertEqual(self.c_token(), "")
+        self.assertNotIn(self.activation.TOKEN_VARIABLE, os.environ)
+
+    def test_forwarded_token_reaches_single_simulated_backend_only_after_restore(self):
+        self.window.isMinimized.return_value = True
+        self.window.testAttribute.return_value = True
+
+        def restored():
+            self.assert_token_absent()
+
+        def backend():
+            self.assertEqual(self.c_token(), "synthetic-fresh-token")
+            self.assertNotIn(self.activation.TOKEN_VARIABLE, os.environ)
+            self.window.showNormal.assert_called_once()
+            self.window.setAttribute.assert_called_with(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            os.unsetenv(self.activation.TOKEN_VARIABLE)
+
+        self.window.showNormal.side_effect = restored
+        self.handle.requestActivate.side_effect = backend
+        self.activation.activate_window(self.window, "synthetic-fresh-token")
+        self.handle.requestActivate.assert_called_once_with()
+        self.window.raise_.assert_not_called()
+        self.window.activateWindow.assert_not_called()
+        self.assert_token_absent()
+
+    def test_initial_show_consumes_inherited_mapping_once_and_does_not_restore_it(self):
+        os.environ[self.activation.TOKEN_VARIABLE] = "synthetic-startup-token"
+        token = self.activation.take_startup_token()
+        self.assert_token_absent()
+
+        def backend():
+            self.assertEqual(self.c_token(), "synthetic-startup-token")
+            self.assertNotIn(self.activation.TOKEN_VARIABLE, os.environ)
+            os.unsetenv(self.activation.TOKEN_VARIABLE)
+
+        self.window.show.side_effect = backend
+        self.activation.show_initial_window(self.window, token)
+        self.assert_token_absent()
+        self.window.show.side_effect = None
+        self.activation.activate_window(self.window, "")
+        self.handle.requestActivate.assert_called_once_with()
+        self.assert_token_absent()
+
+    def test_failure_cleanup_never_restores_stale_mapping_or_c_token(self):
+        for stage in ("show", "request"):
+            with self.subTest(stage=stage):
+                os.environ[self.activation.TOKEN_VARIABLE] = "synthetic-stale-mapping"
+                os.putenv(self.activation.TOKEN_VARIABLE, "synthetic-stale-c-value")
+                if stage == "show":
+                    self.window.show.side_effect = RuntimeError("synthetic show failure")
+                    operation = self.activation.show_initial_window
+                else:
+                    self.handle.requestActivate.side_effect = RuntimeError("synthetic request failure")
+                    operation = self.activation.activate_window
+                with self.assertRaises(RuntimeError):
+                    operation(self.window, "synthetic-new-token")
+                self.assert_token_absent()
+                self.window.show.side_effect = None
+
+    def test_restore_failure_restores_attribute_and_never_publishes_token(self):
+        self.window.show.side_effect = RuntimeError("synthetic restore failure")
+        with self.assertRaises(RuntimeError):
+            self.activation.activate_window(self.window, "synthetic-token")
+        self.window.setAttribute.assert_called_with(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.handle.requestActivate.assert_not_called()
+        self.assert_token_absent()
+
+    def test_synchronous_close_during_show_skips_activation(self):
+        self.window.show.side_effect = self.window.app.stop_requested.set
+        self.activation.activate_window(self.window, "synthetic-token")
+        self.handle.requestActivate.assert_not_called()
+        self.assert_token_absent()
+
+    def test_tokenless_missing_handle_and_closing_paths_do_not_force_focus(self):
+        self.handle.requestActivate.side_effect = self.assert_token_absent
+        self.activation.activate_window(self.window, "")
+        self.handle.requestActivate.assert_called_once_with()
+        self.window.windowHandle.return_value = None
+        self.activation.activate_window(self.window, "synthetic-unused-token")
+        self.assert_token_absent()
+        self.window.reset_mock()
+        self.window._closing = True
+        self.activation.activate_window(self.window, "synthetic-token")
+        self.window.show.assert_not_called()
+        self.window._closing = False
+        self.window.app.stop_requested.set()
+        self.activation.activate_window(self.window, "synthetic-token")
+        self.window.show.assert_not_called()
+
+    def test_mime_worker_child_excludes_c_only_token_during_simulated_request(self):
+        from ou_dedetai import desktop
+
+        run = subprocess.run
+        observed = []
+        failures = []
+
+        def query(arguments, **kwargs):
+            self.assertNotIn(self.activation.TOKEN_VARIABLE, kwargs["env"])
+            code = "import os,sys\nsys.exit('XDG_ACTIVATION_TOKEN' in os.environ)\n"
+            result = run([sys.executable, "-I", "-B", "-c", code], env=kwargs["env"],
+                         capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(kwargs["env"]["SYNTHETIC_WORKER_MARKER"], "preserved")
+            return subprocess.CompletedProcess(arguments, 0, b"fixture.desktop\n")
+
+        def worker():
+            try:
+                observed.append(desktop._default("x-scheme-handler/synthetic"))
+            except (AssertionError, OSError, subprocess.SubprocessError) as error:
+                failures.append(type(error).__name__)
+
+        def backend():
+            self.assertEqual(self.c_token(), "synthetic-overlap-token")
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+
+        self.handle.requestActivate.side_effect = backend
+        with (patch.object(desktop.shutil, "which", return_value="/fixture/xdg-mime"),
+              patch.object(desktop.subprocess, "run", side_effect=query)):
+            self.activation.activate_window(self.window, "synthetic-overlap-token")
+        self.assertEqual(failures, [])
+        self.assertEqual(observed, ["fixture.desktop"])
+        self.assert_token_absent()
 
 
 class TestNoQtCLI(unittest.TestCase):

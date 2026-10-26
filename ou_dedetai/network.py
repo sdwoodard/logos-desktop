@@ -270,6 +270,69 @@ class NetworkRequests:
     def wine_appimage_versions(self, *, refresh=True):
         return self._repo_version("FaithLife-Community/wine-appimages", refresh=refresh)
 
+    def wine_release_target(self, channel="devel", *, force=False, refresh=True):
+        if channel not in ("stable", "devel"):
+            raise artifacts.ArtifactError("Unknown Wine release channel")
+        key = f"{releases.WINE_SOURCE_POLICY}:{channel}"
+        with self._lock:
+            entry = self._cache.release_entries.get(key, {})
+            entry = entry if isinstance(entry, dict) else {}
+            try:
+                target = releases.WineTarget(**entry["target"]).validate()
+                if target.channel != channel:
+                    raise ValueError("Cached Wine channel disagrees with the request")
+            except (ValueError, TypeError, KeyError):
+                target = None
+                entry = {"status": entry.get("status", "unchecked"), "retry": entry.get("retry", 0),
+                         "message": entry.get("message", "Wine release information is unavailable")}
+            checked, fresh, retry, status = self._freshness(entry)
+            revision = self._revisions.get(key, 0)
+            needed = (force or (self._force and key not in self._forced) or not fresh
+                      or status not in ("ok", "unchecked")) and time.time() >= retry
+
+        if refresh and needed:
+            def load():
+                try:
+                    return releases.fetch_wine_target(channel, _net_get)
+                except artifacts.ArtifactError as error:
+                    return error
+
+            def publish(received):
+                if isinstance(received, artifacts.ArtifactError):
+                    previous = self._cache.release_entries.get(key, {})
+                    previous = previous if isinstance(previous, dict) else {}
+                    self._cache.release_entries[key] = dict(
+                        previous, status=getattr(received, "status", "malformed"), message=str(received),
+                        retry=time.time() + max(60, getattr(received, "retry_after", 0)),
+                    )
+                else:
+                    self._cache.release_entries[key] = {
+                        "target": {"version": received.version, "channel": received.channel, "commit": received.commit},
+                        "checked": time.time(), "status": "ok", "retry": 0,
+                        "message": f"Released Wine {received.channel} {received.version} from wine-mirror/wine",
+                    }
+
+            self._refresh(key, revision, load, publish)
+            return self.wine_release_target(channel, refresh=False)
+        message = entry.get("message", "Wine release information is unavailable")
+        return releases.WineTargetLookup(target, status, message, checked,
+                                         checked is not None and (not fresh or status != "ok"))
+
+    def wine_appimage_release(self, *, force=False, refresh=True):
+        source = self.wine_release_target(force=force, refresh=refresh)
+        if source.status != "ok" or source.stale or source.target is None:
+            return releases.ReleaseLookup(status=source.status, message=source.message,
+                                          checked=source.checked, stale=source.stale)
+        catalog, checked, fresh, status, message = self._catalog(
+            releases.WINE_REPOSITORY, force=force, refresh=refresh, wine_target=source.target,
+        )
+        if catalog.latest is not None and catalog.latest.error:
+            status, message = "incompatible", catalog.latest.error
+        stale = checked is not None and (not fresh or status not in ("ok", "empty"))
+        if status == "empty":
+            status = "unavailable"
+        return releases.ReleaseLookup(catalog.latest, status, message, checked, stale)
+
     def _persist(self):
         try:
             with self._write_lock:
@@ -324,14 +387,24 @@ class NetworkRequests:
                 self._inflight.pop(key, None)
                 event.set()
 
-    def _catalog(self, repository, *, force=False, refresh=True):
+    def _catalog(self, repository, *, force=False, refresh=True, wine_target=None):
         key = releases.policy_key(repository)
+        if wine_target is not None:
+            wine_target.validate()
+            key = f"wine-appimage-2:{wine_target.channel}:{wine_target.version}:{wine_target.commit}"
         with self._lock:
             entry = self._cache.release_entries.get(key, {})
             if not isinstance(entry, dict):
                 entry = {}
             try:
                 catalog = releases.deserialize(entry.get("catalog"), repository)
+                if wine_target is not None and catalog.latest is not None:
+                    selected = catalog.latest
+                    if (selected.version != wine_target.version
+                            or selected.tag not in (f"{wine_target.version}-{wine_target.channel}",
+                                                    f"{wine_target.version}-staging")
+                            or catalog.pre_release is not None):
+                        raise ValueError("Cached Wine provider disagrees with the target")
             except (ValueError, TypeError, KeyError, artifacts.ArtifactError):
                 catalog = GithubSoftwareReleasesInfo(None, None)
                 entry = {"status": entry.get("status", "unchecked"), "message": entry.get("message", ""),
@@ -343,6 +416,8 @@ class NetworkRequests:
         if refresh and needed:
             def load():
                 try:
+                    if wine_target is not None:
+                        return releases.fetch_wine_appimage(wine_target, _net_get)
                     return _get_release_data(repository)
                 except artifacts.ArtifactError as error:
                     return GithubSoftwareReleasesInfo(None, None, "malformed", str(error))
@@ -359,7 +434,7 @@ class NetworkRequests:
                 self._cache.release_entries[key] = previous
 
             self._refresh(key, revision, load, publish)
-            return self._catalog(repository, refresh=False)
+            return self._catalog(repository, refresh=False, wine_target=wine_target)
         return catalog, checked, fresh, status, entry.get("message", "")
 
     def _repo_version(self, repository, *, refresh=True):
@@ -402,12 +477,13 @@ def _release_digest(value):
     return releases.release_digest(value)
 
 
-def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, *, kind, digest=None, size=None):
+def logos_reuse_download(sourceurl, file, targetdir, app, status_messages=True, *, kind, digest=None, size=None,
+                         msi_expectation=None):
     candidates = [Path(targetdir) / file, Path(app.conf.download_dir) / file]
     user = app.conf.user_download_dir
     if user:
         candidates.append(Path(user) / file)
-    spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest, size)
+    spec = artifacts.ArtifactSpec(sourceurl, file, kind, digest, size, msi_expectation)
     return artifacts.acquire(
         spec, Path(targetdir), candidates, app.status if status_messages else None,
         checkpoint=app.checkpoint,
@@ -422,11 +498,13 @@ def _get_release_data(repository):
     return releases.fetch(repository, _net_get)
 
 
-def download_recommended_appimage(app):
-    catalog = app.conf._network.wine_appimage_versions()
-    release = catalog.latest
-    if catalog.status != "ok" or release is None or release.error:
-        raise artifacts.ArtifactError("No recommended AppImage release is available")
+def download_recommended_appimage(app, release=None):
+    if release is None:
+        lookup = app.conf._network.wine_appimage_release()
+        if lookup.status != "ok" or lookup.stale or lookup.release is None:
+            raise artifacts.ArtifactError(lookup.message)
+        release = lookup.release
+    release.spec("appimage").validate()
     return logos_reuse_download(
         release.download_url, release.name, app.conf.installer_binary_dir,
         app, kind="appimage", digest=release.digest, size=release.size,

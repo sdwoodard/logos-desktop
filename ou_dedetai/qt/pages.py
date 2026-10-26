@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ou_dedetai import constants
+from ou_dedetai import constants, releases
 
 
 def heading(text, size=17):
@@ -100,6 +100,9 @@ class CarePage(QWidget):
                 self.buttons[key] = action
                 menu.addAction(action)
         self.tools.setMenu(menu)
+        self.wine_status = description("")
+        self.wine_status.setTextFormat(Qt.TextFormat.PlainText)
+        tools.content.addWidget(self.wine_status)
         tools.content.addWidget(self.tools, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(tools)
         layout.addStretch()
@@ -189,7 +192,8 @@ class ProfileSettings(Card):
         row.addWidget(save)
         form.addRow("Backup folder", row)
         self.content.addLayout(form)
-        self.content.addWidget(description("Updates use the latest stable releases."))
+        self.content.addWidget(description("Logos and LogosDesktop updates use the latest stable releases. "
+                                           + releases.WINE_RECOMMENDATION_POLICY))
 
         self.advanced = QToolButton()
         self.advanced.setText("Advanced installation settings")
@@ -206,6 +210,9 @@ class ProfileSettings(Card):
         self.runtime = description("")
         self.runtime.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         fields.addRow("Wine runtime", self.runtime)
+        self.wine_status = description("")
+        self.wine_status.setTextFormat(Qt.TextFormat.PlainText)
+        fields.addRow("Wine recommendation", self.wine_status)
         self.choose_profile = QPushButton("Choose installation profile…")
         self.choose_runtime = QPushButton("Change Wine AppImage…")
         for button, signal in ((self.choose_profile, self.profile_requested),
@@ -235,4 +242,5 @@ class ProfileSettings(Card):
         self.profile.setText(snapshot.profile)
         self.location.setText(snapshot.path)
         self.runtime.setText(snapshot.runtime)
+        self.wine_status.setText(snapshot.wine_status)
         self.backup.setText(snapshot.backup)

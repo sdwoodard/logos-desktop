@@ -17,6 +17,7 @@ import threading
 from . import cli
 from . import artifacts
 from . import constants
+from . import releases
 from . import msg
 from . import maintenance
 from . import system
@@ -181,7 +182,7 @@ def get_parser():
     )
     cmd.add_argument(
         '--update-latest-appimage', '-U', action='store_true',
-        help='Update the to the latest AppImage.',
+        help=f'Update the managed Wine AppImage. {releases.WINE_RECOMMENDATION_POLICY}',
     )
     cmd.add_argument(
         '--set-appimage', nargs=1, metavar=('APPIMAGE_FILE_PATH'),

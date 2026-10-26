@@ -114,10 +114,10 @@ class WatcherHealth:
 def watch_db(path: str, sql_statements: list[str], stop: threading.Event, health=None):
     try:
         _watch_db(path, sql_statements, stop, health)
-    except Exception as error:
+    except Exception:
         if health is None:
             raise
-        health.error = str(error)
+        health.error = "Database protection worker stopped. Restart the managed application"
         health.ready.set()
 
 
@@ -146,6 +146,8 @@ def _watch_db(path, sql_statements, stop, health):
                     info = path.stat()
                     current = (info.st_dev, info.st_ino)
                     if identity != current:
+                        if health is not None:
+                            health.ready.clear()
                         if connection is not None:
                             connection.close()
                             connection = None
@@ -181,11 +183,12 @@ def _watch_db(path, sql_statements, stop, health):
                     identity = None
                     key = (type(error), str(error))
                     if key != last_error:
-                        logging.warning("Database enforcement will retry: %s", error)
+                        logging.warning("Database enforcement will retry (%s)", type(error).__name__)
                         last_error = key
                     next_check = time.monotonic() + 1
                     if health is not None:
-                        health.error = str(error)
+                        health.ready.clear()
+                        health.error = "Database protection could not commit. Retrying"
 
             ready, _, _ = select.select([descriptor], [], [], 0.2)
             if ready:
