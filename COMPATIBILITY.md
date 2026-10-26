@@ -1,8 +1,9 @@
 # Runtime compatibility during private development
 
 These observations are from native CachyOS testing on 2026-10-26. They are not a
-supported distribution or hardware matrix. LogosDesktop remains private
-development source, with no supported installation package yet.
+supported distribution or hardware matrix. LogosDesktop remains private.
+Wheel-environment and Arch source candidates have bounded M14 evidence. Renamed
+1.0.0 candidates require their own migration/update validation before release.
 
 ## Current runtime policy
 
@@ -80,4 +81,4 @@ before attributing such a failure to Wine, DXVK or the kernel.
 
 Wine 10.8 observations remain historical evidence, not current-runtime acceptance.
 Container source probes are experimental and do not establish desktop support.
-Flatpak distribution and release packaging remain separate work.
+Flatpak is deferred. Public release availability remains separate from candidate testing.

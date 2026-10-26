@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, network, processes, releases, tui_app
-from ou_dedetai.config import Config, PersistentConfiguration
-from ou_dedetai.logos import State
+from logos_desktop import constants, network, processes, releases, tui_app
+from logos_desktop.config import Config, PersistentConfiguration
+from logos_desktop.logos import State
 from tests.test_releases import release_item
 
 

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import psutil
 
-from ou_dedetai import cli, constants, logos, main, maintenance, wine
+from logos_desktop import cli, constants, logos, main, maintenance, wine
 from tests.test_app_exit import TestApp
 from tests.test_backup import fixture_app
 
@@ -37,19 +37,19 @@ class TestLifecycle(unittest.TestCase):
         conf.faithlife_product_version = "10"
         conf._logos_appdata_dir = None
         conf._overrides.quiet = False
-        with patch("ou_dedetai.config.Config", return_value=conf):
+        with patch("logos_desktop.config.Config", return_value=conf):
             self.app = TestApp(None)
         self.app.is_installed = lambda: True
         self.app.status = Mock()
         self.manager = self.app.logos
         self.context = maintenance.Context.from_app(self.app)
         self.addCleanup(self.app.close)
-        self.stack.enter_context(patch("ou_dedetai.runtime.executable", return_value="fixture-runtime"))
+        self.stack.enter_context(patch("logos_desktop.runtime.executable", return_value="fixture-runtime"))
         self.stack.enter_context(patch.object(
             wine, "get_wine_release", return_value=(wine.WineRelease(10, 8, "staging"), "yes"),
         ))
         self.stack.enter_context(patch.object(wine, "check_wine_rules", return_value=(True, None)))
-        self.stack.enter_context(patch("ou_dedetai.repair.inspect", return_value=None))
+        self.stack.enter_context(patch("logos_desktop.repair.inspect", return_value=None))
 
     def child(self, query, *, prefix=None, ignore_term=False):
         program = "import signal,time\n"
@@ -617,7 +617,7 @@ time.sleep(2)
             program = """
 import sys
 from pathlib import Path
-from ou_dedetai import constants,maintenance
+from logos_desktop import constants,maintenance
 constants.STATE_DIR=sys.argv[2]
 try:
     with maintenance.Lease(maintenance.Context(Path(sys.argv[1])),role='index').entered():

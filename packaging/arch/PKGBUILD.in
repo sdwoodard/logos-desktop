@@ -41,15 +41,15 @@ package() {
 
   install -Dm644 packaging/logos-desktop.desktop \
     "$pkgdir/usr/share/applications/logos-desktop.desktop"
-  install -Dm644 ou_dedetai/img/logos-desktop.svg \
+  install -Dm644 logos_desktop/img/logos-desktop.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/logos-desktop.svg"
-  install -Dm644 ou_dedetai/img/logos-desktop-icon.png \
+  install -Dm644 logos_desktop/img/logos-desktop-icon.png \
     "$pkgdir/usr/share/icons/hicolor/256x256/apps/logos-desktop.png"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  install -Dm644 ou_dedetai/img/lucide-LICENSE.txt \
+  install -Dm644 logos_desktop/img/lucide-LICENSE.txt \
     "$pkgdir/usr/share/licenses/$pkgname/lucide-LICENSE.txt"
   install -Dm644 packaging/LICENSE "$pkgdir/usr/share/licenses/$pkgname/recipe-LICENSE"
-  install -Dm644 ou_dedetai/img/ATTRIBUTION.md \
+  install -Dm644 logos_desktop/img/ATTRIBUTION.md \
     "$pkgdir/usr/share/licenses/$pkgname/ATTRIBUTION.md"
 }

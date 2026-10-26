@@ -11,8 +11,8 @@ from unittest.mock import Mock, patch
 import requests
 import olefile
 
-from ou_dedetai import artifacts, constants, installer, maintenance, msi as msi_format, network
-from ou_dedetai.app import UserExitedFromAsk
+from logos_desktop import artifacts, constants, installer, maintenance, msi as msi_format, network
+from logos_desktop.app import UserExitedFromAsk
 from tests.artifact_fixtures import (
     appimage, directory_msi, msi, mszip_cabinet, pe_header, product_msi,
     summary_properties, winetricks_zip,

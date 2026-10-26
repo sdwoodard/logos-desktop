@@ -17,9 +17,9 @@ class TestContributorSetup(unittest.TestCase):
             for name in ("renamed checkout 文", "another-name"):
                 project = root / name
                 (project / "scripts").mkdir(parents=True)
-                (project / "ou_dedetai").mkdir()
+                (project / "logos_desktop").mkdir()
                 (project / "pyproject.toml").touch()
-                (project / "ou_dedetai/main.py").touch()
+                (project / "logos_desktop/main.py").touch()
                 script = project / "scripts/ensure-venv.sh"
                 shutil.copy2(REPODIR / "scripts/ensure-venv.sh", script)
                 stub = root / "python fixture"
@@ -46,7 +46,7 @@ pathlib.Path(sys.argv[-1]).mkdir()
     def test_pid_test_callbacks_cannot_remove_restored_path_at_normal_exit(self):
         program = '''
 import sys, unittest
-from ou_dedetai import constants
+from logos_desktop import constants
 from tests.test_utils import TestAppUtils
 constants.PID_FILE = sys.argv[1]
 names = ('test_die_if_running_nofile', 'test_die_if_running_withfile')

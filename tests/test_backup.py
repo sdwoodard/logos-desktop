@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import backup, backup_store as store, constants, maintenance
-from ou_dedetai.app import UserExitedFromAsk
+from logos_desktop import backup, backup_store as store, constants, maintenance
+from logos_desktop.app import UserExitedFromAsk
 
 
 def fixture_app(root):
@@ -371,7 +371,7 @@ class TestBackupTransactions(unittest.TestCase):
         program = """
 import os,sys
 from pathlib import Path
-from ou_dedetai import backup,backup_store as store,constants
+from logos_desktop import backup,backup_store as store,constants
 from tests.test_backup import fixture_app
 root=Path(sys.argv[1])
 constants.STATE_DIR=sys.argv[2]
@@ -389,7 +389,7 @@ backup.RestoreTask(fixture_app(root),source=sys.argv[3]).run()
         recovery = """
 import sys
 from pathlib import Path
-from ou_dedetai import backup_store,constants,maintenance
+from logos_desktop import backup_store,constants,maintenance
 from tests.test_backup import fixture_app
 constants.STATE_DIR=sys.argv[2]
 context=maintenance.Context.from_app(fixture_app(Path(sys.argv[1])))
@@ -449,7 +449,7 @@ backup_store.recover_pending_restore(context)
         program = """
 import os,sys
 from pathlib import Path
-from ou_dedetai import backup,backup_store as store,constants
+from logos_desktop import backup,backup_store as store,constants
 from tests.test_backup import fixture_app
 constants.STATE_DIR=sys.argv[2]
 move=store._move
@@ -476,7 +476,7 @@ backup.RestoreTask(fixture_app(Path(sys.argv[1])),source=sys.argv[3]).run()
         recovery = """
 import sys
 from pathlib import Path
-from ou_dedetai import backup_store,constants,maintenance
+from logos_desktop import backup_store,constants,maintenance
 from tests.test_backup import fixture_app
 constants.STATE_DIR=sys.argv[2]
 context=maintenance.Context.from_app(fixture_app(Path(sys.argv[1])))
@@ -588,7 +588,7 @@ backup_store.recover_pending_restore(context)
         program = """
 import os,sys
 from pathlib import Path
-from ou_dedetai import backup,backup_store as store,constants
+from logos_desktop import backup,backup_store as store,constants
 from tests.test_backup import fixture_app
 constants.STATE_DIR=sys.argv[2]
 journal=store._journal

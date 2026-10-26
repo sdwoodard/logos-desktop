@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-import ou_dedetai.constants as constants
-import ou_dedetai.utils as utils
+import logos_desktop.constants as constants
+import logos_desktop.utils as utils
 from . import REPODIR
 from . import TESTDATADIR
 
@@ -245,7 +245,7 @@ class TestGeneralUtils(unittest.TestCase):
     def test_get_latest_folder(self):
         pass
 
-    @unittest.skip("Must be tested on actual oudedetai binary.")
+    @unittest.skip("Requires an actual standalone binary.")
     def test_get_lli_release_version(self):
         pass
 
@@ -316,7 +316,7 @@ class TestGeneralUtils(unittest.TestCase):
         for s in ["True", "TRUE", "Yes", "Y", "y", "1"]:
             self.assertTrue(utils.parse_bool(s))
 
-    @unittest.skip("Test requires oudedetai binary.")
+    @unittest.skip("Requires an actual standalone binary.")
     def test_restart_lli(self):
         pass
 
@@ -328,6 +328,6 @@ class TestGeneralUtils(unittest.TestCase):
     def test_untar_file(self):
         pass
 
-    @unittest.skip("Test requires oudedetai binary.")
+    @unittest.skip("Requires an actual standalone binary.")
     def test_update_to_latest_lli_release(self):
         pass

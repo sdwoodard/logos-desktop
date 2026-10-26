@@ -9,11 +9,29 @@ See [configuration and recovery](CONFIGURATION.md), [backups](BACKUPS.md) and th
 license credit remain in [README](README.md), [CONTRIBUTING](CONTRIBUTING.md) and
 [LICENSE](LICENSE).
 
-## Read-only diagnosis
+## Start with the symptom
+
+| Symptom | Next step |
+| --- | --- |
+| Command is missing or opens another installation | Use the stable launcher for your selected installation, as described below |
+| Home has no installation selected | Select an existing configuration explicitly or review a new installation from Home |
+| An older controller blocks startup | Close that selected controller normally. Do not kill unrelated Wine processes or delete ownership locks |
+| Controller update is unavailable or behind a source release | Check the installation provider in Backups & tools. Package lag is different from an offline or missing provider |
+| Wine recommendation is unavailable | Check COMPATIBILITY.md and the actual provider result. Do not substitute an arbitrary older runtime |
+| Restore or migration reports a conflict | Preserve the reported recovery journal and previous data. Inspect the conflicting paths before retrying |
+| Logos opens but scrolling or rendering is poor | Read the dated graphics limitations and record the selected Wine, GPU/driver and reproduction |
+
+Report a reproducible problem in the private project's
+[issues](https://github.com/sdwoodard/logos-desktop/issues). Repository access is
+required. Do not post unreviewed archives or credentials.
+
+## Run a read-only check
+
+First [select your controller launcher](INSTALL.md#select-your-launcher-for-shared-commands).
 
 ```bash
-logos-desktop -c /absolute/path/profile.json --status
-logos-desktop -c /absolute/path/profile.json --doctor
+"$controller" -c /absolute/path/profile.json --status
+"$controller" -c /absolute/path/profile.json --doctor
 ```
 
 `--status` inspects the selected installation. `--doctor` reports architecture,
@@ -38,8 +56,8 @@ path and separate permission to replace an existing file. The interactive CLI
 For an explicit CLI output path:
 
 ```bash
-logos-desktop -c /absolute/path/profile.json --support-preview
-logos-desktop -c /absolute/path/profile.json --support-export /absolute/private/folder/support.zip --confirm-export
+"$controller" -c /absolute/path/profile.json --support-preview
+"$controller" -c /absolute/path/profile.json --support-export /absolute/private/folder/support.zip --confirm-export
 ```
 
 `--support-preview` prints every member name and its text without exporting.
@@ -51,7 +69,8 @@ archive always contains the snapshot printed by its export invocation.
 Existing output requires another explicit option:
 
 ```bash
-logos-desktop -c /absolute/path/profile.json --support-export /absolute/private/folder/support.zip --confirm-export --overwrite-export
+"$controller" -c /absolute/path/profile.json \
+  --support-export /absolute/private/folder/support.zip --confirm-export --overwrite-export
 ```
 
 Choose a `.zip` path in an existing owned directory that is not writable by other

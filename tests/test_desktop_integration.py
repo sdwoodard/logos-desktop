@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import adoption, config_store, constants, desktop
+from logos_desktop import adoption, config_store, constants, desktop
 
 
 class TestMimeEnvironment(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestMimeEnvironment(unittest.TestCase):
 
 class TestDesktopIntegration(unittest.TestCase):
     def test_managed_entries_use_stable_launcher_and_preserve_profile_arguments(self):
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         for owner, launcher in (("venv", self.root / "controller/logos-desktop"),
                                 ("aur", Path("/usr/bin/logos-desktop"))):
@@ -203,7 +203,7 @@ class TestDesktopIntegration(unittest.TestCase):
         program = """
 import sys
 from pathlib import Path
-from ou_dedetai import constants,desktop
+from logos_desktop import constants,desktop
 constants.COORDINATION_DIR=Path(sys.argv[1])
 with desktop.integration_lock():
     print('acquired',flush=True)

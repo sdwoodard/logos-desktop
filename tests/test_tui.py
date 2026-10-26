@@ -8,14 +8,14 @@ from unittest.mock import Mock, patch
 
 from textual.widgets import Input, Log, OptionList
 
-from ou_dedetai import constants, processes, releases, tui_app
-from ou_dedetai.config import EphemeralConfiguration
-from ou_dedetai.logos import State
+from logos_desktop import constants, processes, releases, tui_app
+from logos_desktop.config import EphemeralConfiguration
+from logos_desktop.logos import State
 
 
 class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
     async def test_close_waits_for_startup_inspection_and_discards_its_late_result(self):
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         entered, release = threading.Event(), threading.Event()
         closed = asyncio.Event()
@@ -52,7 +52,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(domain._threads)
 
     async def test_explicit_check_wins_over_late_startup_identity_without_dismissing_modal(self):
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         entered, release = threading.Event(), threading.Event()
         published = asyncio.Event()
@@ -94,7 +94,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
                     release.set()
 
     async def test_delayed_startup_inspection_admits_first_action_and_preserves_its_prompt(self):
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         entered, release = threading.Event(), threading.Event()
         published = asyncio.Event()
@@ -150,8 +150,8 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
                     release.set()
 
     async def test_checkpoint_cancellation_during_real_handoff_keeps_tui_and_restores_lease(self):
-        from ou_dedetai import controller_install, instance
-        from ou_dedetai.app import UserExitedFromAsk
+        from logos_desktop import controller_install, instance
+        from logos_desktop.app import UserExitedFromAsk
 
         entered, finish, cancelled = threading.Event(), threading.Event(), threading.Event()
         self.addCleanup(finish.set)
@@ -204,7 +204,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(domain._controller_result)
 
     async def test_managed_check_is_explicit_and_handoff_closes_old_tui(self):
-        from ou_dedetai import controller_install, utils
+        from logos_desktop import controller_install, utils
 
         identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
         with (patch.object(controller_install, "identify", return_value=identity),

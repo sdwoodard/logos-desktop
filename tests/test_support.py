@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import constants, control, doctor, maintenance, support
+from logos_desktop import constants, control, doctor, maintenance, support
 from tests.test_doctor import StoredOnly
 
 

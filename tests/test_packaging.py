@@ -3,7 +3,7 @@
 from pathlib import Path
 import unittest
 
-from ou_dedetai import constants
+from logos_desktop import constants
 
 
 class PackagedResources(unittest.TestCase):

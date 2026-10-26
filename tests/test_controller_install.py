@@ -1,7 +1,10 @@
 from contextlib import ExitStack
+import base64
+import csv
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.metadata
+import io
 import json
 import os
 from pathlib import Path
@@ -20,8 +23,8 @@ from unittest.mock import Mock, patch
 import venv
 import zipfile
 
-from ou_dedetai import constants, controller_install as install
-import ou_dedetai
+from logos_desktop import constants, controller_install as install
+import logos_desktop
 
 
 class ControllerInstallTests(unittest.TestCase):
@@ -30,6 +33,7 @@ class ControllerInstallTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.home = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.stack.enter_context(patch.object(Path, "home", return_value=self.home))
+        self.stack.enter_context(patch.object(install.pwd, "getpwuid", return_value=Mock(pw_dir=str(self.home))))
         self.root = self.home / "controller"
         self.root.mkdir(mode=0o700)
         (self.root / "versions").mkdir(mode=0o700)
@@ -49,7 +53,7 @@ class ControllerInstallTests(unittest.TestCase):
         version, digest = prefix.name.split("-", 1)
         venv.EnvBuilder(with_pip=False, symlinks=True).create(prefix)
         site = next((prefix / "lib").glob("python*/site-packages"))
-        package = site / "ou_dedetai"
+        package = site / "logos_desktop"
         package.mkdir()
         (package / "__init__.py").write_text("")
         (package / "constants.py").write_text(f"APP_VERSION = {version!r}\n")
@@ -64,20 +68,208 @@ class ControllerInstallTests(unittest.TestCase):
         metadata = site / f"logos_desktop-{version}.dist-info"
         metadata.mkdir()
         (metadata / "METADATA").write_text(f"Metadata-Version: 2.1\nName: logos-desktop\nVersion: {version}\n")
-        (metadata / "entry_points.txt").write_text("[console_scripts]\nlogos-desktop = ou_dedetai.main:main\n")
+        (metadata / "entry_points.txt").write_text("[console_scripts]\nlogos-desktop = logos_desktop.main:main\n")
         (metadata / "direct_url.json").write_text(json.dumps({"archive_info": {"hashes": {"sha256": digest}}}))
         (metadata / "RECORD").write_text(
-            f"ou_dedetai/__init__.py,,\n{metadata.name}/METADATA,,\n"
+            f"logos_desktop/__init__.py,,\n{metadata.name}/METADATA,,\n"
         )
         entry = prefix / "bin/logos-desktop"
         entry.write_text(f"#!{prefix}/bin/python\n")
         entry.chmod(0o700)
         return prefix, package, importlib.metadata.Distribution.at(metadata)
 
+    def recorded_distribution(self):
+        prefix, package, distribution = self.distribution()
+        (package / "main.py").write_text("def main():\n    pass\n")
+        metadata = Path(distribution._path)
+        paths = [*package.rglob("*"), *metadata.iterdir(), prefix / "bin/logos-desktop"]
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for path in paths:
+            if not path.is_file() or path.name == "RECORD":
+                continue
+            content = path.read_bytes()
+            digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+            writer.writerow((os.path.relpath(path, metadata.parent), "sha256=" + digest, len(content)))
+        writer.writerow((metadata.name + "/RECORD", "", ""))
+        (metadata / "RECORD").write_text(output.getvalue())
+        return prefix, package, metadata
+
+    def test_migration_inventory_rejects_modified_bytes_and_escaping_record(self):
+        prefix, package, metadata = self.recorded_distribution()
+        evidence = install.installed_evidence(prefix)
+        self.assertIn("bin/logos-desktop", evidence)
+        original = (package / "main.py").read_bytes()
+        (package / "main.py").write_bytes(b"changed")
+        with self.assertRaisesRegex(install.InstallError, "differs"):
+            install.installed_evidence(prefix)
+        (package / "main.py").write_bytes(original)
+        with (metadata / "RECORD").open("a") as output:
+            output.write("../../../../../../outside,,\n")
+        with self.assertRaisesRegex(install.InstallError, "outside"):
+            install.installed_evidence(prefix)
+
+    def test_migration_rollback_uses_recorded_bytes_without_old_namespace_probe(self):
+        prefix, package, metadata = self.recorded_distribution()
+        evidence = install.installed_evidence(prefix)
+        record = install._activate(self.root, self.b, "1.1.0", previous_files=evidence)
+        with patch.object(install, "_probe", side_effect=AssertionError("old module executed")):
+            self.assertTrue(install._recover(self.root, record))
+        self.assertEqual(install._target(self.root), self.a)
+        record = install._activate(self.root, self.b, "1.1.0", previous_files=evidence)
+        (package / "main.py").write_text("changed")
+        with self.assertRaises(install.InstallError):
+            install._recover(self.root, record)
+        self.assertEqual(install._target(self.root), self.b)
+        install._publish(self.root, self.c)
+        with self.assertRaisesRegex(install.InstallError, "later publication"):
+            install._recover(self.root, record)
+        self.assertEqual(install._target(self.root), self.c)
+
+    def test_explicit_migration_preserves_provider_profile_and_preparation_failure(self):
+        self.recorded_distribution()
+        profile = self.home / "selected profile.json"
+        profile.write_text('{"install_dir": "/fixture/library"}')
+        self.provider({"manifest_url": "https://example.invalid/releases"})
+        before = profile.read_bytes(), self.identity.provider_path.read_bytes()
+        wheel, data = self.wheel()
+        with (patch.object(install, "_migration_quiet"),
+              patch.object(install, "_install", side_effect=OSError("disk full"))):
+            with self.assertRaises(OSError):
+                install.migrate(self.root, wheel, data, str(profile), "qt")
+        self.assertEqual(install._target(self.root), self.a)
+        self.assertFalse((self.root / "operation.json").exists())
+        with (patch.object(install, "_migration_quiet"),
+              patch.object(install, "_install", return_value=self.b),
+              patch.object(install, "_launch", return_value=install.Result("updated", "ready")) as launch):
+            result = install.migrate(self.root, wheel, data, str(profile), "qt")
+        self.assertEqual(result.status, "migrated")
+        self.assertEqual(launch.call_args.args[2:], (profile, "qt"))
+        self.assertTrue(install._receipt(self.root)["previous_files"])
+        self.assertEqual((profile.read_bytes(), self.identity.provider_path.read_bytes()), before)
+
+    def test_migration_refuses_actual_relative_and_alias_invocations(self):
+        child_script = self.root / "idle.py"
+        child_script.write_text("import sys\nprint('ready', flush=True)\nsys.stdin.readline()\n")
+        alias = self.home / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        for argument in ("./idle.py", str(alias / "idle.py")):
+            with self.subTest(argument=argument):
+                child = subprocess.Popen([sys.executable, argument], cwd=self.root, text=True,
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), "ready")
+                    with self.assertRaisesRegex(install.InstallError, "Close controllers"):
+                        install._migration_quiet(self.root)
+                finally:
+                    child.communicate("\n", timeout=5)
+                self.assertEqual(child.returncode, 0)
+
+    def test_migration_receipt_budget_refuses_before_any_publication(self):
+        evidence = {f"file-{number}": "a" * 64 for number in range(1000)}
+        with self.assertRaisesRegex(install.InstallError, "receipt size"):
+            install._activate(self.root, self.b, "1.1.0", previous_files=evidence)
+        self.assertEqual(install._target(self.root), self.a)
+        self.assertFalse((self.root / "operation.json").exists())
+
+    def test_migration_preserves_pending_runtime_journal_before_install_and_after_prepare(self):
+        self.recorded_distribution()
+        profile = self.home / "profile.json"
+        library = self.home / "library"
+        profile.write_text(json.dumps({"install_dir": str(library)}))
+        state = self.home / ".local/state/logos-desktop"
+        key = hashlib.sha256(os.fsencode(library)).hexdigest()
+        journal = state / "runtime-selection" / key / "runtime.json"
+        journal.parent.mkdir(parents=True)
+        content = b'{"previous": [{"path": "explicit historical fixture"}]}\n'
+        wheel, data = self.wheel()
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
+            for phase in ("preflight", "preparation"):
+                def prepare(*args):
+                    journal.write_bytes(content)
+                    return self.b
+
+                if phase == "preflight":
+                    journal.write_bytes(content)
+                with (patch.object(install, "_migration_quiet"),
+                      patch.object(install, "_install", side_effect=prepare) as install_wheel):
+                    with self.assertRaisesRegex(install.InstallError, "previous controller"):
+                        install.migrate(self.root, wheel, data, str(profile), "qt")
+                    if phase == "preflight":
+                        install_wheel.assert_not_called()
+                self.assertEqual(install._target(self.root), self.a)
+                self.assertFalse((self.root / "operation.json").exists())
+                self.assertEqual(journal.read_bytes(), content)
+                journal.unlink()
+
+    def test_migration_reservation_uses_existing_prefix_protocol_and_releases(self):
+        from logos_desktop import instance
+
+        config = self.home / "profile.json"
+        prefix = self.home / "library/data/wine64_bottle"
+        config.write_text(json.dumps({"install_dir": str(prefix.parent.parent)}))
+        coordination = self.home / ".local/state/logos-desktop/coordination"
+        with patch.object(constants, "COORDINATION_DIR", coordination):
+            with install._migration_reservation(config):
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.Session(prefix).acquire()
+            with patch.object(instance, "check_legacy"), instance.Session(prefix):
+                with self.assertRaises(install.InstallError):
+                    with install._migration_reservation(config):
+                        self.fail("Migration admitted an owned prefix")
+
+    def test_migration_refuses_inaccessible_known_recovery_locations(self):
+        self.recorded_distribution()
+        profile = self.home / 'profile.json'
+        library = self.home / 'library'
+        prefix = library / 'data/wine64_bottle'
+        profile.write_text(json.dumps({'install_dir': str(library)}))
+        coordination = self.home / '.local/state/logos-desktop/coordination'
+        operations = coordination / 'operations'
+        directory = operations / hashlib.sha256(os.fsencode(prefix)).hexdigest()
+        directory.mkdir(mode=0o700, parents=True)
+        coordination.chmod(0o700)
+        operations.chmod(0o700)
+        state = self.home / 'alternate-state/logos-desktop'
+        journal = state / 'runtime-selection' / hashlib.sha256(os.fsencode(library)).hexdigest() / 'runtime.json'
+        journal.parent.mkdir(parents=True)
+        journal.write_bytes(b'pending historical fixture\n')
+        location = json.dumps({'schema_version': 1, 'state_dir': str(state),
+                               'install': str(library), 'prefix': str(prefix)}, sort_keys=True).encode()
+        record = directory / ('state-' + hashlib.sha256(location).hexdigest() + '.json')
+        record.write_bytes(location)
+        record.chmod(0o600)
+        wheel, data = self.wheel()
+        operations.chmod(0o000)
+        try:
+            with patch.object(install, '_install') as prepare:
+                with self.assertRaises(PermissionError):
+                    install.migrate(self.root, wheel, data, str(profile), 'qt')
+                prepare.assert_not_called()
+        finally:
+            operations.chmod(0o700)
+        self.assertEqual(install._target(self.root), self.a)
+        self.assertFalse((self.root / 'operation.json').exists())
+        self.assertEqual(journal.read_bytes(), b'pending historical fixture\n')
+
+    def test_migration_detects_alias_to_shared_venv_interpreter(self):
+        prefix, package, distribution = self.distribution()
+        alias = self.home / "external-alias"
+        alias.symlink_to(self.root / "current", target_is_directory=True)
+        child = subprocess.Popen([str(alias / "bin/python"), "-c",
+                                  "import sys\nprint('ready', flush=True)\nsys.stdin.readline()\n"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "ready")
+            with self.assertRaisesRegex(install.InstallError, "Close controllers"):
+                install._migration_quiet(self.root)
+        finally:
+            child.communicate("\n", timeout=5)
+
     def runtime(self, prefix, package, distribution):
         self.stack.enter_context(patch.object(sys, "prefix", str(prefix)))
         self.stack.enter_context(patch.object(sys, "executable", str(prefix / "bin/python")))
-        self.stack.enter_context(patch.object(ou_dedetai, "__file__", str(package / "__init__.py")))
+        self.stack.enter_context(patch.object(logos_desktop, "__file__", str(package / "__init__.py")))
         self.stack.enter_context(patch.object(constants, "APP_VERSION", distribution.version))
         self.stack.enter_context(patch.object(importlib.metadata, "distribution", return_value=distribution))
         self.stack.enter_context(patch.object(install, "_owner", return_value=[]))
@@ -89,7 +281,7 @@ class ControllerInstallTests(unittest.TestCase):
     def wheel(self, content=None):
         path = self.home / "logos_desktop-1.1.0-py3-none-any.whl"
         with zipfile.ZipFile(path, "w") as archive:
-            archive.writestr("ou_dedetai/controller_install.py", content or "# fixture\n")
+            archive.writestr("logos_desktop/controller_install.py", content or "# fixture\n")
         data = {"filename": path.name, "version": "1.1.0", "size": path.stat().st_size,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "url": "https://example.invalid/wheel"}
         return path, data
@@ -190,7 +382,7 @@ class ControllerInstallTests(unittest.TestCase):
     def test_loaded_source_shadowing_is_rejected(self):
         prefix, package, distribution = self.distribution()
         self.runtime(prefix, package, distribution)
-        with patch.object(ou_dedetai, "__file__", str(self.home / "source/__init__.py")):
+        with patch.object(logos_desktop, "__file__", str(self.home / "source/__init__.py")):
             self.assertIn("Loaded source", install.identify().message)
 
     def test_real_probe_rejects_missing_packaged_resource(self):
@@ -640,7 +832,7 @@ class ControllerInstallTests(unittest.TestCase):
         record = install._activate(self.root, self.b, "1.1.0")
         source = (
             "from pathlib import Path\n"
-            "from ou_dedetai import controller_install as c\n"
+            "from logos_desktop import controller_install as c\n"
             f"root = Path({str(self.root)!r})\n"
             "result = c._launch(root, c._receipt(root), None, 'qt', observation_seconds=0.05)\n"
             "print(result.status, flush=True)\n"
@@ -680,7 +872,7 @@ class ControllerInstallTests(unittest.TestCase):
         source = (
             "import fcntl, os, termios\nfrom pathlib import Path\n"
             "os.setsid()\nfcntl.ioctl(0, termios.TIOCSCTTY, 0)\n"
-            "from ou_dedetai import controller_install as c\n"
+            "from logos_desktop import controller_install as c\n"
             f"root = Path({str(self.root)!r})\n"
             "c.identify = lambda: c.Identity('venv', root=root)\n"
             "c.recover = lambda identity: c.Result('recovered', 'fixture')\n"
@@ -775,7 +967,7 @@ class ControllerInstallTests(unittest.TestCase):
         (package / "controller_install.py").write_text(Path(install.__file__).read_text())
         entry = prefix / "bin/logos-desktop"
         entry.write_text(f"#!{prefix}/bin/python\n"
-                         "from ou_dedetai.controller_install import confirm_startup\n"
+                         "from logos_desktop.controller_install import confirm_startup\n"
                          "confirm_startup()\n")
         record = install._activate(self.root, self.b, "1.1.0")
         with patch.dict(os.environ, {"HOME": str(self.home), "PATH": str(self.home / "no-package-tools")}):
@@ -865,7 +1057,7 @@ class ControllerInstallTests(unittest.TestCase):
                     self.assertTrue(launch.call_args.kwargs["start_new_session"])
                     expected = ["handoff", "--frontend", frontend, "--config", str(profile)]
                     self.assertEqual(result.command, (str(prefix / "bin/python"), "-I", "-m",
-                                                      "ou_dedetai.controller_install", *expected))
+                                                      "logos_desktop.controller_install", *expected))
                     env = launch.call_args.kwargs["env"]
                     wrapped = subprocess.run(terminal_argv[2:], env=env, capture_output=True, text=True, timeout=10)
                     self.assertEqual(wrapped.returncode, 0, wrapped.stderr)
@@ -1184,7 +1376,7 @@ class ControllerInstallTests(unittest.TestCase):
                     from pathlib import Path
                     import subprocess
                     import termios
-                    from ou_dedetai import controller_install as c
+                    from logos_desktop import controller_install as c
 
                     os.setsid()
                     fcntl.ioctl(0, termios.TIOCSCTTY, 0)

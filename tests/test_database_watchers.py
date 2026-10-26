@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import database
+from logos_desktop import database
 
 
 class TestDatabaseWatchers(unittest.TestCase):

@@ -1,0 +1,36 @@
+name: Report a reproducible problem
+description: Explain one failure and the steps that lead to it.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [support](https://github.com/sdwoodard/logos-desktop/blob/main/SUPPORT.md)
+        and [compatibility](https://github.com/sdwoodard/logos-desktop/blob/main/COMPATIBILITY.md) first. Do not attach account links,
+        passwords, library databases, personal notes or unchecked support archives.
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened?
+      description: Include the expected result and exact error text after removing private paths or tokens.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe one specific workflow, including which profile and update owner were selected without exposing private contents.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and installation route
+      description: Controller version, distro, desktop/session, wheel or Arch route, Wine/provider and Logos version. Add GPU/driver details for rendering problems.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: What have you checked?
+      description: Relevant Doctor findings or a short redacted diagnostic excerpt. Keep the original archive private.

@@ -17,9 +17,9 @@ from unittest.mock import Mock, patch
 
 import psutil
 
-from ou_dedetai import constants, instance, main, maintenance, runtime
-from ou_dedetai.app import App
-from ou_dedetai.config import Config, EphemeralConfiguration
+from logos_desktop import constants, instance, main, maintenance, runtime
+from logos_desktop.app import App
+from logos_desktop.config import Config, EphemeralConfiguration
 
 
 def owner_process(root, config, connection):
@@ -111,8 +111,8 @@ import sys
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from ou_dedetai import constants, maintenance, runtime
-from ou_dedetai.config import Config, EphemeralConfiguration
+from logos_desktop import constants, maintenance, runtime
+from logos_desktop.config import Config, EphemeralConfiguration
 constants.COORDINATION_DIR = Path(sys.argv[1])
 context = maintenance.Context(Path(sys.argv[2]), Path(sys.argv[3]), 'Logos')
 with ExitStack() as stack:
@@ -154,11 +154,11 @@ with ExitStack() as stack:
 import sys
 from pathlib import Path
 from unittest.mock import patch
-from ou_dedetai import constants, main
+from logos_desktop import constants, main
 constants.COORDINATION_DIR = Path(sys.argv[1])
 sys.argv = ['controller', '-c', sys.argv[2], '--force-root', '--wine',
             r'C:\\users\\fixture\\AppData\\Local\\Logos\\Logos.exe', 'logos4:synthetic-private-token']
-with patch('ou_dedetai.wine._wine_invocation') as wine, patch('subprocess.Popen') as spawn:
+with patch('logos_desktop.wine._wine_invocation') as wine, patch('subprocess.Popen') as spawn:
     try:
         main.main()
     except SystemExit as error:
@@ -277,8 +277,8 @@ with patch('ou_dedetai.wine._wine_invocation') as wine, patch('subprocess.Popen'
         program = '''
 import sys
 from pathlib import Path
-from ou_dedetai import constants, instance
-from ou_dedetai.config import EphemeralConfiguration
+from logos_desktop import constants, instance
+from logos_desktop.config import EphemeralConfiguration
 constants.COORDINATION_DIR = Path(sys.argv[1])
 try:
     instance.Session.for_config(EphemeralConfiguration.load_from_path(sys.argv[2])).acquire()
@@ -305,7 +305,7 @@ raise SystemExit(99)
                                XDG_STATE_HOME=str(self.root / f'state-{name}'),
                                XDG_CONFIG_HOME=str(self.root / f'config-{name}'))
             result = subprocess.run(
-                [sys.executable, '-B', '-c', 'from ou_dedetai.constants import COORDINATION_DIR\n'
+                [sys.executable, '-B', '-c', 'from logos_desktop.constants import COORDINATION_DIR\n'
                  'print(COORDINATION_DIR)'], env=environment, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), str(expected))
@@ -398,7 +398,7 @@ raise SystemExit(99)
 import sys
 from pathlib import Path
 from unittest.mock import patch
-from ou_dedetai import constants, main
+from logos_desktop import constants, main
 constants.COORDINATION_DIR = Path(sys.argv[1])
 sys.argv = ['controller', '-c', sys.argv[2], '--dialog', 'qt', '--force-root']
 with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate started a controller')):
@@ -564,7 +564,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
         with (patch.object(sys, 'argv', ['controller', '-c', str(self.first), '--dialog', 'qt']),
               patch.object(main, '_run_owned', side_effect=construct_after_change),
               patch.object(main.updates, 'recover_startup'),
-              patch('ou_dedetai.logos.LogosManager') as manager,
+              patch('logos_desktop.logos.LogosManager') as manager,
               patch.object(App, 'start_thread') as start,
               patch.object(App, 'dispatch_config') as dispatch):
             with self.assertRaises(SystemExit) as error:
@@ -675,7 +675,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
         selected = self.profile('candidate-a', self.root / 'candidate-prefix')
         candidate = Config(EphemeralConfiguration.load_from_path(str(selected)), app)
         replacement = self.second.read_bytes()
-        with patch('ou_dedetai.logos.LogosManager') as manager:
+        with patch('logos_desktop.logos.LogosManager') as manager:
             with self.assertRaisesRegex(maintenance.MaintenanceError, 'changed during profile selection'):
                 with app.profile_selection(candidate):
                     selected.write_bytes(replacement)
@@ -698,12 +698,12 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
 
     def test_adoption_later_edit_refuses_selection_and_preserves_committed_journal(self):
         try:
-            from ou_dedetai.qt.services import Services
+            from logos_desktop.qt.services import Services
         except ModuleNotFoundError as error:
             if error.name and error.name.startswith(('PySide6', 'shiboken6')):
                 self.skipTest('Optional Qt services are not installed')
             raise
-        from ou_dedetai import adoption
+        from logos_desktop import adoption
 
         peer, _ = self.owner(self.second)
         app = self.app()
@@ -735,7 +735,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
               patch.object(adoption, 'adopt', side_effect=replace_after_publication),
               patch.object(adoption, 'rollback') as rollback,
               patch.object(Config, 'reload', side_effect=AssertionError('No unchecked reload')),
-              patch('ou_dedetai.logos.LogosManager') as manager,
+              patch('logos_desktop.logos.LogosManager') as manager,
               patch.object(app, 'start_thread') as start):
             with self.assertRaisesRegex(maintenance.MaintenanceError, 'Adoption was published') as error:
                 Services().adopt_profile(source, destination=destination)(app, threading.Event())
@@ -838,7 +838,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
         app = self.app()
         candidate = self.candidate(app)
         old_manager = app.logos
-        with patch('ou_dedetai.logos.LogosManager') as manager:
+        with patch('logos_desktop.logos.LogosManager') as manager:
             with app.profile_selection(candidate):
                 self.assertIsNot(app.conf, candidate)
             manager.assert_not_called()
@@ -861,7 +861,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
                 with app.profile_selection(self.candidate(app)):
                     raise ValueError('failed')
             restart.assert_called_once()
-        with patch('ou_dedetai.logos.LogosManager') as manager:
+        with patch('logos_desktop.logos.LogosManager') as manager:
             manager.return_value.close.return_value = True
             with app.profile_selection(self.candidate(app)):
                 manager.assert_not_called()
@@ -871,7 +871,7 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
         app = self.app()
         app.logos._monitor_thread = Mock(is_alive=Mock(side_effect=[True, False, False]))
         candidate = self.candidate(app)
-        with patch('ou_dedetai.logos.LogosManager', side_effect=RuntimeError('cannot start monitor')):
+        with patch('logos_desktop.logos.LogosManager', side_effect=RuntimeError('cannot start monitor')):
             with self.assertRaisesRegex(RuntimeError, 'cannot start monitor'):
                 with app.profile_selection(candidate):
                     pass
@@ -882,11 +882,15 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
             pass
 
     def test_legacy_detection_exact_identity_same_user_and_scope(self):
+        selected = self.root / 'previous-controller.py'
+        selected.write_text(f'#!{sys.executable}\nfrom previous_app.main import main\nmain()\n')
+        selected.chmod(0o700)
+        instance.select_previous_controller(selected)
         process = Mock(pid=98765)
         process.uids.return_value = SimpleNamespace(real=os.getuid())
         process.exe.return_value = '/usr/bin/python3'
         process.open_files.return_value = []
-        process.cmdline.return_value = ['/usr/bin/python3', '/opt/oudedetai.py']
+        process.cmdline.return_value = ['/usr/bin/python3', str(selected)]
         with patch.object(psutil, 'process_iter', return_value=[process]):
             process.environ.return_value = {'WINEPREFIX': str(self.root / 'unrelated')}
             instance.check_legacy(self.root / 'prefix')
@@ -896,15 +900,159 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
             process.environ.return_value = {}
             with self.assertRaises(instance.InstanceBusy):
                 instance.check_legacy(self.root / 'prefix')
-            process.cmdline.return_value = ['python3', '-B', '/opt/oudedetai.py', '-c', str(self.second)]
+            process.cmdline.return_value = ['python3', '-B', str(selected), '-c', str(self.second)]
             instance.check_legacy(self.root / 'prefix')
             process.cmdline.return_value[-1] = str(self.first)
             with self.assertRaises(instance.InstanceBusy):
                 instance.check_legacy(self.root / 'prefix')
-            process.cmdline.return_value = ['python3', '/opt/not-oudedetai.py']
+            process.cmdline.return_value = ['python3', '/opt/unrelated.py']
             instance.check_legacy(self.root / 'prefix')
         process.kill.assert_not_called()
         process.terminate.assert_not_called()
+
+    def test_selected_wrapper_and_module_admission_ignore_unrelated_protected_process(self):
+        selected = self.root / 'previous.py'
+        selected.write_text(f'#!{sys.executable}\nfrom previous_app.main import main\nmain()\n')
+        selected.chmod(0o700)
+        wrapper = self.root / 'previous-launcher'
+        wrapper.write_text(f'#!/bin/sh\nexec "{selected}" "$@"\n')
+        wrapper.chmod(0o700)
+        instance.select_previous_controller(wrapper)
+        process = Mock(pid=98765)
+        process.uids.return_value = SimpleNamespace(real=os.getuid())
+        process.create_time.return_value = 123.0
+        process.open_files.return_value = []
+        process.exe.return_value = str(Path(sys.executable).resolve())
+        process.environ.return_value = {'WINEPREFIX': str(self.root / 'prefix')}
+        unrelated = Mock(pid=98766)
+        unrelated.uids.return_value = SimpleNamespace(real=os.getuid())
+        unrelated.cmdline.return_value = ['/usr/bin/credential-agent']
+        unrelated.exe.side_effect = psutil.AccessDenied(98766)
+        unrelated.environ.side_effect = psutil.AccessDenied(98766)
+        with patch.object(psutil, 'process_iter', return_value=[unrelated, process]):
+            for command in ([sys.executable, str(selected)], [sys.executable, '-m', 'previous_app.main'],
+                            [sys.executable, '-X', 'dev', '-m', 'previous_app.main'],
+                            [sys.executable, '-W', 'ignore', '-m', 'previous_app.main'],
+                            [sys.executable, '-mprevious_app.main'],
+                            [sys.executable, '-IBm', 'previous_app.main'],
+                            [sys.executable, '--', str(selected)]):
+                process.cmdline.return_value = command
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.check_legacy(self.root / 'prefix')
+            process.environ.return_value = {'WINEPREFIX': str(self.root / 'different')}
+            instance.check_legacy(self.root / 'prefix')
+            process.environ.side_effect = psutil.AccessDenied(98765)
+            with self.assertRaises(instance.InstanceBusy):
+                instance.check_legacy(self.root / 'prefix')
+        unrelated.exe.assert_not_called()
+        unrelated.environ.assert_not_called()
+        wrapper.write_text('#!/bin/sh\nexec "$SOME_CONTROLLER" "$@"\n')
+        with self.assertRaises(instance.InstanceBusy):
+            instance.select_previous_controller(wrapper)
+
+    def test_pip_wrapper_interpreter_and_unreadable_relative_selected_identity(self):
+        selected = self.root / 'wrapped-controller'
+        selected.write_text(f'#!/bin/sh\n\'\'\'exec\' "{sys.executable}" "$0" "$@"\n\' \'\'\'\n'
+                            'from previous_app.main import main\nmain()\n')
+        selected.chmod(0o700)
+        instance.select_previous_controller(selected)
+        process = Mock(pid=98765)
+        process.uids.return_value = SimpleNamespace(real=os.getuid())
+        process.create_time.return_value = 123.0
+        process.open_files.return_value = []
+        process.exe.return_value = str(Path(sys.executable).resolve())
+        process.cmdline.return_value = [sys.executable, '-m', 'previous_app.main']
+        process.environ.return_value = {}
+        with patch.object(psutil, 'process_iter', return_value=[process]):
+            with self.assertRaises(instance.InstanceBusy):
+                instance.check_legacy(self.root / 'prefix')
+            process.cmdline.return_value = [sys.executable, './wrapped-controller']
+            process.cwd.side_effect = psutil.AccessDenied(98765)
+            with self.assertRaises(instance.InstanceBusy):
+                instance.check_legacy(self.root / 'prefix')
+
+    def test_real_selected_idle_script_with_interpreter_options_refuses_without_signals(self):
+        selected = self.root / 'idle-controller.py'
+        selected.write_text(f'#!{sys.executable}\nimport sys\nprint("ready", flush=True)\nsys.stdin.readline()\n')
+        selected.chmod(0o700)
+        instance.select_previous_controller(selected)
+        for options in (['-X', 'dev'], ['-W', 'ignore'], ['--']):
+            child = subprocess.Popen([sys.executable, *options, str(selected)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     env=dict(os.environ, WINEPREFIX=str(self.root / 'prefix')))
+            try:
+                self.assertEqual(child.stdout.readline().strip(), 'ready')
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.check_legacy(self.root / 'prefix')
+                instance.check_legacy(self.root / 'other-prefix')
+            finally:
+                child.communicate('\n', timeout=5)
+            self.assertEqual(child.returncode, 0)
+
+    def test_real_attached_module_is_admitted_by_selected_interpreter_and_prefix(self):
+        selected = self.root / 'previous-entry'
+        selected.write_text(f'#!{sys.executable}\nfrom previous_app.main import main\nmain()\n')
+        selected.chmod(0o700)
+        package = self.root / 'previous_app'
+        package.mkdir()
+        (package / '__init__.py').write_text('')
+        (package / 'main.py').write_text('import sys\nprint("ready", flush=True)\nsys.stdin.readline()\n')
+        instance.select_previous_controller(selected)
+        for options in (['-mprevious_app.main'], ['-Bm', 'previous_app.main']):
+            child = subprocess.Popen([sys.executable, *options], cwd=self.root,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     env=dict(os.environ, WINEPREFIX=str(self.root / 'prefix')))
+            try:
+                self.assertEqual(child.stdout.readline().strip(), 'ready')
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.check_legacy(self.root / 'prefix')
+                instance.check_legacy(self.root / 'other-prefix')
+            finally:
+                child.communicate('\n', timeout=5)
+            self.assertEqual(child.returncode, 0)
+
+    def test_selected_script_with_nonstandard_interpreter_alias(self):
+        interpreter = self.root / 'runtime'
+        interpreter.symlink_to(sys.executable)
+        selected = self.root / 'previous-entry'
+        selected.write_text(f'#!{interpreter}\nimport sys\nprint("ready", flush=True)\nsys.stdin.readline()\n')
+        selected.chmod(0o700)
+        instance.select_previous_controller(selected)
+        child = subprocess.Popen([str(interpreter), str(selected)], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True,
+                                 env=dict(os.environ, WINEPREFIX=str(self.root / 'prefix')))
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            with self.assertRaises(instance.InstanceBusy):
+                instance.check_legacy(self.root / 'prefix')
+            instance.check_legacy(self.root / 'other-prefix')
+        finally:
+            child.communicate('\n', timeout=5)
+        self.assertEqual(child.returncode, 0)
+
+    def test_selected_native_controller_absolute_relative_and_alias(self):
+        import shutil
+
+        selected = self.root / 'previous-native'
+        shutil.copyfile(shutil.which('cat'), selected)
+        selected.chmod(0o700)
+        alias = self.root / 'different-name'
+        alias.symlink_to(selected)
+        instance.select_previous_controller(selected)
+        for invocation in (str(selected), './previous-native', str(alias)):
+            child = subprocess.Popen([invocation], cwd=self.root, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, text=True,
+                                     env=dict(os.environ, WINEPREFIX=str(self.root / 'prefix')))
+            try:
+                child.stdin.write('ready\n')
+                child.stdin.flush()
+                self.assertEqual(child.stdout.readline().strip(), 'ready')
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.check_legacy(self.root / 'prefix')
+                instance.check_legacy(self.root / 'other-prefix')
+            finally:
+                child.communicate('', timeout=5)
+            self.assertEqual(child.returncode, 0)
 
     def dispatch(self, *arguments):
         with (patch.object(sys, 'argv', ['controller', '-c', str(self.first), '--force-root', *arguments]),
@@ -962,10 +1110,10 @@ with patch.object(main, '_run_owned', side_effect=AssertionError('Duplicate star
             return 0
 
         process.wait.side_effect = wait
-        with (patch('ou_dedetai.config.Config', return_value=conf),
-              patch('ou_dedetai.logos.LogosManager', side_effect=AssertionError('No second manager')),
-              patch('ou_dedetai.wine._wine_invocation', return_value=(['/fixture/wine'], {})),
-              patch('ou_dedetai.runtime.activation_guard'),
+        with (patch('logos_desktop.config.Config', return_value=conf),
+              patch('logos_desktop.logos.LogosManager', side_effect=AssertionError('No second manager')),
+              patch('logos_desktop.wine._wine_invocation', return_value=(['/fixture/wine'], {})),
+              patch('logos_desktop.runtime.activation_guard'),
               patch('subprocess.Popen') as popen):
             popen.return_value.__enter__.return_value = process
             with self.session(self.first):

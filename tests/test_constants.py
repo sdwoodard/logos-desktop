@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 
-import ou_dedetai.constants as constants
+import logos_desktop.constants as constants
 
 
 class TestConstants(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestConstants(unittest.TestCase):
 
     def test_cache_base_is_always_followed_by_the_project_child(self):
         probe = (
-            "from ou_dedetai import constants as c\n"
+            "from logos_desktop import constants as c\n"
             "import json\n"
             "print(json.dumps([str(c.CACHE_BASE), c.CACHE_DIR]))\n"
         )

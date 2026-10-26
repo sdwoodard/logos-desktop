@@ -1,0 +1,17 @@
+name: Suggest a focused improvement
+description: Describe a user task that could work better.
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task and the current difficulty before proposing a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed change
+      description: Include a small useful outcome and any relevant constraints. A suggestion is not a release commitment.
+    validations:
+      required: true

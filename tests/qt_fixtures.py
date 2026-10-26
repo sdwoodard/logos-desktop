@@ -14,11 +14,11 @@ from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
-from ou_dedetai import constants
-from ou_dedetai.config import EphemeralConfiguration
-from ou_dedetai.qt.bridge import Result
-from ou_dedetai.qt.theme import Theme
-from ou_dedetai.qt.window import Installation, MainWindow
+from logos_desktop import constants
+from logos_desktop.config import EphemeralConfiguration
+from logos_desktop.qt.bridge import Result
+from logos_desktop.qt.theme import Theme
+from logos_desktop.qt.window import Installation, MainWindow
 
 
 class Services:

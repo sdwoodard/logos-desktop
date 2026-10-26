@@ -17,11 +17,13 @@ A saved relative backup path resolves against the saved installation directory.
 Qt Settings accepts an existing absolute folder. Folder-opening actions report a
 missing location instead of creating it.
 
+First [select your controller launcher](INSTALL.md#select-your-launcher-for-shared-commands).
+
 ```bash
-logos-desktop -c /absolute/path/profile.json --backup
-logos-desktop -c /absolute/path/profile.json --list-backups
-logos-desktop -c /absolute/path/profile.json --restore
-logos-desktop -c /absolute/path/profile.json --restore-snapshot /absolute/path/backups/snapshot-name
+"$controller" -c /absolute/path/profile.json --backup
+"$controller" -c /absolute/path/profile.json --list-backups
+"$controller" -c /absolute/path/profile.json --restore
+"$controller" -c /absolute/path/profile.json --restore-snapshot /absolute/path/backups/snapshot-name
 ```
 
 `--list-backups` reads the configured folder's completed snapshot metadata. The

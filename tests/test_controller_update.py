@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import artifacts, constants, installer, main, processes, releases, updates
+from logos_desktop import artifacts, constants, installer, main, processes, releases, updates
 from tests.test_artifacts import response
 
 
@@ -278,7 +278,7 @@ class TestControllerUpdate(unittest.TestCase):
               patch.object(installer, "create_launcher_shortcuts") as shortcuts):
             installer.ensure_launcher_shortcuts(self.app)
         shortcuts.assert_not_called()
-        self.assertFalse((self.root / "prefix/oudedetai").exists())
+        self.assertFalse((self.root / "prefix/logos-desktop").exists())
 
 
 class TestUpdateAdmission(unittest.TestCase):
@@ -288,7 +288,7 @@ class TestUpdateAdmission(unittest.TestCase):
                 constants, APP_SELF_UPDATES_ENABLED=enabled, CONTROLLER_DISTRIBUTION=distribution,
             ), patch.object(sys, "argv", ["controller", "--update-self", "-c", "/broken/profile.json"]), patch.object(
                 main, "setup_config",
-            ) as config, patch("ou_dedetai.repair.repair_installation") as recover, patch.object(
+            ) as config, patch("logos_desktop.repair.repair_installation") as recover, patch.object(
                 main.PersistentConfiguration, "load_from_path",
             ) as load:
                 with self.assertRaises(SystemExit):

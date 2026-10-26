@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from textual.widgets import Static
 from textual.app import App as TextualApp
 
-from ou_dedetai import constants, control, maintenance, processes, tui_app
+from logos_desktop import constants, control, maintenance, processes, tui_app
 from tests.test_runtime_paths import fixture_config
 
 
@@ -61,7 +61,7 @@ class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
                 domain._last_console_message = None
                 domain._operation_lock = threading.Lock()
                 domain._operation_active = False
-                from ou_dedetai.logos import LogosManager
+                from logos_desktop.logos import LogosManager
                 domain.logos = LogosManager(domain)
                 domain._closed = False
                 domain._profile_lock = threading.Lock()

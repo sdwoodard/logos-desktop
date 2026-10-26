@@ -26,6 +26,9 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--size", required=True, type=int)
+    parser.add_argument("--migrate", action="store_true", help="Migrate an explicitly selected managed installation")
+    parser.add_argument("--config", help="Absolute existing profile path, required for migration")
+    parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
     args = parser.parse_args()
     if (re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?", args.version) is None
             or re.fullmatch(r"[0-9a-f]{64}", args.sha256) is None
@@ -66,18 +69,23 @@ def main():
 
     # Import only the verified implementation, never arbitrary cwd package code.
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        info = archive.getinfo("ou_dedetai/controller_install.py")
+        info = archive.getinfo("logos_desktop/controller_install.py")
         if info.file_size > 256 * 1024:
             raise ValueError("Packaged installation implementation is too large")
         source = archive.read(info)
     module = types.ModuleType("_logos_desktop_verified_install")
     sys.modules[module.__name__] = module
-    exec(compile(source, filename + "/ou_dedetai/controller_install.py", "exec"), module.__dict__)
+    exec(compile(source, filename + "/logos_desktop/controller_install.py", "exec"), module.__dict__)
     with tempfile.TemporaryDirectory(prefix="logos-desktop-bootstrap-") as directory:
         wheel = Path(directory) / filename
         wheel.write_bytes(content)
-        return module.bootstrap(["--root", args.root, "--wheel", str(wheel), "--version", args.version,
-                                 "--sha256", args.sha256, "--size", str(args.size)])
+        arguments = ["--root", args.root, "--wheel", str(wheel), "--version", args.version,
+                     "--sha256", args.sha256, "--size", str(args.size)]
+        if args.migrate:
+            if not args.config:
+                parser.error("Migration requires --config with an explicit existing profile")
+            arguments.extend(["--migrate", "--config", args.config, "--frontend", args.frontend])
+        return module.bootstrap(arguments)
 
 
 if __name__ == "__main__":

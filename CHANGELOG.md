@@ -1,182 +1,33 @@
-# Changelog
+# Release notes
 
-- 4.0.0-beta.15
-	- Fix issues with TUI [J. Bellars, T. H. Wright]
-	- Switch TUI to Textual [T. H. Wright]
-- 4.0.0-beta.14
-	- This release adds an update Logos button [N. Shaaban]
-	- OD now detects OpenGL version [T. H. Wright]
-	- Various bugs and AI agent files [N. Shaaban]
-- 4.0.0-beta.13
-	- This release fixes some bugs found since beta 12. [N. Shaaban]
-	- This release also adds some initial support for containerized browsers. [N. Shaaban]
-- 4.0.0-beta.12
-	- This release fixes numerous small issues that prevented working installs, while also introducing numerous small UX improvements [N. Shaaban, N. Marti, T. H. Wright, DavidDGTNT, Simpleboy0]
-	- This release fixes a critical issue with beta 11 [N. Shaaban]
-	- This release supports the Logos 41+ login flow [N. Shaaban]
-- 4.0.0-beta.11
-	- Fixes bug where the TUI didn't open (#379, #382) [N. Shaaban, T. H. Wright]
-	- Fixes bug where Verbum didn't stop when told (#374) [N. Shaaban]
-	- Functionality restored to Backup/Restore on CLI (#345) [N. Marti]
-	- Properly rotate wine.log (#378, #376) [N. Shaaban]
-	- Adds proper progress bar to CLI (#370) [N. Shaaban]
-- 4.0.0-beta.10
-	- Fixes bug where advanced GUI install failed (#354) [N. Shaaban]
-	- Adds a new option: "Get Support" to create a zip and display our social groups (#353, #274, #103) [N. Shaaban]
-	- Adds a new option: "Uninstall" to remove all the directories/files we use. **Replaces the cli option --remove-install-dir with --uninstall.** Requires a successful install for option to be present on TUI/GUI for now. (#233, #362) [N. Shaaban]
-	- Fixes bug with latest staging wine that doesn't include a wine64 binary (#350, #352) [N. Shaaban]
-	- Fixes legacy config migration (#320) [N. Shaaban]
-	- Allows user to go back to the main menu in some circumstances (#355) [N. Shaaban]
-	- Add Github actions for snap build (#343) [N. Shaaban]
-	- Move progress bar as files are downloaded (#364) [N. Shaaban]
-	- Add a simple Install option to the TUI to match GUI (#341) [T. H. Wright]
-	- Fixes misc bugs where versions we not being compared properly, resulted in a failed install for one user (#359) [N. Shaaban]
-	- Fixes Manjaro 7zip package name (#361) [T. H. Wright]
-	- Fixes bug where a custom XDG_DATA_DIR wasn't creating the FaithLife-Community subfolder (#358) [N. Shaaban]
-	- Adds extra line to the footer of the TUI (also refactor TUI splitting into header/footer) (#343, #342) [T. H. Wright]
-- 4.0.0-beta.9
-	- **Change default install dir to $XDG_DATA_HOME/FaithLife-Community/oudedetai (this will be ~/.local/share/FaithLife-Community/oudedetai on most systems). To restore the old behavior: `export INSTALLDIR=$HOME/LogosBible10` (#323) [T. H. Wright]**
-	- **Fixes crash in "Copy Bible Verse" and when first hitting "Continue" due to missing arial font (#335) [N. Shaaban]**
-	- Adds WINEDEBUG flags when --debug cli argument is passed (#346) [N. Shaaban]
-	- Fixes typo in default WINEDEBUG (#326) [T. H. Wright]
-	- Respects DIALOG even when specifying --install-app (#332) (useful for snap/flatpak) [N. Shaaban]
-	- Remove Logos 9 support (#322 #53) [T. H. Wright, N. Marti, N. Shaaban]
-	- Remove support for alpine appimage - use system wine instead. (#294) [T. H. Wright]
-	- Fixes disappearing TUI lines when window is somewhat small (#303) [T. H. Wright]
-	- Write a second copy of the config file into install_dir (#327) [T. H. Wright]
-	- Wraps GUI progress bar messages (#336, #312) [N. Shaaban]
-	- Ensures user agrees to the faithlife EULA when -y or --passive is passed (#241, #331) [N. Shaaban]
-	- Fixes bug where "Install" button stays greyed out on first install (#333, #334) [N. Shaaban]
-	- Start adding unittests (#337) [N. Marti]
-- 4.0.0-beta.8 (YANKED due to missing arial font #335)
-	- Fix dynamic linking in subprocess calls. (#292 #293) [N. Shaaban]
-	- Remove need for manual dependency installation on arch/~~alpine~~/fedora (#143 #236 #293). Alpine still needs to be fixed [N. Shaaban]
-	- Fixes wine binary installations (#286 #288) [N. Marti]
-	- Removed need for winetricks, and removed it's subcommand. Added a wine subcommand (#254 #170 #177 #258 #267) [N. Marti]
-	- Fix wine version parsing when wine is compiled manually (#291) [N. Marti]
-	- Fix setting TUI Color scheme (#259 #297 #278 #302)  [T. H. Wright, N. Shaaban]
-	- Create snap definition (#239 #298) [N. Marti]
-	- Create a flatpak definition (#309 #307) [N. Shaaban]
-	- Default downloads to XDG_CACHE_HOME rather than ~/Downloads (#237 #298) [N. Marti]
-	- Fixes issue where WINE_EXE isn't respect on clean installs (#306) [N. Shaaban]
-	- Added nix-shell for running from source on NixOS. Desktop shortcuts won't get created. (#306) [N. Shaaban]
-	- Remove "Running Logos" status message in the TUI so menu is still interactive after starting Logos (#302) [N. Shaaban]
-	- Handle resize in more cases on the TUI (#304) [N. Shaaban]
-- 4.0.0-beta.7
-	- Fix appimage update button to accept wine 10 (#282, #275) [N. Marti]
-	- Fix crash when downloading resources (seqURIs must be non-null and non-empty) (#275 #262 #283) [N. Shaaban]
-- 4.0.0-beta.6
-	- Fix #256 [J. Goodman]
-	- Fix #269 [T. H. Wright]
-	- Fix #234 [N. Shaaban]
-	- Fix #187 [N. Shaaban]
-	- Fix #168 [N. Shaaban]
-	- Fix #155 [N. Shaaban]
-	- Fix #147 [N. Shaaban]
-	- Fix #253 [N. Marti]
-	- Fix #252 [N. Marti]
-	- Implemented network cache [N. Shaaban]
-	- Refactored configuration handling (no user action required) [N. Shaaban]
-  	- Fix #235 [T. H. Wright]
-- 4.0.0-beta.5
-	- Filter out broken Logos v39 release [N. Shaaban]
-	- Fix #17 [T. H. Wright]
-	- Make dependency lists more precise [N. Marti, N. Shaaban]
-	- Fix #230 [N. Shaaban]
-- 4.0.0-beta.4
-	- Fix #220 [N. Shaaban]
-- 4.0.0-beta.3
-	- Fix various regressions from beta (e.g., #209, #213) [N. Shaaban]
-	- Fix #191 [N. Shaaban]
-- 4.0.0-beta.2
-	- Fix #171 [N. Marti]
-	- Fix #185 [N. Marti]
-- 4.0.0-beta.1
-	- Migrate .config and logs from `~/.config/Logos_on_Linux` and `~/.local/state/Logos_on_Linux` to `~/.config/FaithLife-Community` and `~/.local/state/FaithLife-Community`
-	- Add Logos State Manager [T. H. Wright, N. Marti]
-	- Numerous bug fixes [N. Marti, ctrlaltf24]
-	- Make config.WINE_EXE dynamic [T. H. Wright]
-	- Add Docker Build File [jimbob88]
-	- Fix numerous TUI issues [T. H. Wright]
-	- Fix #16 [T. H. Wright]
-	- Fix #84 [T. H. Wright]
-	- Fix #106 [T. H. Wright]
-	- Fix #127 [T. H. Wright]
-	- Fix #128 [T. H. Wright]
-	- Fix #142 [T. H. Wright]
-	- Fix #143 [T. H. Wright]
-	- Fix #153 [T. H. Wright]
-	- Fix #157 [T. H. Wright]
-	- Fix #181 [T. H. Wright]
-	- Fix #188 [T. H. Wright]
-- 4.0.0-alpha.14
-	- Fix install routine [N. Marti, T. H. Wright]
-	- Fix #144, #154, #156
-- 4.0.0-alpha.13
-	- Fix #22. [T. Bleher, J. Goodman, N. Marti, S. Freilichtbuenhe, M. Malevic, T. H. Wright]
-	- Fix package installer and TUI app. Also fix #135, #136, #140. [T. H. Wright, N. Marti]
-	- Introduce network.py and system.py
-- 4.0.0-alpha.12
-	- Fix TUI app's installer [T. H. Wright]
-- 4.0.0-alpha.11
-	- Fix #124 [T. H. Wright]
-- 4.0.0-alpha.10
-	- Fix #121 [T. H. Wright]
-	- Prep for Logos 30+ support [N. Marti, T. H. Wright]
-- 4.0.0-alpha.9
-	- Fix #42 [T. H. Wright]
-	- Fix #76, #104, #111, #115 [T. H. Wright]
-- 4.0.0-alpha.8
-	- Fix #1 [T. H. Wright, N. Marti, T. Bleher, C. Reeder]
-	- Fix #102 [T. H. Wright]
-	- Fix #110 [N. Marti]
-- 4.0.0-alpha.7
-	- Various fixes [N. Marti]
-- 4.0.0-alpha.6
-	- Hotfix to get correct LOGOS_EXE value after installation [N. Marti]
-- 4.0.0-alpha.5
-	- Fix #19 [N. Marti]
-	- Fix #64 [N. Marti]
-	- Fix #77 [N. Marti]
-- 4.0.0-alpha.4
-	- Fix #46 [T. H. Wright, N. Marti]
-	- Fix networking issues [N. Marti]
-	- Clean up install procedure [N. Marti]
-- 4.0.0-alpha.3
-	- Fix #5 [T. H. Wright, N. Marti]
-	- Fix #49 [T. H. Wright]
-	- Fix #55 [T. H. Wright]
-	- General code clean up
-- 4.0.0-alpha.2
-	- Fix #3 [T. H. Wright]
-	- Fix #4 [T. H. Wright]
-	- Fix #6 [N. Marti]
-	- Fix #32 [N. Marti]
-	- Fix #37 [N. Marti]
-- 4.0.0-alpha.1
-	- Fix #9 [N. Marti]
- 	- Fix #10 [N. Marti]
-  	- Add initial .github/workflows [N. Marti]
-- 4.0.0-alpha
-	- Migrate repository to FaithLife Community organization
-	- Squash CHANGELOG
-	- Update README
-	- Rewrite from Bash to Python [T. H. Wright, N. Marti]
-	- Break monolithic file into smaller scripts and clean up [N. Marti]
-	- Utilize PyInstaller for distributable [N. Marti]
-	- Drop whiptail and dialog for curses [T. H. Wright]
-	- Use curses for CLI control panel [T. H. Wright]
-	- Drop Zenity for TK [N. Marti]
-	- Use TK for GUI control panel [N. Marti]
-	- Use config module [N. Marti]
-	- Use logging module [N. Marti]
-	- Use requests module [N. Marti]
-- <4.0.0
-	- The previous script was written in Bash and is found at: https://github.com/ferion11/LogosLinuxInstaller
-	- The chief author was Ferion11, and without his work, this project would not have been possible
-	- J. Goodman's work was essential for getting Logos 10 support running, and his efforts and work with Wine and FaithLife have been invaluable
-	- T. H. Wright added various code simplification, debugging, and reuse, and added CLI functionality
-	- We also want to thank our other contributors, Callen 44 and Vskilet
+## 1.0.0 candidate, unreleased
 
-Soli Deo Gloria
+The first LogosDesktop release is being prepared privately. No public release
+or AUR submission is available yet.
 
+### Daily use
+
+- Qt control panel with system-following, light and dark themes.
+- Explicit existing-install adoption, profile selection and desktop integration.
+- Separate controller, Logos and Wine update operations.
+- Doctor, previewable local support export and clearer failure outcomes.
+- CLI and terminal interface through the same installation services.
+
+### Data and installation handling
+
+- Downloads are checked before installer execution, with existing good files preserved on transfer failure.
+- Backup/restore preflight and recoverable replacement failures.
+- Profile-bound process ownership and bounded controller cleanup.
+- Managed wheel environments and Arch source package update handoffs.
+- The `logos_desktop` namespace and one `logos-desktop` controller command.
+
+### Before upgrading
+
+Read [installation and migration](INSTALL.md), [backup guidance](BACKUPS.md) and
+[runtime compatibility](COMPATIBILITY.md). Older private managed wheel builds
+need explicit verified migration. Controller removal preserves the separate
+library and configuration. Flatpak and standalone binaries remain deferred.
+
+Known limits include variable scrolling delay, graphics/font issues and
+unvalidated print/export. No universal Wine or distro compatibility is claimed.
+Earlier development history and contributor authorship remain in Git.

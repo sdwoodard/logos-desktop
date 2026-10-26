@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import constants, control, network, support, tui_app, updates, utils
-from ou_dedetai.config import Config
+from logos_desktop import constants, control, network, support, tui_app, updates, utils
+from logos_desktop.config import Config
 
 
 class TestPrivateUpdates(unittest.TestCase):
@@ -18,7 +18,7 @@ class TestPrivateUpdates(unittest.TestCase):
                     requests = object.__new__(network.NetworkRequests)
                     requests._cache = network.CachedRequests()
                     if warm:
-                        for repository in ("FaithLife-Community/OuDedetai", "FaithLife-Community/test-builds"):
+                        for repository in ("other-owner/old-controller", "other-owner/test-builds"):
                             requests._cache.repository_latest_version[repository] = "99.0"
                             requests._cache.repository_latest_url[repository] = f"https://github.com/{repository}/old"
 

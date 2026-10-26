@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import (
+from logos_desktop import (
     artifacts, backup, config_store, constants, control, installer, main, maintenance, runtime, utils, wine,
 )
-from ou_dedetai.app import App
-from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
+from logos_desktop.app import App
+from logos_desktop.config import Config, EphemeralConfiguration, PersistentConfiguration
 from tests.artifact_fixtures import appimage
 
 
@@ -86,7 +86,7 @@ class TestConfiguration(unittest.TestCase):
             conf._change(curses_color_scheme="Dark")
         program = """
 import json,sys
-from ou_dedetai.config import EphemeralConfiguration,PersistentConfiguration
+from logos_desktop.config import EphemeralConfiguration,PersistentConfiguration
 raw=PersistentConfiguration.load_from_path(sys.argv[1])
 overrides=EphemeralConfiguration.load_from_path(sys.argv[1])
 print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
@@ -206,8 +206,8 @@ print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
         self.assertFalse(errors, errors)
         program = """
 import sys
-from ou_dedetai import constants
-from ou_dedetai.config import PersistentConfiguration
+from logos_desktop import constants
+from logos_desktop.config import PersistentConfiguration
 constants.STATE_DIR=sys.argv[2]
 raw=PersistentConfiguration.load_from_path(sys.argv[1])
 print('loaded',flush=True)
@@ -307,8 +307,8 @@ raw.write_config(checked=True)
         program = """
 import sys,time
 from unittest.mock import patch
-from ou_dedetai import config_store,constants
-from ou_dedetai.config import PersistentConfiguration
+from logos_desktop import config_store,constants
+from logos_desktop.config import PersistentConfiguration
 constants.STATE_DIR=sys.argv[2]
 raw=PersistentConfiguration.load_from_path(sys.argv[1])
 raw.curses_color_scheme='Dark'
@@ -591,7 +591,7 @@ with patch.object(config_store.Target,'publish',pause):
 import json,sys
 from threading import Event
 from types import SimpleNamespace
-from ou_dedetai.config import Config,EphemeralConfiguration
+from logos_desktop.config import Config,EphemeralConfiguration
 conf=Config(EphemeralConfiguration.load_from_path(sys.argv[1]),SimpleNamespace(_config_updated_event=Event()))
 print(json.dumps([conf.wine_prefix,conf.installer_binary_dir,conf.wineserver_binary]))
 """
@@ -690,7 +690,7 @@ print(json.dumps([conf.wine_prefix,conf.installer_binary_dir,conf.wineserver_bin
         self.path.write_text(json.dumps(dict(self.document, LOGOS_LOG=str(log))))
         program = """
 import logging,sys
-from ou_dedetai import main
+from logos_desktop import main
 def action(configuration,operation):
     logging.info('M07 file handler marker')
     logging.debug('M07 debug marker')
@@ -962,7 +962,7 @@ main.main()
         self.path.write_text(json.dumps(dict(self.document, LOGOS_LOG=str(log))))
         program = """
 import logging,sys
-from ou_dedetai import main
+from logos_desktop import main
 main.run=lambda configuration,action: logging.info('M07 runtime-switch log marker')
 sys.argv=['controller','-c',sys.argv[1],'--set-appimage',sys.argv[2],'--force-root']
 main.main()

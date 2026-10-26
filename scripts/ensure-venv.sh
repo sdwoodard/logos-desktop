@@ -6,7 +6,7 @@ root=$(dirname -- "$(dirname -- "$script")")
 venv="$root/.venv"
 python=${PYTHON:-python3}
 
-if [[ ! -f "$root/pyproject.toml" || ! -f "$root/ou_dedetai/main.py" ]]
+if [[ ! -f "$root/pyproject.toml" || ! -f "$root/logos_desktop/main.py" ]]
 then
     printf '%s\n' 'Cannot locate the LogosDesktop source beside this script.' >&2
     exit 1

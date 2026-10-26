@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import artifacts, metadata, processes
+from logos_desktop import artifacts, metadata, processes
 from tests.test_artifacts import response
 
 

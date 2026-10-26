@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import adoption, config_store, constants, maintenance, runtime
-from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
+from logos_desktop import adoption, config_store, constants, maintenance, runtime
+from logos_desktop.config import Config, EphemeralConfiguration, PersistentConfiguration
 
 
 class TestAdoption(unittest.TestCase):
@@ -40,7 +40,7 @@ class TestAdoption(unittest.TestCase):
         result = adoption.adopt(plan)
         self.assertEqual(result.state, 'committed')
         self.assertEqual(self.source.read_bytes(), self.original)
-        self.assertFalse((self.install / 'oudedetai.json').exists())
+        self.assertFalse((self.install / 'previous-controller.json').exists())
         self.assertFalse((self.install / constants.PORTABLE_CONFIG_NAME).exists())
         loaded = PersistentConfiguration.load_from_path(str(self.destination), environment=False)
         self.assertEqual(loaded.install_dir, str(self.install))
@@ -51,7 +51,7 @@ class TestAdoption(unittest.TestCase):
         program = """
 import sys
 from pathlib import Path
-from ou_dedetai import adoption,constants
+from logos_desktop import adoption,constants
 constants.STATE_DIR=sys.argv[1]
 constants.COORDINATION_DIR=Path(sys.argv[3])
 print(adoption.rollback(sys.argv[2]).state)
@@ -65,7 +65,7 @@ print(adoption.rollback(sys.argv[2]).state)
         self.assertEqual(adoption.rollback(result.journal).state, 'rolled-back')
 
     def test_json_portable_and_ambiguity_require_selection(self):
-        portable = self.install / 'oudedetai.json'
+        portable = self.install / 'previous-controller.json'
         portable.write_text(json.dumps({'INSTALLDIR': '.', 'FLPRODUCT': 'Logos', 'future': {'kept': True}}))
         found = adoption.discover([self.source, portable])
         self.assertEqual(len(found.candidates), 2)
@@ -125,7 +125,7 @@ print(adoption.rollback(sys.argv[2]).state)
         document, _ = config_store.read_document(self.source)
         overrides = EphemeralConfiguration.project(document, self.source, environment={})
         conf = Config(overrides, SimpleNamespace())
-        with patch('ou_dedetai.config.os.listdir', return_value=['unrelated', 'actual', 'Public']):
+        with patch('logos_desktop.config.os.listdir', return_value=['unrelated', 'actual', 'Public']):
             self.assertEqual(conf.wine_user, 'unrelated')
             self.assertEqual(Path(conf._logos_appdata_dir), unrelated / 'AppData/Local/Logos')
             for found in (adoption.discover([], installation=self.install), adoption.discover([self.source])):
@@ -195,7 +195,7 @@ print(adoption.rollback(sys.argv[2]).state)
         self.assertEqual(self.source.read_bytes(), self.original)
 
     def test_future_schema_and_malformed_config_do_not_fall_back_to_reconstruction(self):
-        portable = self.install / 'oudedetai.json'
+        portable = self.install / constants.PORTABLE_CONFIG_NAME
         portable.write_text(json.dumps({'schema_version': 2, 'install_dir': str(self.install),
                                         'faithlife_product': 'Logos'}))
         found = adoption.discover([], installation=self.install)
@@ -277,7 +277,7 @@ print(adoption.rollback(sys.argv[2]).state)
         program = """
 import sys
 from pathlib import Path
-from ou_dedetai import adoption,constants,maintenance
+from logos_desktop import adoption,constants,maintenance
 constants.COORDINATION_DIR=Path(sys.argv[3])
 plan=adoption.preview(adoption.discover([sys.argv[1]]),sys.argv[2])
 if sys.argv[4]=='first':
@@ -352,34 +352,42 @@ else:
         self.assertFalse((self.root / 'state').exists())
 
     def test_new_portable_snapshot_preserves_old_portable_bytes(self):
-        old = self.install / 'oudedetai.json'
+        old = self.install / 'previous-controller.json'
         old.write_bytes(b'legacy launcher profile')
         with runtime.configuration_lock():
             config_store.save(self.destination, {'install_dir': str(self.install), 'faithlife_product': 'Logos'})
         self.assertEqual(old.read_bytes(), b'legacy launcher profile')
         self.assertEqual((self.install / constants.PORTABLE_CONFIG_NAME).read_bytes(), self.destination.read_bytes())
 
-    def test_new_and_old_runtime_journal_target_sets_remain_recoverable(self):
+    def test_runtime_recovery_refuses_unselected_historical_targets_without_mutation(self):
         from tests.test_artifact_consumers import fixture_app
 
         for legacy in (False, True):
             with self.subTest(legacy=legacy):
                 app = fixture_app(self.root / ('old' if legacy else 'new'))
                 install = Path(app.conf.install_dir)
-                app.conf._overrides.config_path = str(install / 'oudedetai.json')
-                links, configs = runtime._targets(app, legacy_portable=legacy)
+                app.conf._overrides.config_path = str(install / 'previous-controller.json')
+                links, configs = runtime._targets(app)
+                if legacy:
+                    configs[0] = install / 'previous-portable.json'
                 snapshots = [runtime._snapshot(path) for path in (*links, *configs)]
                 record = {'install': str(install), 'previous': snapshots, 'next': snapshots}
                 journal = runtime.selection_state(install) / 'runtime.json'
                 journal.write_text(json.dumps(record))
-                runtime._recover_locked(app, maintenance.Context(Path(app.conf.wine_prefix), install, 'Logos'))
-                self.assertFalse(journal.exists())
+                if legacy:
+                    original = journal.read_bytes()
+                    with self.assertRaisesRegex(maintenance.RecoveryRequired, "previous controller"):
+                        runtime._recover_locked(app, maintenance.Context(Path(app.conf.wine_prefix), install, 'Logos'))
+                    self.assertEqual(journal.read_bytes(), original)
+                else:
+                    runtime._recover_locked(app, maintenance.Context(Path(app.conf.wine_prefix), install, 'Logos'))
+                    self.assertFalse(journal.exists())
 
     def test_identity_roots_are_absolute_and_coordination_ignores_home_and_xdg(self):
         program = """
 import json,os,pwd
 from pathlib import Path
-from ou_dedetai import constants
+from logos_desktop import constants
 print(json.dumps([constants.DEFAULT_CONFIG_PATH,constants.STATE_DIR,constants.DATA_HOME,
                  str(constants.COORDINATION_DIR),pwd.getpwuid(os.getuid()).pw_dir]))
 """

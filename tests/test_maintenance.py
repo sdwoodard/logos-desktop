@@ -12,11 +12,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import (
+from logos_desktop import (
     backup, config_store, constants, control, database, installer, logos, maintenance, system, utils, wine,
 )
-from ou_dedetai.config import Config
-from ou_dedetai import repair
+from logos_desktop.config import Config
+from logos_desktop import repair
 from tests.test_backup import fixture_app
 
 
@@ -52,7 +52,7 @@ class TestMaintenance(unittest.TestCase):
         program = """
 import sys,time
 from pathlib import Path
-from ou_dedetai import constants,maintenance
+from logos_desktop import constants,maintenance
 constants.STATE_DIR=sys.argv[2]
 with maintenance.use(maintenance.Context(Path(sys.argv[1])),exclusive=sys.argv[3]=='yes'):
     print('ready',flush=True)
@@ -279,7 +279,7 @@ time.sleep(20)
                 errors.append(error)
 
         with (
-            patch.object(repair.ou_dedetai.config, "get_wine_user", return_value="fixture"),
+            patch.object(repair.logos_desktop.config, "get_wine_user", return_value="fixture"),
             patch.object(repair, "detect_broken_install", side_effect=inspect),
         ):
             thread = threading.Thread(target=run)
@@ -319,7 +319,7 @@ time.sleep(20)
             for attribute, value in (("install_dir", self.root / "other"), ("faithlife_product", "Verbum")):
                 with self.assertRaises(maintenance.MaintenanceBusy):
                     setattr(configuration, attribute, value)
-            with patch("ou_dedetai.config.PersistentConfiguration.load_from_path", return_value=configuration._raw):
+            with patch("logos_desktop.config.PersistentConfiguration.load_from_path", return_value=configuration._raw):
                 with self.assertRaises(maintenance.MaintenanceBusy):
                     configuration.reload()
             self.assertEqual(configuration._raw.install_dir, str(self.context.install))
@@ -418,9 +418,9 @@ time.sleep(20)
             observed.append(app.conf._raw.faithlife_product_release)
 
         with (
-            patch.object(repair.ou_dedetai.config, "get_wine_user", return_value="fixture"),
+            patch.object(repair.logos_desktop.config, "get_wine_user", return_value="fixture"),
             patch.object(repair, "detect_broken_install", return_value=repair.FailureType.FailedUpgrade),
-            patch.object(repair.ou_dedetai.installer, "install", side_effect=install),
+            patch.object(repair.logos_desktop.installer, "install", side_effect=install),
         ):
             repair.repair_installation(self.app)
         self.assertEqual(observed, [None])
@@ -469,7 +469,7 @@ time.sleep(20)
         )
         self.assertEqual(process.stdout.readline().strip(), "ready")
         with (patch.object(manager, "get_logos_pids"),
-              patch("ou_dedetai.runtime.executable", return_value="fixture-runtime"),
+              patch("logos_desktop.runtime.executable", return_value="fixture-runtime"),
               patch.object(wine, "get_wine_release", return_value=(None, None)),
               patch.object(wine, "check_wine_rules", return_value=(True, None)),
               patch.object(wine, "run_wine_application", return_value=process)):
@@ -482,7 +482,7 @@ time.sleep(20)
             program = """
 import sys
 from pathlib import Path
-from ou_dedetai import constants,maintenance
+from logos_desktop import constants,maintenance
 constants.STATE_DIR=sys.argv[2]
 try:
     with maintenance.use(maintenance.Context(Path(sys.argv[1])),exclusive=True):
@@ -519,7 +519,7 @@ except maintenance.MaintenanceBusy:
             writer.assert_called_once_with(checked=True, config_file_path=configuration._overrides.config_path)
 
     def test_installer_cancel_preserves_selection_and_releases_it(self):
-        from ou_dedetai.app import UserExitedFromAsk
+        from logos_desktop.app import UserExitedFromAsk
         from tests.test_runtime_paths import fixture_config
 
         configuration = fixture_config(self.context.install)

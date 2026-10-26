@@ -10,13 +10,13 @@ AUR submission or public update feed is enabled by this metadata.
 
 ## Artifact contract
 
-`ou_dedetai/constants.py:APP_VERSION` is the version source. The runtime aliases
+`logos_desktop/constants.py:APP_VERSION` is the version source. The runtime aliases
 `APP_RELEASE_VERSION` and `LLI_CURRENT_VERSION` reference it. Setuptools reads
 the same source for distribution metadata. Version identity does not grant
 permission to replace the controller or enable a release feed.
 
-The import namespace remains `ou_dedetai`. Both `logos-desktop` and the transitional
-`oudedetai` command call `ou_dedetai.main:main`. Only runtime Python packages are
+The import namespace is `logos_desktop`. The `logos-desktop` command calls
+`logos_desktop.main:main`. Only runtime Python packages are
 discovered. Explicit package data includes the MSI transform, runtime icons,
 Lucide attribution and license. Documentation and the recipe template install
 under `share/doc/logos-desktop`, not as active desktop or package-manager files.
@@ -53,12 +53,11 @@ python3 -m venv /path/to/smoke-venv
 /path/to/smoke-venv/bin/python -m pip check
 /path/to/smoke-venv/bin/logos-desktop --help
 /path/to/smoke-venv/bin/logos-desktop --version
-/path/to/smoke-venv/bin/oudedetai --version
 ```
 
 Run checks from outside the checkout without `PYTHONPATH`. Verify distribution
 version, imported module locations and nonempty installed resources under
-`ou_dedetai/img` and `ou_dedetai/assets`. A CLI smoke check does not validate
+`logos_desktop/img` and `logos_desktop/assets`. A CLI smoke check does not validate
 native Qt, Wine, Logos setup or an installation owner's update transaction.
 
 The canonical repository route is a verified wheel with `[gui]` in a dedicated,
@@ -186,10 +185,10 @@ Package authorization remains in makepkg/pacman, never in a root controller GUI.
 
 | Material | Provenance and required treatment |
 | --- | --- |
-| Controller source | OuDedetai ancestry, MIT. Preserve [LICENSE](LICENSE), including DanielDevBR's notice and upstream credit |
-| Book Open Text project icon | Lucide revision and adaptation recorded in [ATTRIBUTION.md](ou_dedetai/img/ATTRIBUTION.md). Preserve the [ISC notice](ou_dedetai/img/lucide-LICENSE.txt) |
+| Controller source | Imported MIT source history. Preserve [LICENSE](LICENSE), including DanielDevBR's notice and contributor credit |
+| Book Open Text project icon | Lucide revision and adaptation recorded in [ATTRIBUTION.md](logos_desktop/img/ATTRIBUTION.md). Preserve the [ISC notice](logos_desktop/img/lucide-LICENSE.txt) |
 | MSI transform | John Goodman contributed `LogosStubFailOK.mst` under the upstream MIT license on 2025-01-23 in commit `eb6f604e7366f6ade6073837c7446fe81fddd85c`. It changes installer action tables and contains vendor summary metadata, with no listed installer or executable payload. Preserve upstream MIT attribution. This does not claim vendor endorsement |
-| Legacy project icon | Nate Marti contributed `icon.png` and its editable broken-chain artwork under upstream MIT on 2024-10-21 in commit `919bbec`. It is project artwork, distinct from the Logos product mark |
+| Historical artwork | Nate Marti's 2024-10-21 contribution remains in Git history at `919bbec`. Current application and desktop entries use Book Open Text |
 | Vendor product graphics | Removed from the current distribution because their redistribution basis was unresolved. Product names remain text. Home uses the attributed Book Open Text project artwork, as approved for this packaging change |
 | Arch template and desktop entry | MIT, with a separate [recipe notice](packaging/LICENSE) |
 | Python and Qt dependencies | Resolved separately, not embedded in the controller wheel. Preserve each installed distribution's notices. PySide6/Qt and shiboken have their own LGPL/GPL/commercial terms and component notices |
@@ -206,12 +205,21 @@ candidate. Do not bundle Logos installers, books, accounts or personal databases
 | --- | --- |
 | `shell.nix` | Retired. Its pinned shell omitted current dependencies and was not a validated development route. Use an installed Python and a venv |
 | `snap/` | Retired with its exclusive launchers and graphics. Its wrapper split arguments and its runtime was unvalidated |
-| `io.github.FaithlifeCommunity.OuDedetai.yml` | Flatpak deferred. Process visibility, remapped path identity, document access and installed-app update behavior have not passed. Its inherited product-path disagreement is retired with the manifest |
-| `Dockerfile`, `ou_dedetai.spec`, `scripts/build-binary.sh`, `scripts/frozen_identity.py` | Standalone binaries and `logos-desktop-bin` deferred. The inherited PyInstaller toolchain is not a supported build route. Standalone ownership and recovery guards remain in runtime code and regression tests |
+| Inherited Flatpak manifest | Deferred. Process visibility, remapped path identity, document access and installed-app update behavior have not passed |
+| `Dockerfile`, `logos_desktop.spec`, `scripts/build-binary.sh`, `scripts/frozen_identity.py` | Standalone binaries and `logos-desktop-bin` deferred. The inherited PyInstaller toolchain is not a supported build route. Standalone ownership and recovery guards remain in runtime code and regression tests |
 | `scripts/quick-install.sh` | Retired. It bypassed current artifact, process and installation safeguards |
 | `scripts/ensure-python.sh` | Retired. Contributor setup uses an installed supported interpreter rather than compiling into host paths |
 
 ARM, Snap, Nix and Flatpak are not supported launch channels. Historical recipes
 remain available in source history for attribution and investigation. The obsolete
-manual `tests/integration.py` harness still names the removed binary builder and
-must not be used as a supported test or installation route.
+manual binary harness and historical frontend screenshots were retired. Meaningful
+installation, update and frontend regressions remain in the offline suite.
+
+## Private candidate migration
+
+See [explicit migration](INSTALL.md#migrate-a-private-candidate). The new verified
+bootstrap reads the selected older environment's installed file records without
+importing its runtime. It reserves the selected profile's controller lease before
+activation. The incoming wheel is separately digest-verified. Recovery validates
+recorded predecessor bytes and preserves later edits. This is separate from both
+normal owner-update routes and does not change the 1.0.0 release version.

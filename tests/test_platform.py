@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, maintenance, main, network, releases, system, utils, wine
-from ou_dedetai.config import Config, EphemeralConfiguration
+from logos_desktop import constants, maintenance, main, network, releases, system, utils, wine
+from logos_desktop.config import Config, EphemeralConfiguration
 
 
 class TestDistributionDiscovery(unittest.TestCase):

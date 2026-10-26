@@ -8,7 +8,7 @@ except ModuleNotFoundError:
 else:
     QT_AVAILABLE = True
     from PySide6.QtGui import QPalette
-    from ou_dedetai.qt.theme import explicit_palette
+    from logos_desktop.qt.theme import explicit_palette
     from tests.qt_fixtures import QtCase
 
 
@@ -19,7 +19,7 @@ class TestQtTheme(QtCase):
         from unittest.mock import Mock
         from PySide6.QtCore import Qt
         from PySide6.QtDBus import QDBusVariant
-        from ou_dedetai.qt.theme import DesktopAppearance
+        from logos_desktop.qt.theme import DesktopAppearance
 
         desktop = SimpleNamespace(scheme=Qt.ColorScheme.Unknown, changed=Mock())
         self.theme.desktop = desktop
@@ -72,7 +72,7 @@ class TestQtTheme(QtCase):
 
     def test_preference_load_invalid_value_and_write_failure(self):
         from PySide6.QtCore import QSettings
-        from ou_dedetai.qt.theme import Theme
+        from logos_desktop.qt.theme import Theme
         path = self.root / "reload.ini"
         settings = QSettings(str(path), QSettings.Format.IniFormat)
         settings.setValue("appearance/theme", "Dark")

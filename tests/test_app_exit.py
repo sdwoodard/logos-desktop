@@ -2,7 +2,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai.app import App
+from logos_desktop.app import App
 
 
 class TestApp(App):
@@ -21,7 +21,7 @@ class TestApp(App):
 
 class TestAppExit(unittest.TestCase):
     def app(self):
-        with patch("ou_dedetai.config.Config", return_value=Mock()):
+        with patch("logos_desktop.config.Config", return_value=Mock()):
             app = TestApp(None)
         self.addCleanup(app.close)
         return app

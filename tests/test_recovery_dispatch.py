@@ -14,9 +14,9 @@ from zipfile import ZipFile
 
 import psutil
 
-from ou_dedetai import artifacts, backup, cli, config_store, constants, installer, logos, main, maintenance
-from ou_dedetai import runtime, system, wine
-from ou_dedetai.app import App
+from logos_desktop import artifacts, backup, cli, config_store, constants, installer, logos, main, maintenance
+from logos_desktop import runtime, system, wine
+from logos_desktop.app import App
 from tests.test_config import configuration
 
 
@@ -88,7 +88,7 @@ class TestRecoveryDispatch(unittest.TestCase):
             self.assertIn(str(self.selected[2]), status)
             self.assertIn("Pending recovery", status)
             self.assertIn("--repair", status)
-            with patch("ou_dedetai.control.edit_file") as edit:
+            with patch("logos_desktop.control.edit_file") as edit:
                 self.dispatch("--edit-config")
                 edit.assert_called_once_with(str(self.selected[0]))
             archive = self.root / "support.zip"

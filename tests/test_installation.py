@@ -12,12 +12,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import (
+from logos_desktop import (
     artifacts, cli, compatibility, constants, installer, maintenance, network, processes, releases, runtime,
     system, utils, wine,
 )
-from ou_dedetai.app import UserExitedFromAsk
-from ou_dedetai.config import Config, EphemeralConfiguration
+from logos_desktop.app import UserExitedFromAsk
+from logos_desktop.config import Config, EphemeralConfiguration
 from tests.artifact_fixtures import appimage, msi
 from tests.test_artifact_consumers import fixture_app
 
@@ -774,8 +774,8 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
-from ou_dedetai import constants,system,wine
-from ou_dedetai.config import Config,EphemeralConfiguration
+from logos_desktop import constants,system,wine
+from logos_desktop.config import Config,EphemeralConfiguration
 constants.STATE_DIR=sys.argv[2]
 app=SimpleNamespace(_config_updated_event=Event())
 with patch.object(Config,'_create_network_requests_with_hook',return_value=Mock()):

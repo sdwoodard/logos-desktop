@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import constants, doctor, maintenance, runtime
+from logos_desktop import constants, doctor, maintenance, runtime
 
 
 class StoredOnly:

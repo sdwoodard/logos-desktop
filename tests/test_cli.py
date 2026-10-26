@@ -11,13 +11,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import cli, constants, main
-from ou_dedetai.app import App, UserExitedFromAsk
+from logos_desktop import cli, constants, main
+from logos_desktop.app import App, UserExitedFromAsk
 
 
 PROGRAM = r'''
 import os, sys, threading
-from ou_dedetai import cli, main
+from logos_desktop import cli, main
 scenario, selected = sys.argv[1:]
 def action(app):
     if scenario == 'close':
@@ -51,7 +51,7 @@ finally:
 class TestPromptContract(unittest.TestCase):
     def test_actual_backend_checkpoint_errors_restore_instance_before_terminal_launch(self):
         import threading
-        from ou_dedetai import controller_install, instance, utils
+        from logos_desktop import controller_install, instance, utils
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -97,7 +97,7 @@ class TestPromptContract(unittest.TestCase):
 
     def test_handoff_releases_real_instance_before_helper_and_restores_on_refusal(self):
         import threading
-        from ou_dedetai import controller_install, instance, utils
+        from logos_desktop import controller_install, instance, utils
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -134,7 +134,7 @@ class TestPromptContract(unittest.TestCase):
                             session.close()
 
     def test_managed_update_preserves_config_frontend_and_bypasses_standalone(self):
-        from ou_dedetai import controller_install, updates
+        from logos_desktop import controller_install, updates
 
         identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
         args = SimpleNamespace(config="/fixture/selected profile.json", dialog=None)
@@ -151,7 +151,7 @@ class TestPromptContract(unittest.TestCase):
             self.assertNotIn("Updated", output.getvalue())
 
     def test_controller_check_dispatches_before_profile_or_gui_setup(self):
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         with (patch.object(sys, "argv", ["logos-desktop", "--check-controller-updates"]),
               patch.object(controller_install, "main", return_value=0) as check,
@@ -284,7 +284,7 @@ class TestCliPipes(unittest.TestCase):
     def test_interrupt_keeps_actual_command_owned_until_its_final_write(self):
         program = '''
 import sys
-from ou_dedetai import main, system
+from logos_desktop import main, system
 selected, action, command = sys.argv[1:]
 system.ensure_winetricks = lambda *args, **kwargs: command
 sys.argv = ['logos-desktop', '-c', selected, action, 'fixture']
@@ -293,7 +293,7 @@ main.main()
         admission = '''
 import sys
 from pathlib import Path
-from ou_dedetai import maintenance
+from logos_desktop import maintenance
 try:
     with maintenance.use(maintenance.Context(Path(sys.argv[1])), exclusive=True):
         pass

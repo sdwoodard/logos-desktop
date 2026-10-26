@@ -23,18 +23,21 @@ interpreter path if needed. It preserves existing environments. Install
 `'.[dev,gui]'` afterward for Qt development. See [PACKAGING.md](PACKAGING.md) for
 the artifact contract, Arch template, notices and retired distribution recipes.
 
-The Python namespace remains `ou_dedetai`. The `logos-desktop` and transitional
-`oudedetai` console commands share an entry point. Existing runtime filenames and
+The Python namespace is `logos_desktop`. The `logos-desktop` console command is
+the controller entry point. Existing runtime filenames and
 configuration paths use the LogosDesktop identity with explicit legacy adoption.
-Controller self-replacement remains disabled during private development.
+Public feeds and standalone self-replacement remain disabled. Private provider-backed
+owner updates are separate from contributor source installations.
 
 ## Focused checks
 
 The product uses stdlib unittest. The private manual workflow runs full inexpensive
-discovery, including the retained utility tests:
+discovery, including the retained utility tests. Use a disposable account/container
+for the full suite. HOME/XDG overrides alone do not isolate the account-home
+coordination namespace. For a focused offline test that uses its own fixtures:
 
 ```bash
-.venv/bin/python -B -m unittest discover -s tests -t . -p 'test*.py' -v
+.venv/bin/python -B -m unittest tests.test_artifacts -v
 .venv/bin/ruff check
 ```
 
@@ -46,10 +49,10 @@ desktop integration.
 
 Tests use local response and filesystem fixtures. They should run without public
 network access or a particular checkout name, home setup or directory block size.
-Use a disposable HOME and XDG paths when running the suite. `tests/integration.py`
-is an obsolete manual harness with old commands, X11 assumptions and install/remove
-side effects. It is excluded from discovery and must not be used as a routine test
-command. Build and installed-artifact checks are described in
+In a disposable account, the full command is
+`.venv/bin/python -B -m unittest discover -s tests -t . -p 'test*.py' -v`.
+The old manual binary
+harness was retired. Build and installed-artifact checks are described in
 [PACKAGING.md](PACKAGING.md). Source setup is for contributors and does not create
 the managed wheel environment used by the canonical installation route.
 
@@ -72,3 +75,23 @@ Retain [LICENSE](LICENSE) and the provenance described in [README.md](README.md)
 
 The [architecture map](ARCHITECTURE.md) describes the inherited backend boundaries.
 Domain operations use the shared App interface rather than hard-coding a frontend.
+
+## Find a first task
+
+These are suggested bounded contributions, not assigned or preapproved issues:
+
+- Reproduce one documentation command in a disposable environment. Likely files:
+  `INSTALL.md` and `SUPPORT.md`. Report exact versions and the failing step, then
+  propose a corrected command without broadening support claims.
+- Add one regression for a demonstrated profile-selection failure. Start at
+  `tests/test_config.py` or `tests/test_adoption.py`. Show the failing behavior
+  before the fix and verify that another profile stays unchanged.
+- Improve one keyboard-access problem in a dialog. Start at
+  `logos_desktop/qt/dialogs.py` and `tests/test_qt_frontend.py`. Describe the native
+  reproduction and verify focus, Escape/cancel and the affected workflow.
+
+Open a focused issue before a large feature or package-channel change. For a pull
+request, describe the problem, relevant files, result and checks actually run.
+Keep unrelated formatting out of the diff. The maintainer reviews data ownership,
+failure handling, readability and user-facing claims before merging. No response
+time or acceptance is promised.

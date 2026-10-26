@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import commands, network, utils, maintenance
+from logos_desktop import commands, network, utils, maintenance
 
 
 class TestHeadlessCommands(unittest.TestCase):
@@ -33,11 +33,11 @@ class TestHeadlessCommands(unittest.TestCase):
     def run_command(self, *arguments):
         program = """
 import sys
-from ou_dedetai.main import main
+from logos_desktop.main import main
 try:
     main()
 finally:
-    assert not any(name.startswith(('PySide6', 'ou_dedetai.qt')) for name in sys.modules)
+    assert not any(name.startswith(('PySide6', 'logos_desktop.qt')) for name in sys.modules)
 """
         result = subprocess.run([sys.executable, '-B', '-c', program, *map(str, arguments)],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -54,7 +54,7 @@ finally:
         self.assertEqual(set(self.root.rglob('*')), before)
 
     def test_missing_default_discovers_without_selecting_and_explicit_config_wins(self):
-        legacy = self.root / 'config/FaithLife-Community/oudedetai.json'
+        legacy = self.root / 'config/FaithLife-Community/Logos_on_Linux.json'
         legacy.parent.mkdir(parents=True)
         legacy.write_bytes(self.config.read_bytes())
         result = self.run_command('--doctor')
@@ -69,7 +69,7 @@ finally:
         self.assertFalse((self.root / 'config/logos-desktop/config.json').exists())
 
     def test_explicit_legacy_cli_actions_refuse_missing_default_without_qt(self):
-        legacy = self.root / 'config/FaithLife-Community/oudedetai.json'
+        legacy = self.root / 'config/FaithLife-Community/Logos_on_Linux.json'
         legacy.parent.mkdir(parents=True)
         original = self.config.read_bytes()
         legacy.write_bytes(original)
@@ -129,12 +129,12 @@ finally:
         self.assertTrue(self.config.exists())
 
     def test_projection_uses_stored_fields_without_config_getters(self):
-        with patch('ou_dedetai.config.Config', side_effect=AssertionError('No manager config')):
+        with patch('logos_desktop.config.Config', side_effect=AssertionError('No manager config')):
             conf = commands.configuration(self.config)
         self.assertEqual(conf._raw.install_dir, str(self.install))
 
     def test_verified_restore_requires_exact_confirmation_even_with_assume_yes(self):
-        from ou_dedetai import backup, constants
+        from logos_desktop import backup, constants
         from tests.test_backup import fixture_app, hashes
 
         app = fixture_app(self.root)
@@ -165,8 +165,8 @@ class TestNormalGraphicalStartup(unittest.TestCase):
     def test_actual_main_opens_missing_new_default_without_selecting_legacy(self):
         from threading import Event
         from types import SimpleNamespace
-        from ou_dedetai import constants, main
-        from ou_dedetai.config import Config, LegacyConfiguration
+        from logos_desktop import constants, main
+        from logos_desktop.config import Config, LegacyConfiguration
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -199,7 +199,7 @@ class TestNormalGraphicalStartup(unittest.TestCase):
                 patch.object(constants, 'COORDINATION_DIR', root / 'coordination'),
                 patch.object(constants, 'STATE_DIR', str(root / 'state/logos-desktop')),
                 patch.object(LegacyConfiguration, 'load', side_effect=AssertionError('No implicit legacy selection')),
-                patch.dict(sys.modules, {'ou_dedetai.qt.startup': SimpleNamespace(start=start)}),
+                patch.dict(sys.modules, {'logos_desktop.qt.startup': SimpleNamespace(start=start)}),
                 patch.object(main.updates, 'recover_startup'),
                 patch.object(main.msg, 'initialize_logging'),
                 patch.object(main.system, 'check_architecture'),
@@ -224,7 +224,7 @@ class TestUpdateAdmission(unittest.TestCase):
                 _network=SimpleNamespace(product_release=lambda *args, **kwargs:
                                          network.ProductLookup(('40.0',), 'ok')),
             )
-            with patch('ou_dedetai.installer.install') as install:
+            with patch('logos_desktop.installer.install') as install:
                 with self.assertRaises(maintenance.MaintenanceError):
                     utils.update_faithlife_product.__wrapped__(SimpleNamespace(conf=conf))
                 install.assert_not_called()

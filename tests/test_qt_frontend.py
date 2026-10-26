@@ -17,7 +17,7 @@ else:
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QComboBox, QDialogButtonBox, QFileDialog, QTextBrowser
-    from ou_dedetai.qt.bridge import Completion, Progress, Result, Ticket
+    from logos_desktop.qt.bridge import Completion, Progress, Result, Ticket
     from tests.qt_fixtures import QtCase
 
 
@@ -25,9 +25,9 @@ else:
 class TestQtFrontend(QtCase):
     def test_unconfigured_home_discovery_requires_explicit_candidate_and_adoption_destination(self):
         from unittest.mock import Mock
-        from ou_dedetai import constants
-        from ou_dedetai.config import EphemeralConfiguration
-        from ou_dedetai.qt.services import Services
+        from logos_desktop import constants
+        from logos_desktop.config import EphemeralConfiguration
+        from logos_desktop.qt.services import Services
 
         install = self.root / "legacy-installation"
         (install / "data/wine64_bottle").mkdir(parents=True)
@@ -437,7 +437,7 @@ class TestQtFrontend(QtCase):
         self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_path_prompt_rejection_does_not_resolve_to_current_directory(self):
-        from ou_dedetai.constants import PROMPT_OPTION_DIRECTORY
+        from logos_desktop.constants import PROMPT_OPTION_DIRECTORY
         window = self.window()
 
         def operation(app, cancel):
@@ -516,7 +516,7 @@ class TestQtFrontend(QtCase):
         def broken():
             raise ValueError("Intended queued callback failure")
 
-        with patch("ou_dedetai.qt.bridge.logging.exception") as report:
+        with patch("logos_desktop.qt.bridge.logging.exception") as report:
             window.bridge.post(broken)
             window.bridge.post(lambda: seen.append("following"))
             self.pump(lambda: seen == ["following"])
@@ -529,7 +529,7 @@ class TestQtFrontend(QtCase):
 class TestQtActivation(unittest.TestCase):
     def setUp(self):
         from unittest.mock import Mock
-        from ou_dedetai.qt import activation
+        from logos_desktop.qt import activation
 
         self.activation = activation
         mapping = patch.dict(os.environ, {"SYNTHETIC_WORKER_MARKER": "preserved"}, clear=True)
@@ -639,7 +639,7 @@ class TestQtActivation(unittest.TestCase):
         self.window.show.assert_not_called()
 
     def test_mime_worker_child_excludes_c_only_token_during_simulated_request(self):
-        from ou_dedetai import desktop
+        from logos_desktop import desktop
 
         run = subprocess.run
         observed = []
@@ -679,7 +679,7 @@ class TestQtActivation(unittest.TestCase):
 class TestNoQtCLI(unittest.TestCase):
     def test_frontend_selection_accepts_wayland_and_retains_terminal_and_legacy_aliases(self):
         from unittest.mock import Mock
-        from ou_dedetai import main, maintenance, system
+        from logos_desktop import main, maintenance, system
         with patch.dict(os.environ, {"WAYLAND_DISPLAY": "fixture-wayland"}, clear=True):
             self.assertEqual(system.get_dialog(), "qt")
         with patch.dict(os.environ, {"DIALOG": "tk"}, clear=True):
@@ -703,7 +703,7 @@ class NoQt(importlib.abc.MetaPathFinder):
         if fullname.startswith("PySide6"):
             raise ModuleNotFoundError("Qt omitted by this fixture", name="PySide6")
 sys.meta_path.insert(0, NoQt())
-from ou_dedetai import main
+from logos_desktop import main
 sys.argv = ["logos-desktop", "-c", sys.argv[1], "--dialog", "qt"]
 main.main()
 '''
@@ -730,10 +730,10 @@ main.main()
 import importlib.abc,sys
 class NoQt(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith(("PySide6", "ou_dedetai.qt", "tkinter", "ou_dedetai.gui")):
+        if fullname.startswith(("PySide6", "logos_desktop.qt", "tkinter", "logos_desktop.gui")):
             raise AssertionError("CLI imported Qt")
 sys.meta_path.insert(0, NoQt())
-from ou_dedetai import main
+from logos_desktop import main
 sys.argv = ["logos-desktop", "-c", sys.argv[1], sys.argv[2]]
 main.main()
 '''

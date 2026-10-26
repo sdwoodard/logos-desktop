@@ -11,11 +11,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import (
+from logos_desktop import (
     artifacts, constants, control, installer, maintenance, network, releases, runtime, system, utils, wine,
 )
-from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
-from ou_dedetai.app import UserExitedFromAsk
+from logos_desktop.config import Config, EphemeralConfiguration, PersistentConfiguration
+from logos_desktop.app import UserExitedFromAsk
 from tests.artifact_fixtures import appimage, msi, product_msi, winetricks_zip
 from tests.test_artifacts import response
 
@@ -594,7 +594,7 @@ class TestArtifactConsumers(unittest.TestCase):
                 publisher = (
                     "import sys\nfrom pathlib import Path\n"
                     f"sys.path.insert(0,{str(Path(__file__).resolve().parents[1])!r})\n"
-                    "from ou_dedetai import artifacts,constants\n"
+                    "from logos_desktop import artifacts,constants\n"
                     f"constants.STATE_DIR={constants.STATE_DIR!r}\n"
                     f"source=Path({str(source)!r})\n"
                     f"root=Path({self.app.conf.installer_binary_dir!r})\n"

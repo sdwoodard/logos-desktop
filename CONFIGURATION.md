@@ -39,8 +39,10 @@ the standard home locations:
 
 Existing installations and external prefixes stay where they are. The new portable
 configuration name is `logos-desktop.json` in the installation directory.
-Legacy `oudedetai.json` and FaithLife-Community/Logos_on_Linux configuration names
-remain readable inputs. Startup does not replace them with the new default.
+Explicitly selected legacy JSON and shell-assignment files remain readable inputs.
+Some older Logos_on_Linux locations are discoverable. Other historical names need
+the explicit file picker or command-line path. Startup does not replace those
+files with the new default.
 
 When the default is missing, normal graphical startup opens an unconfigured Home.
 Discover legacy configurations, explicitly select a result, or choose a legacy
@@ -82,14 +84,17 @@ than a guessed selection. Reconstruction does not establish Wine compatibility o
 invent a runtime selection. Review unknown diagnostics and select a runtime
 separately when needed.
 
-Examples below use absolute placeholder paths. Run one action per invocation:
+Examples use absolute placeholder paths. First [select your launcher](INSTALL.md#select-your-launcher-for-shared-commands).
+Run one action per invocation:
 
 ```bash
-logos-desktop --discover-installations
-logos-desktop -c /absolute/path/legacy.json --discover-installations
-logos-desktop --adopt-installation /absolute/path/legacy.json --adoption-destination /absolute/path/profile.json --confirm-adoption
-logos-desktop --adopt-installation /absolute/path/installation --adoption-destination /absolute/path/profile.json --confirm-adoption
-logos-desktop -c /absolute/path/profile.json --dialog qt
+"$controller" --discover-installations
+"$controller" -c /absolute/path/legacy.json --discover-installations
+"$controller" --adopt-installation /absolute/path/legacy.json \
+  --adoption-destination /absolute/path/profile.json --confirm-adoption
+"$controller" --adopt-installation /absolute/path/installation \
+  --adoption-destination /absolute/path/profile.json --confirm-adoption
+"$controller" -c /absolute/path/profile.json --dialog qt
 ```
 
 `--adoption-destination` selects the new file. For adoption, `-c` can also supply
@@ -107,7 +112,7 @@ configuration bytes and the published file identity before no-clobber publicatio
 Keep this journal for interrupted adoption and rollback:
 
 ```bash
-logos-desktop --rollback-adoption /absolute/path/to/adoption-journal.json --confirm-adoption
+"$controller" --rollback-adoption /absolute/path/to/adoption-journal.json --confirm-adoption
 ```
 
 Rollback removes only the unchanged controller-owned publication. Later edits or
@@ -184,10 +189,10 @@ inaccessible process state remain unknown when inspection cannot establish them.
 See [support](SUPPORT.md) for the exact sanitized preview and export workflow.
 
 ```bash
-logos-desktop -c /absolute/path/profile.json --doctor
-logos-desktop -c /absolute/path/profile.json --update-status
-logos-desktop -c /absolute/path/profile.json --update-status --check-for-updates
-logos-desktop -c /absolute/path/profile.json --update-installed-app
+"$controller" -c /absolute/path/profile.json --doctor
+"$controller" -c /absolute/path/profile.json --update-status
+"$controller" -c /absolute/path/profile.json --update-status --check-for-updates
+"$controller" -c /absolute/path/profile.json --update-installed-app
 ```
 
 Update presentation distinguishes unchecked, stale, failed or malformed lookup,
@@ -196,7 +201,8 @@ An empty or failed check is not proof that Logos is current. Checking explicitly
 refreshes stable metadata. Updating requires a usable fresh stable target newer
 than the installed version. The installed version is reread under mutation
 admission and conflicting effective configuration is refused before installation.
-LogosDesktop self-updates remain disabled during private development.
+Public controller feeds and standalone self-replacement remain disabled. Explicit
+private providers support the separate [owner update routes](INSTALL.md).
 
 `logos-desktop -c profile.json --repair` explicitly requests journal reconciliation
 and failed-upgrade repair. Its confirmation names the selected prefix. A normal

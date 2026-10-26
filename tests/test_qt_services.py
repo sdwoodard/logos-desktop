@@ -18,16 +18,16 @@ except ModuleNotFoundError:
     QtCase = unittest.TestCase
 else:
     QT_AVAILABLE = True
-    from ou_dedetai import maintenance
-    from ou_dedetai.qt.services import Services
-    from ou_dedetai.qt.window import InstallDraft
+    from logos_desktop import maintenance
+    from logos_desktop.qt.services import Services
+    from logos_desktop.qt.window import InstallDraft
     from tests.qt_fixtures import QtCase
 
 
 @unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
 class TestProductionServices(QtCase):
     def test_managed_controller_checks_are_explicit_cached_and_off_the_gui_thread(self):
-        from ou_dedetai import constants, controller_install
+        from logos_desktop import constants, controller_install
 
         ui_thread = threading.get_ident()
         threads = []
@@ -57,7 +57,7 @@ class TestProductionServices(QtCase):
             self.assertIn("Private wheel provider", window.maintenance.controller.detail.text())
 
     def test_public_flag_does_not_admit_an_unsupported_source_controller(self):
-        from ou_dedetai import constants, controller_install, updates
+        from logos_desktop import constants, controller_install, updates
 
         identity = controller_install.Identity("unsupported", "1.0.0", "", message="Source checkout")
         with (patch.object(constants, "APP_SELF_UPDATES_ENABLED", True),
@@ -72,7 +72,7 @@ class TestProductionServices(QtCase):
 
     def test_managed_handoff_closes_without_claiming_update_or_stopping_logos(self):
         from unittest.mock import Mock
-        from ou_dedetai import controller_install
+        from logos_desktop import controller_install
 
         identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
         terminal = Mock()
@@ -102,7 +102,7 @@ class TestProductionServices(QtCase):
             self.assertEqual(window.services.snapshot().controller_status, "handed-off")
 
     def test_cancel_during_real_handoff_provider_restores_lease_without_opening_terminal(self):
-        from ou_dedetai import constants, controller_install, instance
+        from logos_desktop import constants, controller_install, instance
 
         entered, finish = threading.Event(), threading.Event()
         self.addCleanup(finish.set)
@@ -147,10 +147,10 @@ class TestProductionServices(QtCase):
 
     def test_manual_and_unknown_controller_results_stay_in_provider_state(self):
         from unittest.mock import Mock
-        from ou_dedetai import controller_install, utils
+        from logos_desktop import controller_install, utils
 
         identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
-        command = ("/private root/python", "-I", "-m", "ou_dedetai.controller_install", "recover")
+        command = ("/private root/python", "-I", "-m", "logos_desktop.controller_install", "recover")
         with patch.object(controller_install, "identify", return_value=identity):
             window = self.production_window()
             window.app.approve = lambda *args: True
@@ -173,7 +173,7 @@ class TestProductionServices(QtCase):
         if not hasattr(window.app, "profile_selection"):
             @contextmanager
             def selection(candidate):
-                from ou_dedetai.logos import LogosManager
+                from logos_desktop.logos import LogosManager
                 if not window.app.logos.close():
                     raise maintenance.MaintenanceBusy("Fixture manager did not settle")
                 yield
@@ -184,8 +184,8 @@ class TestProductionServices(QtCase):
         return window
 
     def test_production_bootstrap_and_snapshot_do_not_prompt_or_fetch(self):
-        with (patch("ou_dedetai.metadata.request", side_effect=AssertionError("Unexpected network"), create=True),
-              patch("ou_dedetai.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
+        with (patch("logos_desktop.metadata.request", side_effect=AssertionError("Unexpected network"), create=True),
+              patch("logos_desktop.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
             window = self.production_window()
             window._render()
             self.assertIn("has not been checked", window.snapshot.wine_status)
@@ -199,7 +199,7 @@ class TestProductionServices(QtCase):
         self.assertEqual(window.install.product.currentText(), "Logos")
 
     def test_cached_wine_states_flow_from_worker_snapshot_without_probe_fetch_or_write(self):
-        from ou_dedetai import releases
+        from logos_desktop import releases
         from PySide6.QtCore import Qt
 
         native = "/fixture/selected-wine-10.8"
@@ -222,8 +222,8 @@ class TestProductionServices(QtCase):
             (replace(source, checked=None), available, "not checked", False),
             (releases.WineTargetLookup(), available, "unchecked", False),
         )
-        with (patch("ou_dedetai.metadata.request", side_effect=AssertionError("Unexpected network")),
-              patch("ou_dedetai.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
+        with (patch("logos_desktop.metadata.request", side_effect=AssertionError("Unexpected network")),
+              patch("logos_desktop.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
             window = self.production_window()
             client = window.app.conf._network
             for cached_source, cached_provider, expected, provider_checked in cases:
@@ -257,9 +257,9 @@ class TestProductionServices(QtCase):
 
     def test_refresh_and_discovery_discard_changed_profiles_and_clear_prior_choices(self):
         from unittest.mock import Mock
-        from ou_dedetai import releases, utils
-        from ou_dedetai.config import PersistentConfiguration
-        from ou_dedetai.logos import State
+        from logos_desktop import releases, utils
+        from logos_desktop.config import PersistentConfiguration
+        from logos_desktop.logos import State
 
         client = Mock()
         conf = SimpleNamespace(
@@ -300,9 +300,9 @@ class TestProductionServices(QtCase):
 
     def test_enabled_controller_update_uses_stable_exact_qt_restart_and_cleans_cancelled_stage(self):
         from unittest.mock import Mock
-        from ou_dedetai import constants
+        from logos_desktop import constants
         with (patch.multiple(constants, APP_SELF_UPDATES_ENABLED=True, APP_RELEASE_VERSION="1.0.0"),
-              patch("ou_dedetai.updates.eligible")):
+              patch("logos_desktop.updates.eligible")):
             window = self.production_window()
             self.assertIn("controller_update", window.maintenance.buttons)
             for cancel in (False, True):
@@ -315,7 +315,7 @@ class TestProductionServices(QtCase):
                     return prepared
 
                 with (patch.object(window.app, "approve", return_value=True),
-                      patch("ou_dedetai.updates.prepare", side_effect=prepare)):
+                      patch("logos_desktop.updates.prepare", side_effect=prepare)):
                     window._action("controller_update")
                     self.pump(lambda: window.app.active is None)
                 if cancel:
@@ -327,7 +327,7 @@ class TestProductionServices(QtCase):
                 self.assertIsNone(self.services.prepared)
 
     def test_cancel_check_reaps_real_metadata_probe_and_restores_controls(self):
-        from ou_dedetai import processes
+        from logos_desktop import processes
         window = self.production_window()
         children = []
         original = subprocess.Popen
@@ -359,10 +359,10 @@ class TestProductionServices(QtCase):
     def test_successor_bootstrap_failure_preserves_recoverable_journal_and_success_confirms_once(self):
         from contextlib import nullcontext
         from PySide6.QtCore import QTimer
-        from ou_dedetai import controller_install, processes, updates
-        from ou_dedetai.config import EphemeralConfiguration
-        from ou_dedetai.qt import startup
-        from ou_dedetai.qt.app import QtApp
+        from logos_desktop import controller_install, processes, updates
+        from logos_desktop.config import EphemeralConfiguration
+        from logos_desktop.qt import startup
+        from logos_desktop.qt.app import QtApp
         from tests.test_controller_update import controller_elf
 
         original_window = startup.MainWindow
@@ -437,7 +437,7 @@ class TestProductionServices(QtCase):
 
         for checked in (False, True):
             with (patch.object(app, "approve", return_value=True), patch.object(app, "ask", return_value="OK"),
-                  patch("ou_dedetai.installer.install", install),
+                  patch("logos_desktop.installer.install", install),
                   patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                       status="ok", stale=False, versions=["46.2.0.5"]))):
                 result = self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
@@ -453,7 +453,7 @@ class TestProductionServices(QtCase):
             original = getattr(overrides, field)
             setattr(overrides, field, str(self.root / "old-prefix"))
             try:
-                with patch("ou_dedetai.installer.install") as install:
+                with patch("logos_desktop.installer.install") as install:
                     with self.assertRaises(maintenance.MaintenanceError):
                         self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
                                                           True))(window.app, threading.Event())
@@ -483,7 +483,7 @@ class TestProductionServices(QtCase):
             self.original = self.config.read_bytes()
             window = self.production_window()
             window.app.conf._overrides.environment.update(environment)
-            with patch("ou_dedetai.installer.install") as install:
+            with patch("logos_desktop.installer.install") as install:
                 with self.assertRaises(maintenance.MaintenanceError):
                     self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
                                                       True))(window.app, threading.Event())
@@ -531,7 +531,7 @@ class TestProductionServices(QtCase):
             path.parent.mkdir(parents=True)
             path.write_bytes(content)
         window = self.production_window()
-        with patch("ou_dedetai.installer.install") as install:
+        with patch("logos_desktop.installer.install") as install:
             with self.assertRaises(maintenance.MaintenanceError):
                 self.services.install(InstallDraft("Logos", str(self.root / "new"), str(old),
                                                   True))(window.app, threading.Event())
@@ -546,7 +546,7 @@ class TestProductionServices(QtCase):
         window = self.production_window()
         for environment in ({}, {"LOGOS_VERSION": "9"}):
             window.app.conf._overrides.environment.update(environment)
-            with patch("ou_dedetai.installer.install") as install:
+            with patch("logos_desktop.installer.install") as install:
                 with self.assertRaises(maintenance.MaintenanceError):
                     self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
                                                       True))(window.app, threading.Event())
@@ -601,7 +601,7 @@ class TestProductionServices(QtCase):
             seen = []
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="ok", stale=False, versions=["46.2.0.5", "40.1.0.0"])) as lookup:
-                with patch("ou_dedetai.installer.install", lambda owner: seen.append((
+                with patch("logos_desktop.installer.install", lambda owner: seen.append((
                         owner.conf.faithlife_product_release, owner.conf.faithlife_product_release_channel))):
                     result = self.services.install(draft)(app, threading.Event())
             self.assertEqual(result.outcome, "succeeded")
@@ -646,7 +646,7 @@ class TestProductionServices(QtCase):
         self.assertEqual(result.outcome, "unknown")
         app.conf.skip_install_system_dependencies = True
         seen = []
-        with patch.object(app, "approve", return_value=True), patch("ou_dedetai.utils.install_dependencies",
+        with patch.object(app, "approve", return_value=True), patch("logos_desktop.utils.install_dependencies",
                                                                   lambda owner: seen.append(
                                                                       owner.conf.skip_install_system_dependencies)):
             result = self.services.operation("dependencies")(app, threading.Event())
@@ -677,7 +677,7 @@ class TestProductionServices(QtCase):
             self.assertEqual((live / name / "sentinel").read_text(), name)
 
         with patch.object(app, "approve", return_value=True), patch.object(app, "ask", return_value=snapshot.name):
-            with patch("ou_dedetai.backup_store.copy_payload", side_effect=OSError("Injected copy failure")):
+            with patch("logos_desktop.backup_store.copy_payload", side_effect=OSError("Injected copy failure")):
                 window._action("restore")
                 self.pump(lambda: app.active is None and bool(window.dialogs.dialogs))
         self.assertIn("could not be completed", window.status.text())
@@ -696,7 +696,7 @@ class TestProductionServices(QtCase):
         backups.mkdir()
         app.conf._change(backup_dir=str(backups))
         self.original = self.config.read_bytes()
-        from ou_dedetai import backup_store
+        from logos_desktop import backup_store
         original = backup_store._hash_file
         reached = []
 
@@ -723,7 +723,7 @@ class TestProductionServices(QtCase):
                            new_callable=unittest.mock.PropertyMock, return_value="40.1.0.0")):
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="ok", stale=False, versions=["46.2.0.5"])):
-                with patch("ou_dedetai.installer.install", side_effect=RuntimeError("Injected MSI failure")):
+                with patch("logos_desktop.installer.install", side_effect=RuntimeError("Injected MSI failure")):
                     window._action("product_update")
                     self.pump(lambda: app.active is None and bool(window.dialogs.dialogs))
         self.assertIsNone(app.conf._raw.faithlife_product_release)
@@ -739,7 +739,7 @@ class TestProductionServices(QtCase):
             app.conf._overrides.environment = overlay
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="ok", stale=False, versions=["46.2.0.5"])):
-                with patch("ou_dedetai.installer.install") as install:
+                with patch("logos_desktop.installer.install") as install:
                     with self.assertRaises(maintenance.MaintenanceError):
                         self.services.operation("product_update")(app, threading.Event())
                     install.assert_not_called()
@@ -748,7 +748,7 @@ class TestProductionServices(QtCase):
         app.conf._overrides.environment = {"faithlife_product_release": "46.2.0.5"}
         with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                 status="ok", stale=False, versions=["46.2.0.5"])):
-            with (patch.object(app, "approve", return_value=True), patch("ou_dedetai.installer.install") as install,
+            with (patch.object(app, "approve", return_value=True), patch("logos_desktop.installer.install") as install,
                   patch.object(type(app.conf), "installed_faithlife_product_release",
                                new_callable=unittest.mock.PropertyMock, return_value="40.1.0.0")):
                 result = self.services.operation("product_update")(app, threading.Event())
@@ -770,7 +770,7 @@ class TestProductionServices(QtCase):
                 status="ok", stale=False, versions=["46.2.0.5"])):
             with (patch.object(app, "approve", return_value=True),
                   patch.object(app, "ask", side_effect=AssertionError("No manual release selection")),
-                  patch("ou_dedetai.installer.install", lambda owner: seen.append((
+                  patch("logos_desktop.installer.install", lambda owner: seen.append((
                       owner.conf.faithlife_product_release, owner.conf.faithlife_product_release_channel)))):
                 window.maintenance.buttons["repair"].trigger()
                 self.pump(lambda: app.active is None)
@@ -796,7 +796,7 @@ class TestProductionServices(QtCase):
                 app.conf._overrides.environment = {"LOGOS64_URL": "https://example.invalid/older.msi"}
             with patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                     status="ok", stale=False, versions=["46.2.0.5"])):
-                with patch("ou_dedetai.installer.install") as install:
+                with patch("logos_desktop.installer.install") as install:
                     for operation in (self.services.install(draft), self.services.operation("product_update"),
                                       self.services.operation("repair")):
                         with self.assertRaises(maintenance.MaintenanceError):
@@ -823,7 +823,7 @@ class TestProductionServices(QtCase):
                 with (patch.object(app, "approve", return_value=True),
                       patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                           status="ok", stale=False, versions=["46.2.0.5"])),
-                      patch("ou_dedetai.installer.install") as install):
+                      patch("logos_desktop.installer.install") as install):
                     with self.assertRaises(maintenance.MaintenanceError):
                         self.services.operation(action)(app, threading.Event())
                     install.assert_not_called()
@@ -842,7 +842,7 @@ class TestProductionServices(QtCase):
         with (patch.object(app, "approve", return_value=True),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
-              patch("ou_dedetai.installer.install", side_effect=RuntimeError("Injected MSI failure"))):
+              patch("logos_desktop.installer.install", side_effect=RuntimeError("Injected MSI failure"))):
             with self.assertRaisesRegex(RuntimeError, "Injected MSI failure"):
                 self.services.operation("repair")(app, threading.Event())
         for field, value in before.items():
@@ -850,8 +850,8 @@ class TestProductionServices(QtCase):
         self.original = self.config.read_bytes()
 
     def test_explicit_qt_repair_dispatch_uses_graphical_policy_and_terminal_dispatch_stays_terminal(self):
-        from ou_dedetai import main, repair
-        with patch("ou_dedetai.qt.startup.start") as start, patch("ou_dedetai.cli.CLI") as cli:
+        from logos_desktop import main, repair
+        with patch("logos_desktop.qt.startup.start") as start, patch("logos_desktop.cli.CLI") as cli:
             parser = main.get_parser()
             config, action = main.setup_config(parser.parse_args([
                 "-c", str(self.config), "--dialog", "qt", "--repair",
@@ -860,7 +860,7 @@ class TestProductionServices(QtCase):
             start.assert_called_once_with(config, repair.repair_installation, install_only=False)
             cli.assert_not_called()
 
-        with patch("ou_dedetai.qt.startup.start") as start, patch("ou_dedetai.cli.CLI") as cli:
+        with patch("logos_desktop.qt.startup.start") as start, patch("logos_desktop.cli.CLI") as cli:
             cli.return_value.close.return_value = True
             config, action = main.setup_config(parser.parse_args([
                 "-c", str(self.config), "--dialog", "tui", "--repair",
@@ -870,7 +870,7 @@ class TestProductionServices(QtCase):
             start.assert_not_called()
 
     def test_runtime_adopts_validated_publication_without_consuming_a_postpublication_edit(self):
-        from ou_dedetai import artifacts, installer, runtime
+        from logos_desktop import artifacts, installer, runtime
         from tests.artifact_fixtures import appimage
         window = self.production_window()
         app = window.app
@@ -891,7 +891,7 @@ class TestProductionServices(QtCase):
                 self.config.write_text(json.dumps(document))
                 edits.append(self.config.read_bytes())
 
-        with (patch("ou_dedetai.wine.require_compatible"),
+        with (patch("logos_desktop.wine.require_compatible"),
               patch.object(runtime, "_replace_bytes", side_effect=replace_then_edit)):
             with app.conf.validated_writes(lambda document: self.services._validate_release_document(
                     app.conf, "46.2.0.5", document)):
@@ -912,7 +912,7 @@ class TestProductionServices(QtCase):
         (self.root / "Logos/data/bin").mkdir(parents=True)
         (self.root / "Logos/data/wine64_bottle").mkdir()
         app.conf._change(faithlife_product_version="10", wine_binary="/usr/bin/wine")
-        (self.root / "Logos/oudedetai.json").write_bytes(self.config.read_bytes())
+        (self.root / "Logos/logos-desktop.json").write_bytes(self.config.read_bytes())
         app.conf._overrides.runtime_selection = {"wine_binary": "data/bin/stale.AppImage"}
         with patch.object(app, "approve", side_effect=lambda question, *args:
                           False if "clear the cache" in question else True):
@@ -926,7 +926,7 @@ class TestProductionServices(QtCase):
               patch.object(app, "ask", return_value="OK"),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
-              patch("ou_dedetai.installer.install") as install):
+              patch("logos_desktop.installer.install") as install):
             result = self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine",
                                                       True))(app, threading.Event())
         self.assertEqual(result.outcome, "succeeded")
@@ -935,8 +935,8 @@ class TestProductionServices(QtCase):
         self.original = self.config.read_bytes()
 
     def test_legacy_first_mutation_uninstall_retires_migration_and_preserves_competing_destination(self):
-        from ou_dedetai import constants
-        from ou_dedetai.config import EphemeralConfiguration
+        from logos_desktop import constants
+        from logos_desktop.config import EphemeralConfiguration
         install = self.root / "legacy-install"
         (install / "data/bin").mkdir(parents=True)
         (install / "data/wine64_bottle").mkdir()
@@ -974,7 +974,7 @@ class TestProductionServices(QtCase):
               patch.object(app, "ask", return_value="OK"),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
-              patch("ou_dedetai.installer.install") as installer):
+              patch("logos_desktop.installer.install") as installer):
             result = self.services.install(InstallDraft("Logos", str(install), "/usr/bin/wine", True))(
                 app, threading.Event())
         self.assertEqual(result.outcome, "succeeded")
@@ -985,7 +985,7 @@ class TestProductionServices(QtCase):
     def test_background_observation_is_not_attributed_to_an_active_operation(self):
         window = self.production_window()
         entered, settle = threading.Event(), threading.Event()
-        from ou_dedetai.qt.bridge import Result
+        from logos_desktop.qt.bridge import Result
 
         def operation(app, cancel):
             entered.set()
@@ -1005,7 +1005,7 @@ class TestProductionServices(QtCase):
         self.pump(lambda: window.app.active is None and not window._refresh_pending)
 
     def test_adoption_directory_publishes_only_after_reserved_selection_and_rolls_back(self):
-        from ou_dedetai import adoption
+        from logos_desktop import adoption
         window = self.production_window()
         app = window.app
         install = self.root / "legacy"
@@ -1030,7 +1030,7 @@ class TestProductionServices(QtCase):
         self.assertEqual(result.outcome, "cancelled")
         self.assertFalse(destination.exists())
         with (patch.object(app, "approve", return_value=True) as approve,
-              patch.object(app, "profile_selection", reserve), patch("ou_dedetai.installer.install") as installer):
+              patch.object(app, "profile_selection", reserve), patch("logos_desktop.installer.install") as installer):
             result = self.services.adopt_profile(install, directory=True, destination=destination)(
                 app, threading.Event())
         installer.assert_not_called()
@@ -1063,8 +1063,8 @@ class TestProductionServices(QtCase):
         with (patch.object(app, "approve", return_value=True),
               patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
-              patch("ou_dedetai.doctor.inspect", return_value=report),
-              patch("ou_dedetai.installer.install") as install):
+              patch("logos_desktop.doctor.inspect", return_value=report),
+              patch("logos_desktop.installer.install") as install):
             with self.assertRaisesRegex(maintenance.MaintenanceError, "preflight"):
                 self.services.install(InstallDraft("Logos", str(self.root / "Logos"), "/usr/bin/wine", True))(
                     app, threading.Event())
@@ -1072,12 +1072,12 @@ class TestProductionServices(QtCase):
         self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_preflight_requests_review_actions_and_preserves_errors_and_cancellation(self):
-        from ou_dedetai.app import UserExitedFromAsk
+        from logos_desktop.app import UserExitedFromAsk
 
         window = self.production_window()
         app = window.app
         report = {"summary": "Fixture preflight report", "checks": []}
-        with patch("ou_dedetai.doctor.inspect", return_value=report):
+        with patch("logos_desktop.doctor.inspect", return_value=report):
             for answer in ("OK", "Cancel", None):
                 with self.subTest(answer=answer), patch.object(app, "_ask", return_value=answer) as ask:
                     if answer == "OK":
@@ -1091,7 +1091,7 @@ class TestProductionServices(QtCase):
                     self.assertEqual(self.services._doctor_profile, app.conf.config_file_path)
 
         report["checks"] = [{"status": "error", "summary": "Fixture unsupported host"}]
-        with (patch("ou_dedetai.doctor.inspect", return_value=report), patch.object(app, "_ask") as ask):
+        with (patch("logos_desktop.doctor.inspect", return_value=report), patch.object(app, "_ask") as ask):
             with self.assertRaisesRegex(maintenance.MaintenanceError,
                                         "Installation preflight failed:\nFixture unsupported host"):
                 self.services._preflight(app, app.conf)
@@ -1106,8 +1106,8 @@ class TestProductionServices(QtCase):
         app.conf._raw.backup_dir = "backups with spaces"
         self.services.refresh(app, threading.Event())
         self.assertEqual(self.services.snapshot().backup, str(folder))
-        with (patch("ou_dedetai.qt.services.shutil.which", return_value="/usr/bin/xdg-open"),
-              patch("ou_dedetai.processes.capture", return_value=(b"", 0)) as capture):
+        with (patch("logos_desktop.qt.services.shutil.which", return_value="/usr/bin/xdg-open"),
+              patch("logos_desktop.processes.capture", return_value=(b"", 0)) as capture):
             self.services.open_folder("open_backup")(app, threading.Event())
         self.assertEqual(capture.call_args.args[0], ["/usr/bin/xdg-open", str(folder)])
         self.assertEqual(capture.call_args.kwargs["timeout"], 10)
@@ -1117,7 +1117,7 @@ class TestProductionServices(QtCase):
         self.assertFalse(folder.exists())
 
     def test_fresh_install_preflight_inspects_proposed_paths_before_any_write(self):
-        from ou_dedetai import doctor
+        from logos_desktop import doctor
         self.config.write_text("{}")
         self.original = self.config.read_bytes()
         window = self.production_window()
@@ -1136,7 +1136,7 @@ class TestProductionServices(QtCase):
               patch.object(window.app.conf._network, "product_release", return_value=SimpleNamespace(
                   status="ok", stale=False, versions=["46.2.0.5"])),
               patch.object(doctor, "inspect", side_effect=inspect_proposal),
-              patch("ou_dedetai.installer.install") as install):
+              patch("logos_desktop.installer.install") as install):
             result = self.services.install(InstallDraft("Logos", str(destination), "/usr/bin/wine", False))(
                 window.app, threading.Event())
         self.assertEqual(seen, [(destination, destination / "data/wine64_bottle", None)])
@@ -1154,14 +1154,14 @@ class TestProductionServices(QtCase):
             cancel.set()
             return {"summary": "Fixture diagnostics", "checks": []}
 
-        with (patch("ou_dedetai.doctor.inspect", side_effect=inspect),
-              patch("ou_dedetai.support.export") as export):
+        with (patch("logos_desktop.doctor.inspect", side_effect=inspect),
+              patch("logos_desktop.support.export") as export):
             result = self.services.operation("support")(window.app, cancel)
         self.assertEqual(result.outcome, "cancelled")
         export.assert_not_called()
 
     def test_update_rechecks_actual_installed_version_under_admission_before_write(self):
-        from ou_dedetai import utils
+        from logos_desktop import utils
         window = self.production_window()
         app = window.app
         product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
@@ -1182,7 +1182,7 @@ class TestProductionServices(QtCase):
             with (patch.object(app, "approve", return_value=True),
                   patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
                       status="ok", stale=False, versions=["46.2.0.5"])),
-                  patch("ou_dedetai.installer.install") as install):
+                  patch("logos_desktop.installer.install") as install):
                 with self.assertRaisesRegex(maintenance.MaintenanceError, "not newer"):
                     self.services.operation("product_update")(app, threading.Event())
             install.assert_not_called()
@@ -1216,7 +1216,7 @@ class TestProductionServices(QtCase):
                       patch.object(utils, "get_current_logos_version", side_effect=read_metadata),
                       patch.object(app.conf, "_change",
                                    side_effect=AssertionError("Unexpected config mutation")) as change,
-                      patch("ou_dedetai.installer.install") as install):
+                      patch("logos_desktop.installer.install") as install):
                     with self.assertRaisesRegex(maintenance.MaintenanceError, "not newer"):
                         self.services.operation("product_update")(app, threading.Event())
                 approve.assert_called_once()
@@ -1227,9 +1227,9 @@ class TestProductionServices(QtCase):
                 self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_update_failure_and_delayed_promotion_refresh_same_controller(self):
-        from ou_dedetai import utils
-        from ou_dedetai.logos import State
-        from ou_dedetai.network import ProductLookup
+        from logos_desktop import utils
+        from logos_desktop.logos import State
+        from logos_desktop.network import ProductLookup
 
         document = json.loads(self.config.read_text())
         document.update(faithlife_product_version="10", faithlife_product_release="46.2.0.0005")
@@ -1253,7 +1253,7 @@ class TestProductionServices(QtCase):
 
         with (patch.object(app, "approve", return_value=True),
               patch.object(conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok"))):
-            with patch("ou_dedetai.installer.install", side_effect=failed_install):
+            with patch("logos_desktop.installer.install", side_effect=failed_install):
                 with self.assertRaisesRegex(maintenance.MaintenanceError, "Fixture MSI failed"):
                     self.services.operation("product_update")(app, threading.Event())
             self.assertEqual(conf.faithlife_product_release, "46.2.0.0005")
@@ -1267,7 +1267,7 @@ class TestProductionServices(QtCase):
                 pending.mkdir()
                 (pending / metadata.name).write_text(json.dumps({"libraries": {"Logos/54.3.0.5": {}}}))
 
-            with patch("ou_dedetai.installer.install", side_effect=install_pending):
+            with patch("logos_desktop.installer.install", side_effect=install_pending):
                 window.start(self.services.operation("product_update"))
                 self.pump(lambda: app.active is None)
             self.assertEqual(conf.faithlife_product_release, "54.3.0.0005")
@@ -1299,7 +1299,7 @@ class TestProductionServices(QtCase):
         self.original = self.config.read_bytes()
 
     def test_failed_update_preserves_later_selection_edits_and_primary_exception(self):
-        from ou_dedetai.network import ProductLookup
+        from logos_desktop.network import ProductLookup
 
         document = json.loads(self.config.read_text())
         document.update(faithlife_product_release="46.2.0.0005",
@@ -1325,8 +1325,8 @@ class TestProductionServices(QtCase):
               patch.object(type(app.conf), "installed_faithlife_product_release",
                            new_callable=unittest.mock.PropertyMock, return_value="46.2.0.5"),
               patch.object(app.conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok")),
-              patch("ou_dedetai.installer.install", side_effect=failed_install),
-              patch("ou_dedetai.qt.services.logging.warning") as report_conflict):
+              patch("logos_desktop.installer.install", side_effect=failed_install),
+              patch("logos_desktop.qt.services.logging.warning") as report_conflict):
             with self.assertRaises(RuntimeError) as raised:
                 self.services.operation("product_update")(app, threading.Event())
         self.assertIs(raised.exception, failure)
@@ -1345,8 +1345,8 @@ class TestProductionServices(QtCase):
         self.original = self.config.read_bytes()
 
     def test_failed_update_keeps_primary_exception_when_rollback_publication_races(self):
-        from ou_dedetai import config_store
-        from ou_dedetai.network import ProductLookup
+        from logos_desktop import config_store
+        from logos_desktop.network import ProductLookup
 
         window = self.production_window()
         app = window.app
@@ -1371,8 +1371,8 @@ class TestProductionServices(QtCase):
               patch.object(type(app.conf), "installed_faithlife_product_release",
                            new_callable=unittest.mock.PropertyMock, return_value="46.2.0.5"),
               patch.object(app.conf._network, "product_release", return_value=ProductLookup(("54.3.0.0005",), "ok")),
-              patch("ou_dedetai.installer.install", side_effect=failed_install),
-              patch("ou_dedetai.qt.services.logging.exception") as report_failure):
+              patch("logos_desktop.installer.install", side_effect=failed_install),
+              patch("logos_desktop.qt.services.logging.exception") as report_failure):
             with self.assertRaises(RuntimeError) as raised:
                 self.services.operation("product_update")(app, threading.Event())
         self.assertIs(raised.exception, failure)
@@ -1387,8 +1387,8 @@ class TestProductionServices(QtCase):
                                files=[SimpleNamespace(path=self.root / "applications/profile.desktop")],
                                defaults=[("x-scheme-handler/logos4", "other.desktop")],
                                issues=["Existing MIME default preserved"])
-        with (patch("ou_dedetai.desktop.preview", return_value=plan) as preview,
-              patch("ou_dedetai.desktop.adopt") as commit,
+        with (patch("logos_desktop.desktop.preview", return_value=plan) as preview,
+              patch("logos_desktop.desktop.adopt") as commit,
               patch.object(type(app.conf), "logos_exe_windows_path",
                            new_callable=unittest.mock.PropertyMock, return_value="C:\\Logos\\Logos.exe"),
               patch.object(app, "approve", return_value=False) as approve):
@@ -1421,7 +1421,7 @@ class TestProductionServices(QtCase):
         self.assertEqual(source.read_bytes(), original)
 
     def test_update_projection_distinguishes_current_stale_and_fresh(self):
-        from ou_dedetai.network import ProductLookup
+        from logos_desktop.network import ProductLookup
         window = self.production_window()
         conf = window.app.conf
         for lookup, expected in (

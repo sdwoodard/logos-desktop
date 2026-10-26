@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ou_dedetai import constants, msg, system, wine
+from logos_desktop import constants, msg, system, wine
 
 
 class TestLoggingAndEnvironment(unittest.TestCase):

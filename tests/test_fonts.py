@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import fonts, installer, maintenance, wine
-from ou_dedetai.app import UserExitedFromAsk
+from logos_desktop import fonts, installer, maintenance, wine
+from logos_desktop.app import UserExitedFromAsk
 
 
 REGULAR = b"synthetic Arial identity, not a font binary"

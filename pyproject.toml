@@ -19,7 +19,7 @@ description = "Independent community installer and manager for Logos on Linux th
 dynamic = ["version"]
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT AND ISC"
-license-files = ["LICENSE", "ou_dedetai/img/lucide-LICENSE.txt", "packaging/LICENSE"]
+license-files = ["LICENSE", "logos_desktop/img/lucide-LICENSE.txt", "packaging/LICENSE"]
 requires-python = ">=3.12"
 classifiers = [
     "Operating System :: POSIX :: Linux",
@@ -31,30 +31,28 @@ dev = ["mypy", "ruff"]
 gui = ["PySide6-Essentials>=6.12,<6.13"]
 
 [project.scripts]
-logos-desktop = "ou_dedetai.main:main"
-oudedetai = "ou_dedetai.main:main"
-logos-desktop-controller-install = "ou_dedetai.controller_install:main"
-logos-desktop-install-wheel = "ou_dedetai.controller_install:bootstrap"
+logos-desktop = "logos_desktop.main:main"
+logos-desktop-controller-install = "logos_desktop.controller_install:main"
+logos-desktop-install-wheel = "logos_desktop.controller_install:bootstrap"
 
 [project.urls]
 Source = "https://github.com/sdwoodard/logos-desktop"
 Issues = "https://github.com/sdwoodard/logos-desktop/issues"
 
 [tool.setuptools.dynamic]
-version = {attr = "ou_dedetai.constants.APP_VERSION"}
+version = {attr = "logos_desktop.constants.APP_VERSION"}
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ou_dedetai", "ou_dedetai.*"]
+include = ["logos_desktop", "logos_desktop.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-ou_dedetai = [
+logos_desktop = [
     "assets/LogosStubFailOK.mst",
-    "img/icon.png",
     "img/logos-desktop-icon.png",
     "img/logos-desktop.svg",
     "img/lucide-LICENSE.txt",
@@ -62,7 +60,14 @@ ou_dedetai = [
 ]
 
 [tool.setuptools.data-files]
-"share/doc/logos-desktop" = ["PACKAGING.md", "CONTRIBUTING.md"]
+"share/doc/logos-desktop" = [
+    "README.md", "INSTALL.md", "PACKAGING.md", "CONTRIBUTING.md", "CONFIGURATION.md",
+    "SUPPORT.md", "BACKUPS.md", "COMPATIBILITY.md", "ARCHITECTURE.md", "CHANGELOG.md", "ROADMAP.md", "LICENSE",
+]
+"share/doc/logos-desktop/docs/media" = ["docs/media/home-light.png", "docs/media/home-dark.png", "docs/media/social-preview.svg"]
+"share/doc/logos-desktop/logos_desktop/img" = [
+    "logos_desktop/img/logos-desktop.svg", "logos_desktop/img/ATTRIBUTION.md", "logos_desktop/img/lucide-LICENSE.txt",
+]
 "share/doc/logos-desktop/packaging" = ["packaging/logos-desktop.desktop", "packaging/LICENSE"]
 "share/doc/logos-desktop/packaging/arch" = ["packaging/arch/PKGBUILD.in"]
 "share/doc/logos-desktop/scripts" = ["scripts/install-wheel.py"]
@@ -84,7 +89,7 @@ extra_checks = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = "ou_dedetai.config"
+module = "logos_desktop.config"
 disallow_untyped_calls = true
 
 disallow_any_generic = false

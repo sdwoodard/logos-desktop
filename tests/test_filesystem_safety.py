@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, control, installer, maintenance, network, paths, releases, utils, wine
-from ou_dedetai.config import PersistentConfiguration
+from logos_desktop import constants, control, installer, maintenance, network, paths, releases, utils, wine
+from logos_desktop.config import PersistentConfiguration
 
 
 class TestUninstallBoundaries(unittest.TestCase):
@@ -286,7 +286,7 @@ class TestUninstallBoundaries(unittest.TestCase):
             install_dir=str(self.install), faithlife_product="Logos", faithlife_product_version="10",
         )
         def transfer(url, filename, directory, app, **kwargs):
-            from ou_dedetai import artifacts
+            from logos_desktop import artifacts
             from tests.artifact_fixtures import appimage
 
             source = Path(config.download_dir) / filename

@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from ou_dedetai import artifacts, constants, metadata, network
-from ou_dedetai.app import UserExitedFromAsk
+from logos_desktop import artifacts, constants, metadata, network
+from logos_desktop.app import UserExitedFromAsk
 from tests.test_artifacts import response
 
 

@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import quote
 
-from ou_dedetai import artifacts, constants, metadata, network, processes, releases, wine
-from ou_dedetai.config import Config, PersistentConfiguration
+from logos_desktop import artifacts, constants, metadata, network, processes, releases, wine
+from logos_desktop.config import Config, PersistentConfiguration
 from tests.test_artifacts import response
 
 
@@ -382,7 +382,7 @@ class TestReleaseRefresh(unittest.TestCase):
         config._network = self.client
         with patch.object(network.time, "time", return_value=50000), patch.object(
             network, "_net_get", side_effect=artifacts.MetadataError("offline"),
-        ), patch("ou_dedetai.utils.compare_recommended_appimage_version") as compare:
+        ), patch("logos_desktop.utils.compare_recommended_appimage_version") as compare:
             config.refresh_release_snapshots()
             self.assertTrue(self.client.wine_appimage_release(refresh=False).stale)
         compare.assert_not_called()

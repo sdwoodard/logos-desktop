@@ -84,7 +84,7 @@ jobs:
           "$RUNNER_TEMP/artifact-env/bin/python" -I - <<'PY'
           from importlib.metadata import version
           from pathlib import Path
-          from ou_dedetai import constants
+          from logos_desktop import constants
           assert version('logos-desktop') == constants.APP_VERSION
           assert constants.APP_SELF_UPDATES_ENABLED is False
           assert (constants.APP_ASSETS_DIR / 'LogosStubFailOK.mst').stat().st_size > 0

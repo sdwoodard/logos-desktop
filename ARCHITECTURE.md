@@ -58,9 +58,9 @@ preserves unexpected changes instead of guessing which data may be overwritten.
 ## Configuration, adoption and admission
 
 New config, state, data and cache children use `logos-desktop` under absolute XDG
-bases or standard home fallbacks. The Python namespace and transitional binary
-name remain `ou_dedetai` and `oudedetai`. Legacy filenames remain explicit read and
-recovery inputs. Existing prefixes are not relocated. See
+bases or standard home fallbacks. The Python namespace is `logos_desktop` and
+the controller command is `logos-desktop`. Explicitly selected legacy files remain
+readable inputs. Existing prefixes are not relocated. See
 [configuration and adoption](CONFIGURATION.md) for paths and CLI examples.
 
 Adoption discovery does not execute configuration or activate Wine. Explicit
@@ -109,8 +109,9 @@ replacement. Missing historical source metadata remains unknown. See
 Stable product update state keeps stale, unchecked, failed, empty and unknown
 installed-version results distinct from current or available. Update admission
 refreshes installed metadata and validates effective configuration against the
-checked newer stable target. Controller self-update remains disabled in private
-development. Cancellation propagates through long reads, hashes and scans, while
+checked newer stable target. Public controller feeds and standalone replacement
+remain disabled. Explicit private providers use separate wheel-environment and
+Arch owner transactions. Cancellation propagates through long reads, hashes and scans, while
 safe commit boundaries preserve completed outcomes and pending recovery work.
 
 Normal controller close cancels prompts and observations, waits for owned mutations

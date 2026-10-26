@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from ou_dedetai import constants, desktop, installer
+from logos_desktop import constants, desktop, installer
 
 
 class TestDesktopEntries(unittest.TestCase):

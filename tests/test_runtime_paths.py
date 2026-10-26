@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from ou_dedetai import artifacts, constants, control, installer, maintenance, network, paths, releases, utils, wine
-from ou_dedetai.config import Config, PersistentConfiguration
+from logos_desktop import artifacts, constants, control, installer, maintenance, network, paths, releases, utils, wine
+from logos_desktop.config import Config, PersistentConfiguration
 from tests.artifact_fixtures import appimage, msi
 
 
