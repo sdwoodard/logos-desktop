@@ -21,6 +21,10 @@ installer/library and a separately chosen backup destination. The application
 checks installation prerequisites before mutation. Package builds must run as an
 ordinary user. Accept vendor terms and enter credentials yourself.
 
+Graphical controller updates use Konsole or GNOME Terminal, or xterm when an X11
+display is available. Without a usable terminal, the application keeps the
+controller open and provides the exact helper command for your terminal.
+
 ## Managed wheel environment
 
 Obtain `scripts/install-wheel.py`, the 1.0.0 wheel and its exact SHA-256 and byte

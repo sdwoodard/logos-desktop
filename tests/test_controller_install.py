@@ -1044,7 +1044,9 @@ class ControllerInstallTests(unittest.TestCase):
                           patch.object(install, "check", return_value=install.Result("available", "fixture")),
                           patch.object(install.shutil, "which", side_effect=lambda name: (
                               executable if name == terminal else None
-                          )), patch.dict(os.environ, {"LOGOS_DESKTOP_TEST_CAPTURE": str(capture)}),
+                          )), patch.dict(os.environ, {
+                              "LOGOS_DESKTOP_TEST_CAPTURE": str(capture), "DISPLAY": ":fixture",
+                          }),
                           patch.object(subprocess, "Popen") as launch):
                         result = install.handoff(self.identity, profile, frontend)
 
@@ -1067,6 +1069,19 @@ class ControllerInstallTests(unittest.TestCase):
                     self.assertEqual(direct.returncode, 0, direct.stderr)
                     self.assertEqual(json.loads(capture.read_text()), expected)
                     self.assertEqual(profile.read_text(), "{}\n")
+
+    def test_wayland_without_x11_does_not_handoff_to_unusable_xterm(self):
+        with (patch.object(install, "identify", return_value=self.identity),
+              patch.object(install, "check", return_value=install.Result("available", "fixture")),
+              patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": "wayland-fixture"}),
+              patch.object(install.shutil, "which", side_effect=lambda name: (
+                  "/usr/bin/xterm" if name == "xterm" else None
+              )),
+              patch.object(subprocess, "Popen") as launch):
+            result = install.handoff(self.identity, self.home / "selected profile.json")
+        self.assertEqual(result.status, "manual")
+        self.assertIn(str(self.home / "selected profile.json"), result.command)
+        launch.assert_not_called()
 
     def test_cancellation_during_each_prep_phase_propagates_without_terminal_launch(self):
         for phase in ("identify", "recover", "check", "terminal", "environment"):

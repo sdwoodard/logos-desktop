@@ -540,6 +540,8 @@ def handoff(identity, config_path, frontend="qt", checkpoint=None):
     command = [interpreter, "-I", "-m", "logos_desktop.controller_install", *helper_arguments]
     terminal = None
     for name, flag in (("konsole", "-e"), ("xterm", "-e"), ("gnome-terminal", "--")):
+        if name == "xterm" and not os.environ.get("DISPLAY"):
+            continue
         executable = shutil.which(name)
         if executable:
             terminal = [executable, flag]
