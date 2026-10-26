@@ -5,7 +5,7 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from ou_dedetai import instance, processes, updates
+from ou_dedetai import controller_install, instance, processes, updates
 from .activation import activate_window, show_initial_window, take_startup_token
 from .services import Services
 from .theme import Theme
@@ -82,6 +82,7 @@ def _start(config, function=None, *, install_only=False):
             QTimer.singleShot(50, begin)
             return
         updates.confirm_startup()
+        window.app.start_thread(controller_install.confirm_startup, daemon_bool=False)
         if function is not None:
             from ou_dedetai.repair import repair_installation
             if function is not repair_installation:

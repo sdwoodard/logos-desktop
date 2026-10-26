@@ -273,6 +273,8 @@ class TextualUI(TextualApp[None]):
         from . import updates
 
         updates.confirm_startup()
+        if hasattr(self.domain, "_controller_identity"):
+            self.domain.start_thread(self.domain._identify_controller)
 
     def _monitor_tick(self) -> None:
         try:
@@ -388,6 +390,9 @@ class TUI(App):
         self._controller_checks = releases.ControllerChecks(self.conf._network, updates.eligible,
                                                             self.conf.refresh_release_snapshots)
         self._controller_rendered = None
+        self._controller_identity = None
+        self._controller_result = None
+        self._controller_standalone = False
         self.subscribe_config(self._config_update_hook)
 
     def dispatch_config(self, callback):
@@ -407,6 +412,21 @@ class TUI(App):
     def poll_controller_releases(self):
         from . import releases
 
+        identity = getattr(self, "_controller_identity", None)
+        if identity is not None and not self._controller_standalone:
+            result = self._controller_result
+            text = f"{identity.owner}: {result.status}: {result.message}" if result else (
+                f"unsupported: {identity.message}" if identity.owner == "unsupported" else
+                f"{identity.owner}: Controller installation provider has not been checked")
+            if text != self._controller_rendered:
+                self._controller_rendered = text
+                self.ui.query_one("#status-bar", Static).update(text)
+                self.ui.action_refresh()
+            return
+        if not constants.APP_SELF_UPDATES_ENABLED:
+            return
+        if hasattr(self, "_controller_identity") and not self._controller_standalone:
+            return
         self._controller_checks.request(self.conf.app_release_channel)
         result = self._controller_checks.result
         current = result, self._controller_checks.revision
@@ -414,6 +434,78 @@ class TUI(App):
             self._controller_rendered = current
             self.ui.query_one("#status-bar", Static).update(f"Controller releases: {releases.controller_state(result)}")
             self.ui.action_refresh()
+
+    def _identify_controller(self):
+        from . import controller_install, updates
+
+        try:
+            controller_install.confirm_startup()
+            if self._closing.is_set():
+                return
+            identity = controller_install.identify()
+            standalone = False
+            if identity.owner == "unsupported" and constants.APP_SELF_UPDATES_ENABLED:
+                try:
+                    updates.eligible()
+                except updates.UpdateError:
+                    pass
+                else:
+                    standalone = True
+        except Exception:
+            logging.exception("Cannot inspect the controller installation during startup")
+            return
+
+        self._ui_call(self._controller_identified, identity, standalone)
+
+    def _controller_identified(self, identity, standalone):
+        # An explicit check may have supplied a newer identity while startup probed.
+        if self._closing.is_set() or self._controller_identity is not None:
+            return
+        self._controller_identity = identity
+        self._controller_standalone = standalone
+        self.poll_controller_releases()
+
+    def _check_controller(self, app):
+        import shlex
+        from . import controller_install
+
+        self._controller_identity = controller_install.identify()
+        self.status("Checking the controller installation provider")
+        result = controller_install.check(self._controller_identity)
+        self._controller_result = result
+        text = f"{result.status}: {result.message}"
+        if result.command:
+            text += "\n" + shlex.join(result.command)
+        self.status(text)
+        self._ui_call(self.poll_controller_releases)
+        self.info(text)
+
+    def _handoff_controller(self, app):
+        import shlex
+        from . import controller_install
+
+        identity = controller_install.identify()
+        restart = ("The terminal supplies the command to restart this profile after AUR installation."
+                   if identity.owner == "aur" else
+                   "The environment helper launches the new controller after installation.")
+        if not self.approve("Open controller update in a separate terminal?",
+                            "The terminal owns review and authorization. " + restart
+                            + " This TUI closes after handoff. Logos is left running."):
+            return
+        self.checkpoint()
+        result = utils.handoff_controller(self, identity, "tui")
+        self._controller_identity = identity
+        self._controller_result = result
+        if result.status == "handed-off":
+            self._ui_call(self.ui.action_quit)
+            return
+        text = f"{result.status}: {result.message}"
+        if result.status == "manual":
+            text += "\nClose this controller before running the command in a terminal."
+        if result.command:
+            text += "\n" + shlex.join(result.command)
+        self.status(text)
+        self.info(text)
 
     def _ask(self, question: str, options: list[str] | str) -> Optional[str]:
         screen: PromptModal
@@ -525,7 +617,15 @@ class TUI(App):
     def set_tui_menu_options(self) -> list[str]:
         labels: list[str] = []
 
-        if constants.APP_SELF_UPDATES_ENABLED and getattr(constants, "RUNMODE", "") == "binary":
+        identity = getattr(self, "_controller_identity", None)
+        managed = identity is not None and identity.owner in ("venv", "aur")
+        if managed:
+            result = self._controller_result
+            labels.append("Check controller updates" if result is None else "Check controller updates again")
+            if result is not None and result.status == "available":
+                labels.append("Update via AUR" if identity.owner == "aur" else "Update environment")
+        elif (constants.APP_SELF_UPDATES_ENABLED and getattr(constants, "RUNMODE", "") == "binary"
+              and (not hasattr(self, "_controller_identity") or self._controller_standalone)):
             from . import releases
 
             checks = self._controller_checks
@@ -631,6 +731,12 @@ class TUI(App):
         if choice in ("Install", "Advanced Install"):
             self._installer_thread = self._run_operation(installer.install, assume_yes=choice == "Install")
             self.status("Starting installation…")
+
+        elif choice in ("Update via AUR", "Update environment"):
+            self._run_operation(self._handoff_controller)
+
+        elif choice in ("Check controller updates", "Check controller updates again"):
+            self._run_operation(self._check_controller)
 
         elif choice.startswith(f"Update {constants.APP_NAME}"):
             self._run_operation(utils.update_to_latest_lli_release)

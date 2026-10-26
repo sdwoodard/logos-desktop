@@ -49,6 +49,119 @@ finally:
 
 
 class TestPromptContract(unittest.TestCase):
+    def test_actual_backend_checkpoint_errors_restore_instance_before_terminal_launch(self):
+        import threading
+        from ou_dedetai import controller_install, instance, utils
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+            with (patch.object(constants, "COORDINATION_DIR", root / "coordination"),
+                  patch.object(instance, "check_legacy"),
+                  patch.object(controller_install, "identify", return_value=identity),
+                  patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
+                  patch.object(controller_install.subprocess, "Popen") as popen):
+                for frontend, error in (("qt", UserExitedFromAsk()), ("tui", OSError("Checkpoint failed"))):
+                    with self.subTest(frontend=frontend, error=type(error).__name__):
+                        session = instance.Session(profile=root / "profile.json")
+                        session.acquire()
+                        session.listen()
+                        cancelled = threading.Event()
+
+                        def checkpoint():
+                            if cancelled.is_set():
+                                raise error
+
+                        def environment():
+                            cancelled.set()
+                            return {}
+
+                        app = SimpleNamespace(_profile_lock=threading.Lock(), _instance_session=session,
+                                              conf=SimpleNamespace(config_file_path=str(root / "profile.json")),
+                                              checkpoint=checkpoint, exit=Mock())
+                        try:
+                            with (patch.object(controller_install, "check", return_value=controller_install.Result(
+                                    "available", "Private provider has B")),
+                                  patch.object(controller_install, "_environment", side_effect=environment)):
+                                with self.assertRaises(type(error)) as raised:
+                                    utils.handoff_controller(app, identity, frontend)
+                            self.assertIs(raised.exception, error)
+                            popen.assert_not_called()
+                            self.assertIs(app._instance_session, session)
+                            self.assertTrue(session.listening)
+                            with self.assertRaises(instance.InstanceBusy):
+                                instance.Session(profile=root / "profile.json").acquire()
+                            app.exit.assert_not_called()
+                        finally:
+                            session.close()
+
+    def test_handoff_releases_real_instance_before_helper_and_restores_on_refusal(self):
+        import threading
+        from ou_dedetai import controller_install, instance, utils
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (patch.object(constants, "COORDINATION_DIR", root / "coordination"),
+                  patch.object(instance, "check_legacy")):
+                for state in ("handed-off", "manual", "refused", "unknown"):
+                    with self.subTest(state=state):
+                        session = instance.Session(profile=root / "profile.json")
+                        session.acquire()
+                        session.listen()
+                        app = SimpleNamespace(_profile_lock=threading.Lock(), _instance_session=session,
+                                              conf=SimpleNamespace(config_file_path=str(root / "profile.json")))
+                        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+
+                        def handoff(owner, config, frontend, checkpoint=None):
+                            self.assertIsNone(app._instance_session)
+                            self.assertFalse(session.listening)
+                            with instance.Session(profile=root / "profile.json"):
+                                pass
+                            return controller_install.Result(state, "Fixture outcome")
+
+                        try:
+                            with patch.object(controller_install, "handoff", side_effect=handoff):
+                                result = utils.handoff_controller(app, identity, "tui")
+                            self.assertEqual(result.status, state)
+                            if state == "handed-off":
+                                self.assertIsNone(app._instance_session)
+                            else:
+                                self.assertIs(app._instance_session, session)
+                                self.assertTrue(session.listening)
+                                with self.assertRaises(instance.InstanceBusy):
+                                    instance.Session(profile=root / "profile.json").acquire()
+                        finally:
+                            session.close()
+
+    def test_managed_update_preserves_config_frontend_and_bypasses_standalone(self):
+        from ou_dedetai import controller_install, updates
+
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+        args = SimpleNamespace(config="/fixture/selected profile.json", dialog=None)
+        result = controller_install.Result("handed-off", "Terminal owns the transaction")
+        with (patch.object(controller_install, "identify", return_value=identity),
+              patch.object(main.EphemeralConfiguration, "load_from_path", return_value=SimpleNamespace(dialog="tui")),
+              patch.object(controller_install, "handoff", return_value=result) as handoff,
+              patch.object(updates, "eligible") as standalone,
+              patch("sys.stdout", new_callable=io.StringIO) as output):
+            self.assertIs(main.run_controller_update(args), result)
+            handoff.assert_called_once_with(identity, args.config, "tui")
+            standalone.assert_not_called()
+            self.assertIn("handed-off", output.getvalue())
+            self.assertNotIn("Updated", output.getvalue())
+
+    def test_controller_check_dispatches_before_profile_or_gui_setup(self):
+        from ou_dedetai import controller_install
+
+        with (patch.object(sys, "argv", ["logos-desktop", "--check-controller-updates"]),
+              patch.object(controller_install, "main", return_value=0) as check,
+              patch.object(main, "setup_config") as setup):
+            with self.assertRaises(SystemExit) as stopped:
+                main.main()
+            self.assertEqual(stopped.exception.code, 0)
+            check.assert_called_once_with(["check"])
+            setup.assert_not_called()
+
     def app(self, responses):
         return SimpleNamespace(
             conf=SimpleNamespace(_overrides=SimpleNamespace(assume_yes=False)),

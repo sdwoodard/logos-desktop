@@ -117,6 +117,8 @@ def get_parser():
     cmd.add_argument('--adopt-installation', metavar='PATH', help='adopt an explicit config or installation directory')
     cmd.add_argument('--rollback-adoption', metavar='JOURNAL', help='roll back controller-owned adoption files')
     cmd.add_argument('--update-status', action='store_true', help='inspect stable product update availability')
+    cmd.add_argument('--check-controller-updates', action='store_true',
+                     help='check this controller installation provider without installing')
     cmd.add_argument('--list-backups', action='store_true', help='list completed snapshot metadata')
     cmd.add_argument('--restore-snapshot', metavar='PATH', help='verify and confirm an exact snapshot restore')
     cmd.add_argument('--support-preview', action='store_true', help='print the exact sanitized support snapshot')
@@ -476,6 +478,23 @@ def run_controller_update(args):
     from types import SimpleNamespace
     from . import network
 
+    from . import controller_install
+
+    identity = controller_install.identify()
+    if identity.owner in ("venv", "aur"):
+        config_path = args.config or LegacyConfiguration.config_file_path()
+        overrides = EphemeralConfiguration.load_from_path(config_path)
+        frontend = args.dialog or overrides.dialog or "qt"
+        result = controller_install.handoff(identity, config_path, "qt" if frontend == "tk" else frontend)
+        print(f"{result.status}: {result.message}")
+        if result.command:
+            import shlex
+
+            print(shlex.join(result.command))
+        if result.status not in ("handed-off", "current", "manual", "restart-required"):
+            raise updates.UpdateError(result.message)
+        return result
+
     updates.eligible()
     if constants.APP_RELEASE_VERSION is None:
         raise updates.UpdateError("This private build has no LogosDesktop release version")
@@ -549,13 +568,20 @@ def main():
         return
     args = get_parser().parse_args()
     try:
+        if args.check_controller_updates:
+            from . import controller_install
+
+            raise SystemExit(controller_install.main(["check"]))
         from . import commands
 
         status = commands.dispatch(args)
         if status is not None:
             raise SystemExit(status)
         if args.update_self:
-            updates.eligible()
+            from . import controller_install
+
+            if controller_install.identify().owner == "unsupported":
+                updates.eligible()
         ephemeral_config, action = setup_config(args)
     except (config_store.ConfigurationError, maintenance.MaintenanceError, artifacts.ArtifactError, OSError, ValueError,
             KeyError, IndexError, TypeError) as error:
@@ -584,6 +610,7 @@ def main():
                 raise
             ephemeral_config._instance_session = session
             if args.update_self:
+                session.close()
                 run_controller_update(args)
                 return
             arguments = updates.resume_arguments(args.config or LegacyConfiguration.config_file_path(), args.dialog)

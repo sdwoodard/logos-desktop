@@ -14,6 +14,226 @@ from ou_dedetai.logos import State
 
 
 class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
+    async def test_close_waits_for_startup_inspection_and_discards_its_late_result(self):
+        from ou_dedetai import controller_install
+
+        entered, release = threading.Event(), threading.Event()
+        closed = asyncio.Event()
+
+        def identify():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Startup inspection was not released")
+            return controller_install.Identity("venv", "1.0.0", "1.0.0")
+
+        with patch.object(controller_install, "identify", side_effect=identify):
+            domain = self.domain()
+            domain._controller_identified = Mock(wraps=domain._controller_identified)
+            original_close = domain.close
+
+            def close(timeout=5):
+                result = original_close(timeout)
+                if result:
+                    closed.set()
+                return result
+
+            domain.close = close
+            async with domain.ui.run_test(size=(100, 35)):
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    domain.ui.action_quit()
+                    self.assertFalse(domain._closed)
+                finally:
+                    release.set()
+                await asyncio.wait_for(closed.wait(), 3)
+                self.assertTrue(domain._closed)
+                domain._controller_identified.assert_not_called()
+                self.assertIsNone(domain._controller_identity)
+                self.assertFalse(domain._threads)
+
+    async def test_explicit_check_wins_over_late_startup_identity_without_dismissing_modal(self):
+        from ou_dedetai import controller_install
+
+        entered, release = threading.Event(), threading.Event()
+        published = asyncio.Event()
+        initial = controller_install.Identity("unsupported", "1.0.0", "", message="Earlier inspection")
+        current = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+
+        def identify():
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("Startup inspection was not released")
+                return initial
+            return current
+
+        with (patch.object(controller_install, "identify", side_effect=identify),
+              patch.object(controller_install, "check", return_value=controller_install.Result("available", "B"))):
+            domain = self.domain()
+            original_identified = domain._controller_identified
+
+            def identified(identity, standalone):
+                original_identified(identity, standalone)
+                published.set()
+
+            domain._controller_identified = identified
+            async with domain.ui.run_test(size=(100, 35)) as pilot:
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    self.assertIsNotNone(domain._run_operation(domain._check_controller))
+                    prompt = await self.screen(pilot, tui_app.InfoModal)
+                    release.set()
+                    await asyncio.wait_for(published.wait(), 3)
+                    self.assertIs(domain.ui.screen, prompt)
+                    self.assertIs(domain._controller_identity, current)
+                    self.assertEqual(domain._controller_result.status, "available")
+                    self.assertIn("Update via AUR", domain.set_tui_menu_options())
+                    await pilot.press("escape")
+                    await self.finished(pilot, domain)
+                finally:
+                    release.set()
+
+    async def test_delayed_startup_inspection_admits_first_action_and_preserves_its_prompt(self):
+        from ou_dedetai import controller_install
+
+        entered, release = threading.Event(), threading.Event()
+        published = asyncio.Event()
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+        readiness_threads = []
+
+        def identify():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Startup inspection was not released")
+            return identity
+
+        with (patch.object(controller_install, "identify", side_effect=identify),
+              patch.object(controller_install, "confirm_startup", side_effect=lambda: readiness_threads.append(
+                  threading.get_ident())),
+              patch.object(controller_install, "check") as check):
+            domain = self.domain()
+            original_poll = domain.poll_controller_releases
+
+            def poll():
+                original_poll()
+                if domain._controller_identity is not None:
+                    published.set()
+
+            domain.poll_controller_releases = poll
+            destination = self.root / "First action directory"
+            destination.mkdir()
+            answers = []
+            async with domain.ui.run_test(size=(100, 35)) as pilot:
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    self.assertFalse(domain._operation_active)
+                    self.assertNotIn(threading.get_ident(), readiness_threads)
+                    worker = domain._run_operation(lambda app: answers.extend([
+                        app.conf.faithlife_product, app.conf.install_dir,
+                    ]))
+                    self.assertIsNotNone(worker)
+                    prompt = await self.screen(pilot, tui_app.MenuModal)
+                    release.set()
+                    await asyncio.wait_for(published.wait(), 3)
+                    self.assertIs(domain.ui.screen, prompt)
+                    self.assertTrue(domain._operation_active)
+                    await self.choose(pilot, "Logos")
+                    await self.screen(pilot, tui_app.MenuModal)
+                    await self.choose(pilot, constants.PROMPT_OPTION_DIRECTORY)
+                    directory = await self.screen(pilot, tui_app.InputModal)
+                    directory.query_one(Input).value = str(destination)
+                    await pilot.press("enter")
+                    await self.finished(pilot, domain)
+                    self.assertEqual(answers, ["Logos", str(destination)])
+                    check.assert_not_called()
+                finally:
+                    release.set()
+
+    async def test_checkpoint_cancellation_during_real_handoff_keeps_tui_and_restores_lease(self):
+        from ou_dedetai import controller_install, instance
+        from ou_dedetai.app import UserExitedFromAsk
+
+        entered, finish, cancelled = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+        identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+
+        def provider(owner):
+            entered.set()
+            if not finish.wait(5):
+                raise AssertionError("Delayed provider was not released")
+            return controller_install.Result("available", "Private provider has B")
+
+        with (patch.object(constants, "COORDINATION_DIR", self.root / "coordination"),
+              patch.object(instance, "check_legacy"),
+              patch.object(controller_install, "identify", return_value=identity),
+              patch.object(controller_install, "check", side_effect=provider),
+              patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
+              patch.object(controller_install.subprocess, "Popen") as popen):
+            domain = self.domain()
+            domain.approve = lambda *args: True
+            original_checkpoint = domain.checkpoint
+
+            def checkpoint():
+                original_checkpoint()
+                if cancelled.is_set():
+                    raise UserExitedFromAsk
+
+            domain.checkpoint = checkpoint
+            session = instance.Session(profile=self.selected)
+            self.addCleanup(session.close)
+            session.acquire()
+            session.listen()
+            domain._instance_session = session
+            async with domain.ui.run_test(size=(100, 35)) as pilot:
+                await self.finished(pilot, domain)
+                domain._run_operation(domain._handoff_controller)
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    self.assertIsNone(domain._instance_session)
+                    cancelled.set()
+                finally:
+                    finish.set()
+                await self.finished(pilot, domain)
+                popen.assert_not_called()
+                self.assertIs(domain._instance_session, session)
+                self.assertTrue(session.listening)
+                with self.assertRaises(instance.InstanceBusy):
+                    instance.Session(profile=self.selected).acquire()
+                self.assertTrue(domain.is_running)
+                self.assertFalse(domain._closing.is_set())
+                self.assertIsNone(domain._controller_result)
+
+    async def test_managed_check_is_explicit_and_handoff_closes_old_tui(self):
+        from ou_dedetai import controller_install, utils
+
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+        with (patch.object(controller_install, "identify", return_value=identity),
+              patch.object(controller_install, "check", return_value=controller_install.Result(
+                  "available", "Private installation provider has B")) as check,
+              patch.object(controller_install, "confirm_startup") as readiness,
+              patch.object(utils, "handoff_controller", return_value=controller_install.Result(
+                  "handed-off", "Terminal owns the transaction")) as handoff):
+            domain = self.domain()
+            domain.approve = lambda *args: True
+            async with domain.ui.run_test(size=(100, 35)) as pilot:
+                await self.finished(pilot, domain)
+                check.assert_not_called()
+                readiness.assert_called_once()
+                self.assertIn("Check controller updates", domain.set_tui_menu_options())
+                await self.choose(pilot, "Check controller updates", "#main-menu")
+                await self.screen(pilot, tui_app.InfoModal)
+                await pilot.press("escape")
+                await self.finished(pilot, domain)
+                check.assert_called_once_with(identity)
+                self.assertIn("Update environment", domain.set_tui_menu_options())
+                await self.choose(pilot, "Update environment", "#main-menu")
+                for _ in range(100):
+                    if not domain.is_running:
+                        break
+                    await pilot.pause(.02)
+                self.assertFalse(domain.is_running)
+                handoff.assert_called_once_with(domain, identity, "tui")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

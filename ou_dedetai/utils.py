@@ -529,6 +529,38 @@ def update_to_latest_lli_release(app: App):
     return network.update_lli_binary(app=app)
 
 
+def handoff_controller(app, identity, frontend):
+    """Release profile admission before transferring control to a terminal.
+
+    Cancellation, errors and unaccepted results restore admission. After Popen
+    accepts handoff, the frontend closes without cancelling the terminal or Logos.
+    """
+    from . import controller_install
+
+    with app._profile_lock:
+        session = app._instance_session
+        if session is not None:
+            session.close()
+            app._instance_session = None
+        accepted = False
+        try:
+            result = controller_install.handoff(
+                identity, app.conf.config_file_path, frontend, checkpoint=getattr(app, "checkpoint", None),
+            )
+            accepted = result.status == "handed-off"
+            return result
+        finally:
+            if not accepted and session is not None:
+                try:
+                    session.acquire()
+                    session.listen()
+                    app._instance_session = session
+                except Exception:
+                    session.close()
+                    app.exit("Controller ownership could not be restored after handoff")
+                    raise
+
+
 def validate_product_update_document(conf, target, document):
     """Check the post-rebind selection before publishing an admitted update."""
     from . import config_store

@@ -12,11 +12,24 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 
 from . import adoption, config_store, constants, maintenance, runtime
 
 
 SCHEMES = ('x-scheme-handler/logos4', 'x-scheme-handler/libronixdls')
+
+
+def controller_launcher(identity=None):
+    """Use an owner's stable entry point rather than a versioned interpreter."""
+    from . import controller_install
+
+    identity = identity or controller_install.identify()
+    if identity.owner in ("venv", "aur") and identity.launcher is not None:
+        return [str(identity.launcher)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, "-m", "ou_dedetai.main"]
 
 
 @dataclass(frozen=True)

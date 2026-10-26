@@ -1,14 +1,10 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 dependencies = [
-#    "altgraph",
-#    "certifi",
-#    "charset-normalizer",
     "distro",
-#    "idna",
     "packaging",
     "psutil",
     "pythondialog",
@@ -16,36 +12,60 @@ dependencies = [
     "olefile>=0.47,<1",
     "zstandard>=0.23,<1",
     "inotify", # Required for watching when the auto-update setting changes
-#    "urllib3",
-	"textual",
+    "textual",
 ]
 name = "logos-desktop"
 description = "Independent community installer and manager for Logos on Linux through Wine"
-dynamic = ["readme", "version"]
+dynamic = ["version"]
+readme = {file = "README.md", content-type = "text/markdown"}
+license = "MIT AND ISC"
+license-files = ["LICENSE", "ou_dedetai/img/lucide-LICENSE.txt", "packaging/LICENSE"]
 requires-python = ">=3.12"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
 
 [project.optional-dependencies]
-build = ["pyinstaller"]
 dev = ["mypy", "ruff"]
 gui = ["PySide6-Essentials>=6.12,<6.13"]
 
 [project.scripts]
 logos-desktop = "ou_dedetai.main:main"
 oudedetai = "ou_dedetai.main:main"
+logos-desktop-controller-install = "ou_dedetai.controller_install:main"
+logos-desktop-install-wheel = "ou_dedetai.controller_install:bootstrap"
 
 [project.urls]
 Source = "https://github.com/sdwoodard/logos-desktop"
 Issues = "https://github.com/sdwoodard/logos-desktop/issues"
 
 [tool.setuptools.dynamic]
-readme = {file = ["README.md"], content-type = "text/plain"}
-version = {attr = "ou_dedetai.constants.LLI_CURRENT_VERSION"}
+version = {attr = "ou_dedetai.constants.APP_VERSION"}
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["ou_dedetai", "ou_dedetai.*"]
+namespaces = false
 
 [tool.setuptools.package-data]
-"ou_dedetai.img" = ["*icon.png", "logos-desktop.svg", "lucide-LICENSE.txt", "ATTRIBUTION.md"]
+ou_dedetai = [
+    "assets/LogosStubFailOK.mst",
+    "img/icon.png",
+    "img/logos-desktop-icon.png",
+    "img/logos-desktop.svg",
+    "img/lucide-LICENSE.txt",
+    "img/ATTRIBUTION.md",
+]
+
+[tool.setuptools.data-files]
+"share/doc/logos-desktop" = ["PACKAGING.md", "CONTRIBUTING.md"]
+"share/doc/logos-desktop/packaging" = ["packaging/logos-desktop.desktop", "packaging/LICENSE"]
+"share/doc/logos-desktop/packaging/arch" = ["packaging/arch/PKGBUILD.in"]
+"share/doc/logos-desktop/scripts" = ["scripts/install-wheel.py"]
 
 [tool.ruff]
 line-length = 120

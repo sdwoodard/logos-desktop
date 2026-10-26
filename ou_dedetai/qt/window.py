@@ -39,6 +39,10 @@ class Installation:
     runtimes: tuple[str, ...] = ()
     selected: bool = False
     wine_status: str = releases.WINE_RECOMMENDATION_POLICY + " Availability has not been checked."
+    controller_owner: str = "unsupported"
+    controller_status: str = "unchecked"
+    controller_message: str = "Controller installation has not been identified."
+    controller_standalone: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,7 @@ class HomePage(QWidget):
         group.detail.hide()
         hero = QHBoxLayout()
         icon = QLabel()
-        icon.setPixmap(QIcon(str(APP_IMAGE_DIR / "Logos-128-icon.png")).pixmap(48, 48))
+        icon.setPixmap(QIcon(str(APP_IMAGE_DIR / "logos-desktop-icon.png")).pixmap(48, 48))
         hero.addWidget(icon)
         product_text = QVBoxLayout()
         self.product = label("Logos", heading=True)
@@ -502,10 +506,11 @@ class MainWindow(QMainWindow):
                 self.profile_settings.runtime.setText(self.snapshot.runtime)
                 self.profile_settings.wine_status.setText(self.snapshot.wine_status)
                 self.maintenance.wine_status.setText(self.snapshot.wine_status)
+                self.maintenance.controller.detail.setText(self.snapshot.controller_message)
                 for page in (self.maintenance, self.diagnostics):
                     for name, button in page.buttons.items():
                         allowed = name in ("check", "refresh", "open_log", "support", "edit_config", "dependencies",
-                                            "controller_update", "doctor", "open_logs")
+                                            "controller_check", "controller_update", "doctor", "open_logs")
                         allowed = allowed or (name == "repair" and self.snapshot.selected)
                         button.setEnabled(self.app.active is None and (allowed or self.snapshot.installed))
                         tooltip = self.snapshot.wine_status if name == "runtime_update" else ""
@@ -519,7 +524,7 @@ class MainWindow(QMainWindow):
                 self.existing_installation.setEnabled(self.app.active is None and not process_busy)
                 self.profile_settings.choose_runtime.setEnabled(
                     self.app.active is None and self.snapshot.selected and not process_busy)
-                idle_actions = ("backup", "restore", "product_update", "runtime_update", "controller_update",
+                idle_actions = ("backup", "restore", "product_update", "runtime_update",
                                 "repair", "dependencies", "icu", "catalog", "indexes", "uninstall")
                 for name in idle_actions:
                     button = self.maintenance.buttons.get(name)
@@ -532,6 +537,17 @@ class MainWindow(QMainWindow):
                     self.maintenance.buttons["stop_index"].setEnabled(False)
                 update = self.maintenance.buttons["product_update"]
                 update.setVisible(self.snapshot.product_update.startswith("Update available"))
+                managed = self.snapshot.controller_owner in ("venv", "aur")
+                controller_update = self.maintenance.buttons["controller_update"]
+                controller_update.setVisible(managed or self.snapshot.controller_standalone)
+                controller_update.setText("Update via AUR…" if self.snapshot.controller_owner == "aur"
+                                          else "Update environment…" if managed else "Update LogosDesktop…")
+                controller_update.setEnabled(self.app.active is None and (
+                    self.snapshot.controller_status == "available" if managed else self.snapshot.controller_standalone))
+                self.maintenance.buttons["controller_check"].setEnabled(
+                    self.app.active is None and (managed or self.snapshot.controller_standalone))
+                self.maintenance.buttons["controller_check"].setText(
+                    "Check controller updates" if self.snapshot.controller_status == "unchecked" else "Check again")
 
     def start(self, operation):
         if self.production:
@@ -675,6 +691,8 @@ class MainWindow(QMainWindow):
             self.status.setText(progress.message)
         if self.production and progress.message == "Checking stable Logos releases…":
             self.maintenance.summary.setText(progress.message)
+        if self.production and progress.message == "Checking the controller installation provider":
+            self.maintenance.controller.detail.setText(self.services.snapshot().controller_message)
         if progress.percent is None:
             self.progress.setRange(0, 0)
         else:
@@ -705,6 +723,10 @@ class MainWindow(QMainWindow):
             self.install.runtime.setCurrentText(current_runtime)
         self._render()
         result = completion.result
+        if self.production and self.services.controller_handed_off:
+            self.status.setText(result.message)
+            self.close()
+            return
         if not self._refreshing or result.outcome != "succeeded":
             self.status.setText(result.message)
             self.home.activity.appendPlainText(f"{result.outcome.title()}: {result.message}")

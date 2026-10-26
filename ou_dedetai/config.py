@@ -834,7 +834,7 @@ class Config:
 
     @property
     def faithlife_product_icon_path(self) -> str:
-        return str(constants.APP_IMAGE_DIR / f"{self.faithlife_product}-128-icon.png")
+        return str(constants.APP_IMAGE_DIR / "logos-desktop-icon.png")
 
     @property
     def faithlife_product_logging(self) -> bool:

@@ -57,3 +57,40 @@ jobs:
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           raise SystemExit(not result.wasSuccessful() or bool(result.skipped))
           PY
+
+  artifact-checks:
+    needs: [offline-tests, qt-tests]
+    if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Build exact tested source and inspect installed resources
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install build
+          python -m build
+          python -m venv "$RUNNER_TEMP/artifact-env"
+          "$RUNNER_TEMP/artifact-env/bin/python" -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/artifact-env/bin/python" -I - <<'PY'
+          from importlib.metadata import version
+          from pathlib import Path
+          from ou_dedetai import constants
+          assert version('logos-desktop') == constants.APP_VERSION
+          assert constants.APP_SELF_UPDATES_ENABLED is False
+          assert (constants.APP_ASSETS_DIR / 'LogosStubFailOK.mst').stat().st_size > 0
+          assert (constants.APP_IMAGE_DIR / 'lucide-LICENSE.txt').stat().st_size > 0
+          assert Path(constants.__file__).is_relative_to(Path.cwd() / 'artifact-env')
+          PY
+          "$RUNNER_TEMP/artifact-env/bin/logos-desktop" --help
+          "$RUNNER_TEMP/artifact-env/bin/logos-desktop" --version
+          "$RUNNER_TEMP/artifact-env/bin/python" -m pip check

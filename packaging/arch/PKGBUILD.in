@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# Maintainer: Stephen Woodard <stephendwoodard at protonmail dot com>
+# Render outside the source archive using the reviewed sdist version and digest.
+pkgname=logos-desktop
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Independent community installer and manager for Logos on Linux through Wine'
+arch=('x86_64')
+url='https://github.com/sdwoodard/logos-desktop'
+license=('MIT' 'ISC')
+depends=(
+  'python>=3.12' 'python-distro' 'python-packaging' 'python-psutil'
+  'python-pythondialog' 'python-requests' 'python-olefile>=0.47' 'python-olefile<1'
+  'python-zstandard>=0.23' 'python-zstandard<1' 'python-inotify' 'python-textual'
+  'pyside6>=6.12' 'pyside6<6.13' 'qt6-svg' 'dialog' 'xdg-utils'
+  'fuse2' 'binutils' 'libwbclient' 'samba' 'wget' 'curl'
+  '7zip' 'cabextract' 'openjpeg2' 'libxcomposite' 'libxinerama'
+  'ocl-icd' 'vulkan-icd-loader' 'alsa-plugins' 'gst-plugins-base-libs'
+  'libpulse' 'openal' 'libva' 'mpg123' 'v4l-utils' 'libxslt' 'sqlite'
+  'mesa-utils'
+)
+makedepends=('python-build' 'python-installer' 'python-setuptools>=77')
+checkdepends=('desktop-file-utils')
+optdepends=('wine: optional system runtime instead of a separately selected compatible runtime')
+source=("https://github.com/sdwoodard/logos-desktop/releases/download/v${pkgver}/logos_desktop-${pkgver}.tar.gz")
+sha256sums=('@SDIST_SHA256@')
+
+build() {
+  cd "logos_desktop-${pkgver}"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "logos_desktop-${pkgver}"
+  desktop-file-validate packaging/logos-desktop.desktop
+}
+
+package() {
+  cd "logos_desktop-${pkgver}"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm644 packaging/logos-desktop.desktop \
+    "$pkgdir/usr/share/applications/logos-desktop.desktop"
+  install -Dm644 ou_dedetai/img/logos-desktop.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/logos-desktop.svg"
+  install -Dm644 ou_dedetai/img/logos-desktop-icon.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/logos-desktop.png"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 ou_dedetai/img/lucide-LICENSE.txt \
+    "$pkgdir/usr/share/licenses/$pkgname/lucide-LICENSE.txt"
+  install -Dm644 packaging/LICENSE "$pkgdir/usr/share/licenses/$pkgname/recipe-LICENSE"
+  install -Dm644 ou_dedetai/img/ATTRIBUTION.md \
+    "$pkgdir/usr/share/licenses/$pkgname/ATTRIBUTION.md"
+}

@@ -26,6 +26,147 @@ else:
 
 @unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
 class TestProductionServices(QtCase):
+    def test_managed_controller_checks_are_explicit_cached_and_off_the_gui_thread(self):
+        from ou_dedetai import constants, controller_install
+
+        ui_thread = threading.get_ident()
+        threads = []
+
+        def identify():
+            threads.append(threading.get_ident())
+            return controller_install.Identity("venv", "1.0.0", "1.0.0")
+
+        with (patch.object(constants, "APP_SELF_UPDATES_ENABLED", False),
+              patch.object(controller_install, "identify", side_effect=identify) as admission,
+              patch.object(controller_install, "check", return_value=controller_install.Result(
+                  "available", "Private wheel provider has version B")) as check):
+            window = self.production_window()
+            check.assert_not_called()
+            self.assertEqual(admission.call_count, 1)
+            self.assertNotIn(ui_thread, threads)
+            for _ in range(3):
+                window._render()
+            self.assertEqual(admission.call_count, 1)
+            self.assertFalse(window.maintenance.buttons["controller_update"].isHidden())
+            self.assertFalse(window.maintenance.buttons["controller_update"].isEnabled())
+            window.maintenance.buttons["controller_check"].click()
+            self.pump(lambda: window.app.active is None)
+            check.assert_called_once()
+            self.assertTrue(window.maintenance.buttons["controller_update"].isEnabled())
+            self.assertEqual(window.snapshot.controller_status, "available")
+            self.assertIn("Private wheel provider", window.maintenance.controller.detail.text())
+
+    def test_public_flag_does_not_admit_an_unsupported_source_controller(self):
+        from ou_dedetai import constants, controller_install, updates
+
+        identity = controller_install.Identity("unsupported", "1.0.0", "", message="Source checkout")
+        with (patch.object(constants, "APP_SELF_UPDATES_ENABLED", True),
+              patch.object(controller_install, "identify", return_value=identity),
+              patch.object(updates, "eligible", side_effect=updates.UpdateError("Source is not standalone")),
+              patch.object(controller_install, "check") as check):
+            window = self.production_window()
+            self.assertTrue(window.maintenance.buttons["controller_update"].isHidden())
+            self.assertFalse(window.maintenance.buttons["controller_check"].isEnabled())
+            self.assertIn("Source checkout", window.maintenance.controller.detail.text())
+            check.assert_not_called()
+
+    def test_managed_handoff_closes_without_claiming_update_or_stopping_logos(self):
+        from unittest.mock import Mock
+        from ou_dedetai import controller_install
+
+        identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+        terminal = Mock()
+
+        def accept(*args, **kwargs):
+            window.app.cancel_operation()
+            return terminal
+
+        with (patch.object(controller_install, "identify", return_value=identity),
+              patch.object(controller_install, "check", return_value=controller_install.Result("available", "B")),
+              patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
+              patch.object(controller_install.subprocess, "Popen", side_effect=accept) as popen):
+            window = self.production_window()
+            stop = Mock(side_effect=AssertionError("Controller close must not stop Logos"))
+            window.app.logos.stop = stop
+            window.app.approve = Mock(return_value=True)
+            failure = Mock()
+            window.dialogs.failure = failure
+            window.start(window.services.operation("controller_update"))
+            self.pump(lambda: window._final_close)
+            popen.assert_called_once()
+            terminal.terminate.assert_not_called()
+            terminal.kill.assert_not_called()
+            self.assertIn("command to restart this profile", window.app.approve.call_args.args[1])
+            failure.assert_not_called()
+            stop.assert_not_called()
+            self.assertEqual(window.services.snapshot().controller_status, "handed-off")
+
+    def test_cancel_during_real_handoff_provider_restores_lease_without_opening_terminal(self):
+        from ou_dedetai import constants, controller_install, instance
+
+        entered, finish = threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+
+        def provider(owner):
+            entered.set()
+            if not finish.wait(5):
+                raise AssertionError("Delayed provider was not released")
+            return controller_install.Result("available", "Private provider has B")
+
+        with (patch.object(constants, "COORDINATION_DIR", self.root / "coordination"),
+              patch.object(instance, "check_legacy"),
+              patch.object(controller_install, "identify", return_value=identity),
+              patch.object(controller_install, "recover", return_value=controller_install.Result("recovered", "Ready")),
+              patch.object(controller_install, "check", side_effect=provider),
+              patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
+              patch.object(controller_install.subprocess, "Popen") as popen):
+            window = self.production_window()
+            session = instance.Session(profile=self.config)
+            self.addCleanup(session.close)
+            session.acquire()
+            session.listen()
+            window.app._instance_session = session
+            window.app.approve = lambda *args: True
+            window.start(window.services.operation("controller_update"))
+            try:
+                self.pump(entered.is_set)
+                self.assertIsNone(window.app._instance_session)
+                window.app.cancel_operation()
+            finally:
+                finish.set()
+            self.pump(lambda: window.app.active is None)
+            popen.assert_not_called()
+            self.assertIs(window.app._instance_session, session)
+            self.assertTrue(session.listening)
+            with self.assertRaises(instance.InstanceBusy):
+                instance.Session(profile=self.config).acquire()
+            self.assertFalse(window._closing)
+            self.assertFalse(window.services.controller_handed_off)
+            self.assertIn("cancelled", window.status.text().lower())
+
+    def test_manual_and_unknown_controller_results_stay_in_provider_state(self):
+        from unittest.mock import Mock
+        from ou_dedetai import controller_install, utils
+
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0")
+        command = ("/private root/python", "-I", "-m", "ou_dedetai.controller_install", "recover")
+        with patch.object(controller_install, "identify", return_value=identity):
+            window = self.production_window()
+            window.app.approve = lambda *args: True
+            failure = Mock()
+            window.dialogs.failure = failure
+            for state in ("manual", "unknown", "offline", "provider-lag", "restart-required"):
+                with patch.object(utils, "handoff_controller", return_value=controller_install.Result(
+                        state, "Inspect the installation", command=command)):
+                    window.start(window.services.operation("controller_update"))
+                    self.pump(lambda: window.app.active is None)
+                self.assertEqual(window.snapshot.controller_status, state)
+                self.assertIn("'/private root/python'", window.maintenance.controller.detail.text())
+                self.assertFalse(window._closing)
+                self.assertFalse(window.maintenance.buttons["controller_update"].isEnabled())
+            failure.assert_not_called()
+
     def production_window(self):
         window = self.window(Services())
         self.pump(lambda: window.app.active is None)
@@ -52,7 +193,8 @@ class TestProductionServices(QtCase):
         self.assertEqual(window.snapshot.profile, str(self.config))
         self.assertTrue(window.maintenance.buttons["repair"].isEnabled())
         self.assertFalse(window.home.run.isEnabled())
-        self.assertNotIn("controller_update", window.maintenance.buttons)
+        self.assertFalse(window.maintenance.buttons["controller_update"].isVisible())
+        self.assertFalse(window.maintenance.buttons["controller_check"].isEnabled())
         self.assertEqual(window.install.product.count(), 1)
         self.assertEqual(window.install.product.currentText(), "Logos")
 
@@ -159,7 +301,8 @@ class TestProductionServices(QtCase):
     def test_enabled_controller_update_uses_stable_exact_qt_restart_and_cleans_cancelled_stage(self):
         from unittest.mock import Mock
         from ou_dedetai import constants
-        with patch.multiple(constants, APP_SELF_UPDATES_ENABLED=True, APP_RELEASE_VERSION="1.0.0"):
+        with (patch.multiple(constants, APP_SELF_UPDATES_ENABLED=True, APP_RELEASE_VERSION="1.0.0"),
+              patch("ou_dedetai.updates.eligible")):
             window = self.production_window()
             self.assertIn("controller_update", window.maintenance.buttons)
             for cancel in (False, True):
@@ -216,7 +359,7 @@ class TestProductionServices(QtCase):
     def test_successor_bootstrap_failure_preserves_recoverable_journal_and_success_confirms_once(self):
         from contextlib import nullcontext
         from PySide6.QtCore import QTimer
-        from ou_dedetai import processes, updates
+        from ou_dedetai import controller_install, processes, updates
         from ou_dedetai.config import EphemeralConfiguration
         from ou_dedetai.qt import startup
         from ou_dedetai.qt.app import QtApp
@@ -264,17 +407,20 @@ class TestProductionServices(QtCase):
             try:
                 with (patch.object(updates, "_startup", (destination, record)),
                       patch.object(updates, "confirm_startup", wraps=updates.confirm_startup) as confirm,
+                      patch.object(controller_install, "confirm_startup") as managed_confirm,
                       patch.object(startup, "MainWindow", side_effect=create_window),
                       patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "gui")}), injected):
                     startup.start(EphemeralConfiguration.project({}, str(self.config), environment={}))
                     if failed:
                         confirm.assert_not_called()
+                        managed_confirm.assert_not_called()
                         self.assertEqual(updates._read_record(destination), record)
                         self.assertEqual(target.read_bytes(), new)
                         updates._rollback(destination, record)
                         self.assertEqual(target.read_bytes(), old)
                     else:
                         confirm.assert_called_once()
+                        managed_confirm.assert_called_once()
                         self.assertEqual(target.read_bytes(), new)
                     self.assertFalse(destination.record.exists())
             finally:

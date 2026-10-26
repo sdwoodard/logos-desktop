@@ -7,13 +7,15 @@ A valid Logos license is still required.
 ## Development status
 
 This repository is private development source. There is no supported LogosDesktop
-release or installation package yet. Inherited distribution recipes remain
-unvalidated and do not establish platform support.
+release yet. Private source, wheel and Arch source-package candidates are being
+validated. Snap and Nix recipes are retired. Flatpak and standalone binaries are
+deferred. Packaging files do not establish broader desktop support.
 
-Controller self-update discovery and replacement are disabled during private
-development. Updates to Logos and the selected Wine runtime are separate operations.
-Native journeys and distribution validation are still in progress. Use disposable
-configurations and prefixes for development.
+Public controller feeds and standalone self-replacement remain disabled. Explicitly
+configured private wheel environments and Arch source packages have owner-aware
+Update handoffs. See [PACKAGING.md](PACKAGING.md) for their installation, update and
+recovery boundaries. Updates to Logos and the selected Wine runtime remain separate.
+Use disposable configurations and prefixes for development.
 
 The current source retains the `ou_dedetai` import namespace and legacy runtime
 paths while migration is prepared. Both `logos-desktop` and the transitional

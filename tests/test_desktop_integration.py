@@ -28,6 +28,22 @@ class TestMimeEnvironment(unittest.TestCase):
 
 
 class TestDesktopIntegration(unittest.TestCase):
+    def test_managed_entries_use_stable_launcher_and_preserve_profile_arguments(self):
+        from ou_dedetai import controller_install
+
+        for owner, launcher in (("venv", self.root / "controller/logos-desktop"),
+                                ("aur", Path("/usr/bin/logos-desktop"))):
+            identity = controller_install.Identity(owner, "1.0.0", "1.0.0", launcher=launcher)
+            plan = desktop.preview(self.root / "selected profile.json", desktop.controller_launcher(identity),
+                                   windows_executable=r"C:\Logos\Logos.exe", data_home=self.root / owner,
+                                   config_home=self.root / "config")
+            for entry in plan.files:
+                if entry.path.suffix == ".desktop":
+                    text = entry.after.decode()
+                    self.assertIn(str(launcher), text)
+                    self.assertIn("selected profile.json", text)
+                    self.assertNotIn(sys.executable, text)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

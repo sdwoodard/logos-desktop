@@ -8,12 +8,13 @@ import json
 import hashlib
 import os
 import shutil
-import sys
+import shlex
 import threading
 
 from ou_dedetai import backup, backup_store, constants, control, installer, maintenance
 from ou_dedetai import adoption, desktop, doctor, network, processes, support
 from ou_dedetai import config_store, releases, repair, runtime, updates, utils, wine
+from ou_dedetai import controller_install
 from ou_dedetai.app import UserExitedFromAsk
 from ou_dedetai.config import Config, EphemeralConfiguration, PersistentConfiguration
 from ou_dedetai.logos import State
@@ -28,6 +29,10 @@ class Services:
         self._lock = threading.Lock()
         self._snapshot = Installation("Logos", "Unknown", "Not selected", "", installed=False)
         self.prepared = None
+        self.controller_identity = None
+        self.controller_result = None
+        self.controller_handed_off = False
+        self.controller_standalone = False
         self.doctor_report = ""
         self._doctor_profile = None
 
@@ -36,6 +41,8 @@ class Services:
             return self._snapshot
 
     def refresh(self, app, cancel):
+        if self.controller_identity is None:
+            self._identify_controller()
         conf = app.conf
         if self._doctor_profile != conf.config_file_path:
             self.doctor_report = ""
@@ -54,6 +61,10 @@ class Services:
             selected=bool(raw.install_dir and raw.faithlife_product == "Logos"),
             runtimes=previous.runtimes if previous.profile == profile else (),
             wine_status=self._wine_status(conf, selected_runtime),
+            controller_owner="standalone" if self.controller_standalone else self.controller_identity.owner,
+            controller_status=self.controller_result.status if self.controller_result else "unchecked",
+            controller_message=self._controller_message(),
+            controller_standalone=self.controller_standalone,
         )
         try:
             executable = conf.logos_exe
@@ -79,6 +90,33 @@ class Services:
                 return Result("succeeded", "Discarded refresh for a changed installation profile")
             self._snapshot = snapshot
         return Result("succeeded", "Installation state refreshed")
+
+    def _identify_controller(self):
+        identity = controller_install.identify()
+        self.controller_standalone = False
+        if identity.owner == "unsupported" and constants.APP_SELF_UPDATES_ENABLED:
+            try:
+                updates.eligible()
+            except updates.UpdateError:
+                pass
+            else:
+                self.controller_standalone = True
+        self.controller_identity = identity
+        return identity
+
+    def _controller_message(self):
+        identity = self.controller_identity
+        owner = "standalone" if self.controller_standalone else identity.owner
+        if self.controller_result is None:
+            return (f"{owner}: Not checked. {identity.message}" if owner == "unsupported"
+                    else f"{owner}: Installation provider has not been checked.")
+        result = self.controller_result
+        text = f"{owner}: {result.status}: {result.message}"
+        if result.status == "manual":
+            text += "\nClose this controller before running the command in a terminal."
+        if result.command:
+            text += "\n" + shlex.join(result.command)
+        return text
 
     @staticmethod
     def _wine_status(conf, selected):
@@ -443,8 +481,7 @@ class Services:
                 return Result("succeeded", "Read-only diagnostics completed")
 
             if name == "desktop":
-                launcher = [sys.executable] if getattr(sys, "frozen", False) else [
-                    sys.executable, "-m", "ou_dedetai.main"]
+                launcher = desktop.controller_launcher()
                 plan = desktop.preview(app.conf.config_file_path, launcher, product="Logos",
                                        windows_executable=app.conf.logos_exe_windows_path)
                 details = (f"Profile: {plan.config}\nJournal: {plan.journal}\nFiles:\n"
@@ -476,9 +513,37 @@ class Services:
                     return Result("cancelled", "Support export was not started")
                 return Result("succeeded", f"Private support archive: {path}")
 
-            if name == "controller_update":
-                if not constants.APP_SELF_UPDATES_ENABLED:
-                    return Result("unknown", constants.APP_SELF_UPDATE_DISABLED_MESSAGE)
+            if name in ("controller_check", "controller_update"):
+                identity = self._identify_controller()
+                if identity.owner in ("venv", "aur"):
+                    if name == "controller_check":
+                        self.controller_result = controller_install.Result("checking", "Checking installation provider")
+                        with self._lock:
+                            self._snapshot = replace(self._snapshot, controller_status="checking",
+                                                     controller_message=self._controller_message())
+                        app.status("Checking the controller installation provider", None)
+                        result = controller_install.check(identity)
+                    else:
+                        restart = ("The terminal supplies the command to restart this profile after AUR installation."
+                                   if identity.owner == "aur" else
+                                   "The environment helper launches the new controller after installation.")
+                        if not app.approve("Open controller update in a terminal?",
+                                           "The terminal owns review and authorization. " + restart
+                                           + " This controller closes after handoff. Logos is left running."):
+                            return Result("cancelled", "Controller update was not started")
+                        app.checkpoint()
+                        result = utils.handoff_controller(app, identity, "qt")
+                    self.controller_result = result
+                    self.controller_handed_off = result.status == "handed-off"
+                    return Result("succeeded", self._controller_message())
+                if not constants.APP_SELF_UPDATES_ENABLED or not self.controller_standalone:
+                    self.controller_result = controller_install.Result("refused", identity.message)
+                    return Result("unknown", self._controller_message())
+                if name == "controller_check":
+                    lookup = app.conf._network.controller_release("stable", force=True)
+                    self.controller_result = controller_install.Result(
+                        releases.controller_state(lookup), "Standalone release check completed")
+                    return Result("succeeded", self._controller_message())
                 if not app.approve("Update LogosDesktop and restart?", "Use the latest stable controller release."):
                     return Result("cancelled", "Controller update was not started")
                 app.checkpoint()

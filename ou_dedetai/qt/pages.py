@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ou_dedetai import constants, releases
+from ou_dedetai import releases
 
 
 def heading(text, size=17):
@@ -70,6 +70,16 @@ class CarePage(QWidget):
         grid.addWidget(self.backups, 0, 0)
         grid.addWidget(self.updates, 1, 0)
         layout.addLayout(grid)
+        self.controller = Card("LogosDesktop updates", "Identifying this controller installation…")
+        self.controller.detail.setTextFormat(Qt.TextFormat.PlainText)
+        self.controller.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        row = QHBoxLayout()
+        row.addWidget(self.button("controller_check", "Check controller updates"))
+        row.addWidget(self.button("controller_update", "Update environment…"))
+        self.buttons["controller_check"].setEnabled(False)
+        self.buttons["controller_update"].setVisible(False)
+        self.controller.content.addLayout(row)
+        layout.addWidget(self.controller)
 
         tools = Card("Need to fix something?", "Repair, indexing and runtime tools are here when needed. "
                      "System dependency installation changes host packages. Cleanup actions ask for confirmation.")
@@ -82,7 +92,6 @@ class CarePage(QWidget):
         for group in (
             [("index", "Start indexing"), ("stop_index", "Stop indexing")],
             [("repair", "Repair installation…"), ("runtime_update", "Update recommended Wine…"),
-             ("controller_update", "Update LogosDesktop…"),
              ("dependencies", "Install system dependencies…"), ("icu", "Reinstall ICU data…")],
             [("edit_config", "Open configuration file"), ("logging", "Toggle Logos logging")],
             [("open_install", "Open installation folder"), ("open_backup", "Open backup folder"),
@@ -93,8 +102,6 @@ class CarePage(QWidget):
             if not menu.isEmpty():
                 menu.addSeparator()
             for key, text in group:
-                if key == "controller_update" and not constants.APP_SELF_UPDATES_ENABLED:
-                    continue
                 action = QAction(text, menu)
                 action.triggered.connect(lambda checked=False, key=key: self.requested.emit(key))
                 self.buttons[key] = action

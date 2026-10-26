@@ -58,7 +58,8 @@ REPOSITORY_NEW_ISSUE_LINK = f"{REPOSITORY_LINK}/issues/new"
 APP_SELF_UPDATES_ENABLED = False
 APP_SELF_UPDATE_DISABLED_MESSAGE = "Controller self-updates are disabled during private development."
 APP_RELEASE_LINEAGE = "logos-desktop"
-APP_RELEASE_VERSION = None
+APP_VERSION = "1.0.0"
+APP_RELEASE_VERSION = APP_VERSION
 # A release build must explicitly identify its distribution before self-replacement.
 CONTROLLER_DISTRIBUTION = "source"
 
@@ -110,7 +111,7 @@ LEGACY_CONFIG_FILES = [
     os.path.expanduser("~/.config/Logos_on_Linux/Logos_on_Linux.conf")
 ]
 LLI_AUTHOR = "Ferion11, John Goodman, T. H. Wright, N. Marti, N. Shaaban"
-LLI_CURRENT_VERSION = "4.0.0-beta.15"
+LLI_CURRENT_VERSION = APP_VERSION
 # Standalone tagged script, pinned from official-source HTTPS observations.
 # AppImage companions remain owned by their runtime provider.
 WINETRICKS_VERSION = '20260125'

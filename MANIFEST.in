@@ -1,0 +1,4 @@
+include ARCHITECTURE.md BACKUPS.md CONFIGURATION.md SUPPORT.md COMPATIBILITY.md
+include PACKAGING.md CONTRIBUTING.md
+include scripts/install-wheel.py
+recursive-include tests *.py *.json *.AppImage
