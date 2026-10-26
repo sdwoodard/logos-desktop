@@ -1,16 +1,14 @@
 <p align="center">
-  <img src="logos_desktop/img/logos-desktop.svg" alt="" width="72" height="72">
+  <img src="logos_desktop/img/logos-desktop.svg" alt="" width="48" height="48">
 </p>
 
 # LogosDesktop
 
 **Install and manage Logos on Linux through Wine, from one desktop panel.**
 
-Open Logos, choose its Wine runtime, back up your installation and find diagnostics
-without remembering a collection of terminal commands. A terminal interface and
-explicit CLI actions are available too.
-
 **[Installation guide](INSTALL.md)** · [Get help](SUPPORT.md) · [Contribute](CONTRIBUTING.md)
+
+Private 1.0.0 candidate · Linux x86_64 · Native reference: CachyOS
 
 An independent community project, not affiliated with or endorsed by Logos.
 Your Logos account and the licenses for your content are still required.
@@ -36,6 +34,8 @@ candidate testing. They do not imply a published release.
 - Flatpak, standalone binaries, Snap, Nix and ARM are not launch channels.
 
 ## What you can do
+
+Use the Qt desktop panel, terminal interface or explicit CLI actions.
 
 - **Start and stop Logos** with status tied to the selected installation.
 - **Adopt an existing installation** without moving its library or prefix.
