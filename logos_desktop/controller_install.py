@@ -907,7 +907,7 @@ def confirm_startup():
     return True
 
 
-def _wheel_update(identity, release, config_path, frontend):
+def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch=None):
     if frontend == "tui":
         _tui_terminal()
     root = _root(identity.root)
@@ -930,6 +930,8 @@ def _wheel_update(identity, release, config_path, frontend):
         finally:
             wheel.unlink(missing_ok=True)
             cache.rmdir()
+    if frontend == "tui" and before_tui_launch is not None:
+        before_tui_launch()
     return _launch(root, record, config_path, frontend)
 
 
@@ -1456,6 +1458,11 @@ def main(argv=None):
     parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
     args, remaining = parser.parse_known_args(argv)
     helper_keeps_terminal = True
+
+    def release_tui_terminal():
+        nonlocal helper_keeps_terminal
+        helper_keeps_terminal = False
+
     try:
         if args.action == "bootstrap":
             return bootstrap(remaining)
@@ -1466,9 +1473,6 @@ def main(argv=None):
             result = configure_provider(identity)
             print(f"{result.status}: {result.message}")
             return 0
-        # Only the canonical venv TUI route can transfer input to a live successor.
-        # AUR always keeps this terminal for its manual restart instructions.
-        helper_keeps_terminal = not (identity.owner == "venv" and args.frontend == "tui")
         if args.action == "recover":
             result = recover(identity)
             print(f"{result.status}: {result.message}")
@@ -1492,7 +1496,12 @@ def main(argv=None):
                 if input("Type UPDATE to install and launch the new controller: ") != "UPDATE":
                     result = Result("cancelled", "Update was declined")
                 else:
-                    result = _wheel_update(identity, result.artifact, args.config, args.frontend)
+                    result = _wheel_update(identity, result.artifact, args.config, args.frontend,
+                                           before_tui_launch=release_tui_terminal)
+                    # A confirmed failed launch has no live successor reading this
+                    # terminal. Unknown outcomes retain the conservative handoff.
+                    if result.status == "failed":
+                        helper_keeps_terminal = True
             else:
                 result = _aur_update(identity, result.artifact, args.config, args.frontend)
         print(f"{result.status}: {result.message}")

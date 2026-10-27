@@ -953,8 +953,10 @@ class ControllerInstallTests(unittest.TestCase):
             "c.identify = lambda: c.Identity('venv', root=root)\n"
             "c.recover = lambda identity: c.Result('recovered', 'fixture')\n"
             "c.check = lambda identity: c.Result('available', 'fixture', '1.1.0', {})\n"
-            "c._wheel_update = lambda identity, release, config, frontend: "
-            "c._launch(root, c._receipt(root), config, frontend, observation_seconds=0.05)\n"
+            "def update(identity, release, config, frontend, *, before_tui_launch=None):\n"
+            "    before_tui_launch()\n"
+            "    return c._launch(root, c._receipt(root), config, frontend, observation_seconds=0.05)\n"
+            "c._wheel_update = update\n"
             "raise SystemExit(c.main(['handoff', '--frontend', 'tui']))\n"
         )
         master, slave = pty.openpty()
@@ -989,6 +991,223 @@ class ControllerInstallTests(unittest.TestCase):
             os.write(master, b"EXIT\n")
             self.assertEqual(helper.wait(timeout=5), 0)
             self.assertTrue(finished.exists())
+        finally:
+            if helper.poll() is None:
+                helper.terminate()
+                helper.wait(timeout=5)
+
+    def test_tui_digest_failure_keeps_error_visible_until_acknowledged(self):
+        _, release = self.wheel()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"x" * release["size"]
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        release["url"] = f"http://127.0.0.1:{server.server_port}/wheel"
+        self.provider({"manifest_url": release["url"], "allow_loopback": True})
+        profile = self.home / "selected profile.json"
+        profile.write_bytes(b'{"keep": true}\n')
+        prior = install._activate(self.root, self.b, "1.1.0")
+        with patch.object(install, "_probe", return_value="1.0.0"):
+            install._recover(self.root, prior)
+        receipt = (self.root / "operation.json").read_bytes()
+        program = textwrap.dedent(f"""
+            import fcntl, os, termios
+            from pathlib import Path
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+            from logos_desktop import controller_install as c
+            Path.home = classmethod(lambda cls: Path({str(self.home)!r}))
+            root = Path({str(self.root)!r})
+            c.identify = lambda: c.Identity('venv', '1.0.0', '1.0.0', root,
+                                            root / 'logos-desktop', root / 'provider.json')
+            c.recover = lambda identity: c.Result('recovered', 'fixture')
+            c.check = lambda identity: c.Result('available', 'fixture', '1.1.0', {release!r})
+            def forbidden(*args, **kwargs):
+                raise AssertionError('Rejected bytes reached installation or launch')
+            c._install = c._activate = c._launch = forbidden
+            raise SystemExit(c.main(['handoff', '--frontend', 'tui']))
+        """)
+        master, slave = pty.openpty()
+        helper = subprocess.Popen([sys.executable, "-c", program], stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        output = bytearray()
+
+        def read_until(text):
+            deadline = time.monotonic() + 5
+            while text not in output and time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    output.extend(os.read(master, 65536))
+            self.assertIn(text, output)
+
+        try:
+            read_until(b"Type UPDATE")
+            os.write(master, b"UPDATE\n")
+            read_until(b"Press Enter to close this helper")
+            self.assertIn(b"Downloaded wheel failed size or SHA-256 validation", output)
+            self.assertIsNone(helper.poll())
+            self.assertEqual(install._target(self.root), self.a)
+            self.assertEqual((self.root / "operation.json").read_bytes(), receipt)
+            self.assertEqual(profile.read_bytes(), b'{"keep": true}\n')
+            os.write(master, b"\n")
+            self.assertEqual(helper.wait(timeout=5), 1)
+        finally:
+            if helper.poll() is None:
+                helper.terminate()
+                helper.wait(timeout=5)
+
+    def test_tui_launch_callback_follows_preparation_cleanup_and_lock_release(self):
+        wheel, release = self.wheel()
+        self.provider({"manifest_url": "https://example.invalid/release"})
+
+        def download(url, config, *, limit, destination):
+            destination.write(wheel.read_bytes())
+            return release["size"], release["sha256"]
+
+        for phase in ("download", "install", "activate", "cleanup"):
+            callback = Mock()
+            with self.subTest(phase=phase), ExitStack() as stack:
+                stack.enter_context(patch.object(install, "identify", return_value=self.identity))
+                stack.enter_context(patch.object(install, "_tui_terminal"))
+                stack.enter_context(patch.object(install, "_download", side_effect=download))
+                stack.enter_context(patch.object(install, "_install", return_value=self.b))
+                stack.enter_context(patch.object(install, "_activate", return_value={}))
+                launch = stack.enter_context(patch.object(install, "_launch"))
+                if phase == "cleanup":
+                    unlink = Path.unlink
+
+                    def fail_cleanup(path, *args, **kwargs):
+                        if path.parent.name.startswith(".download-"):
+                            raise OSError("cleanup failure")
+                        return unlink(path, *args, **kwargs)
+
+                    stack.enter_context(patch.object(Path, "unlink", fail_cleanup))
+                else:
+                    method = {"download": "_download", "install": "_install", "activate": "_activate"}[phase]
+                    stack.enter_context(patch.object(install, method, side_effect=OSError(phase)))
+                with self.assertRaises(OSError):
+                    install._wheel_update(self.identity, release, None, "tui", before_tui_launch=callback)
+                callback.assert_not_called()
+                launch.assert_not_called()
+            for directory in self.root.glob(".download-*"):
+                for path in directory.iterdir():
+                    path.unlink()
+                directory.rmdir()
+
+        for frontend in ("qt", "tui"):
+            order = []
+
+            def transfer():
+                with install._locked(self.root):
+                    self.assertFalse(list(self.root.glob(".download-*")))
+                order.append("transfer")
+
+            def launch(*args):
+                order.append("launch")
+                return install.Result("updated", "fixture")
+
+            with (patch.object(install, "identify", return_value=self.identity),
+                  patch.object(install, "_tui_terminal"), patch.object(install, "_download", side_effect=download),
+                  patch.object(install, "_install", return_value=self.b),
+                  patch.object(install, "_activate", return_value={}),
+                  patch.object(install, "_launch", side_effect=launch)):
+                install._wheel_update(self.identity, release, None, frontend, before_tui_launch=transfer)
+            self.assertEqual(order, ["transfer", "launch"] if frontend == "tui" else ["launch"])
+
+    def test_tui_main_reclaims_input_only_after_confirmed_failed_launch(self):
+        for outcome in ("failed", "updated", "unknown", "exception"):
+            def update(*args, before_tui_launch):
+                before_tui_launch()
+                if outcome == "exception":
+                    raise install.InstallError("launch-stage observation failure")
+                return install.Result(outcome, "fixture")
+
+            with (self.subTest(outcome=outcome),
+                  patch.object(install, "identify", return_value=self.identity),
+                  patch.object(install, "recover", return_value=install.Result("recovered", "fixture")),
+                  patch.object(install, "check", return_value=install.Result("available", "fixture", "1.1.0", {})),
+                  patch.object(install, "_wheel_update", side_effect=update),
+                  patch.object(sys.stdin, "isatty", return_value=True),
+                  patch("builtins.input", side_effect=["UPDATE", ""]) as answers,
+                  patch("builtins.print")):
+                result = install.main(["handoff", "--frontend", "tui"])
+            self.assertEqual(result, 0 if outcome == "updated" else 1)
+            self.assertEqual(answers.call_count, 2 if outcome == "failed" else 1)
+
+    def test_tui_unknown_supervisor_does_not_read_live_successor_input(self):
+        binary = self.root / self.b / "bin/logos-desktop"
+        binary.parent.mkdir()
+        received = self.home / "successor-answer"
+        binary.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            "print('LIVE_SUCCESSOR', flush=True)\n"
+            f"Path({str(received)!r}).write_text(input())\n"
+        )
+        binary.chmod(0o700)
+        record = install._activate(self.root, self.b, "1.1.0")
+        program = textwrap.dedent(f"""
+            import fcntl, os, termios, time
+            from pathlib import Path
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+            from logos_desktop import controller_install as c
+            root = Path({str(self.root)!r})
+            c.identify = lambda: c.Identity('venv', root=root)
+            c.recover = lambda identity: c.Result('recovered', 'fixture')
+            c.check = lambda identity: c.Result('available', 'fixture', '1.1.0', {{}})
+            def broken_observer(*args):
+                raise RuntimeError('supervisor fixture failure')
+            def update(*args, before_tui_launch):
+                before_tui_launch()
+                c._receipt = broken_observer
+                return c._launch(root, {record!r}, None, 'tui')
+            c._wheel_update = update
+            code = c.main(['handoff', '--frontend', 'tui'])
+            print('HELPER_RETURNED', flush=True)
+            deadline = time.monotonic() + 5
+            while not Path({str(received)!r}).exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise SystemExit(code)
+        """)
+        master, slave = pty.openpty()
+        helper = subprocess.Popen([sys.executable, "-c", program], stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        self.addCleanup(os.close, master)
+        output = bytearray()
+
+        def read_until(text):
+            deadline = time.monotonic() + 5
+            while text not in output and time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    output.extend(os.read(master, 65536))
+            self.assertIn(text, output)
+
+        try:
+            read_until(b"Type UPDATE")
+            os.write(master, b"UPDATE\n")
+            read_until(b"LIVE_SUCCESSOR")
+            read_until(b"HELPER_RETURNED")
+            self.assertIn(b"unknown:", output)
+            self.assertNotIn(b"Press Enter", output)
+            os.write(master, b"successor-only\n")
+            self.assertEqual(helper.wait(timeout=5), 1)
+            self.assertEqual(received.read_text(), "successor-only")
+            self.assertEqual(install._target(self.root), self.b)
+            self.assertEqual(install._receipt(self.root)["status"], "published")
         finally:
             if helper.poll() is None:
                 helper.terminate()
