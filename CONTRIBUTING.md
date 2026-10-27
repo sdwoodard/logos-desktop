@@ -21,7 +21,7 @@ Alternatively, run `scripts/ensure-venv.sh` from any working directory. It creat
 `.venv` beside the source using installed Python 3.12 or newer. Set `PYTHON` to an
 interpreter path if needed. It preserves existing environments. Install
 `'.[dev,gui]'` afterward for Qt development. See [PACKAGING.md](PACKAGING.md) for
-the artifact contract, Arch template, notices and retired distribution recipes.
+the artifact contract, notices and deferred distribution channels.
 
 The Python namespace is `logos_desktop`. The `logos-desktop` console command is
 the controller entry point. Existing runtime filenames and

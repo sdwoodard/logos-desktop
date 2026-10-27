@@ -25,11 +25,11 @@ Your Logos account and the licenses for your content are still required.
 **Release 1.0.0 is prepared for publication.** Check the
 [release page](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0)
 for availability. Installation instructions name the exact release assets and
-package owner. AUR availability can follow the source release.
+managed environment. AUR packaging is deferred beyond this launch.
 
 - **Linux x86_64.** CachyOS with KDE Wayland is the native reference environment.
-- **Two installation routes.** Arch source packaging uses pacman. The repository
-  wheel route uses a dedicated user-owned Python environment.
+- **One installation route.** The verified wheel bootstrap uses a dedicated
+  user-owned Python environment, including on the reference CachyOS system.
 - **Wine is a separate requirement.** Read [tested versions and known limitations](COMPATIBILITY.md)
   before choosing a runtime. Other distro source probes remain experimental.
 - Flatpak, standalone binaries, Snap, Nix and ARM are not launch channels.
@@ -65,7 +65,7 @@ before replacing their controller.
 
 | Action | What changes |
 | --- | --- |
-| Update LogosDesktop | The controller's own installation. Managed environments use **Update environment**. Arch source installs use **Update via AUR** |
+| Update LogosDesktop | The controller's managed wheel installation, through **Update environment** |
 | Update Logos | Vendor software inside the selected Wine prefix |
 | Update Wine | The selected runtime, subject to its provider and compatibility checks |
 

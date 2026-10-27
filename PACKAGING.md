@@ -1,12 +1,13 @@
 # LogosDesktop packaging
 
-The release candidates are a Python source distribution, a wheel and an Arch
-source recipe named `logos-desktop`. They target Linux x86_64 with Python 3.12
+The release artifacts are a Python source distribution and a wheel. The managed
+wheel environment is the end-user route. They target Linux x86_64 with Python 3.12
 or newer. A `py3-none-any` wheel tag describes the controller's Python code,
 not support for running Logos on other operating systems or architectures.
 
 Publication requires a reviewed release and its named assets. This metadata does
-not publish a release, package index, AUR recipe or update manifest.
+not publish a release, package index or update manifest. AUR packaging is deferred
+to a separate future maintenance effort and is not part of this launch.
 
 ## Artifact contract
 
@@ -18,7 +19,7 @@ permission to replace the controller or enable a release feed.
 The import namespace is `logos_desktop`. The `logos-desktop` command calls
 `logos_desktop.main:main`. Only runtime Python packages are
 discovered. Explicit package data includes the MSI transform, runtime icons,
-Lucide attribution and license. Documentation and the recipe template install
+Lucide attribution and license. Documentation and reference desktop metadata install
 under `share/doc/logos-desktop`, not as active desktop or package-manager files.
 
 The `gui` extra installs PySide6 Essentials 6.12, including QtCore, QtGui,
@@ -41,8 +42,8 @@ python3 -m venv /path/to/build-venv
 The default build produces an sdist and builds its wheel from that sdist. Record
 the source commit, tree, Python and build-tool versions, filenames, sizes and
 SHA-256 digests. Inspect both archives for runtime resources and license notices.
-Keep final checksum-bearing recipes outside the source archive. Rebuild after
-source changes rather than modifying or relabeling completed artifacts.
+Keep generated checksum manifests outside the source archive. Rebuild after source
+changes rather than modifying or relabeling completed artifacts.
 
 For a disposable installed-artifact smoke check, verify the wheel's SHA-256
 against the reviewed private artifact record before installing it:
@@ -128,73 +129,17 @@ backups are separate and must be retained. Profile-specific desktop launchers ca
 be removed separately after checking their ownership. No data-removal action is
 implied by uninstalling the controller.
 
-## Arch source candidate
+## Deferred Arch packaging
 
-`packaging/arch/PKGBUILD.in` is a template, not an executable release recipe.
-Replace `@VERSION@` from `APP_VERSION`, `@SDIST_SHA256@` with the exact sdist's
-SHA-256. The maintainer contact is Stephen Woodard, as supplied for this candidate.
-Reject remaining placeholders before building. The recipe license is
-[MIT](packaging/LICENSE).
+No AUR recipe or Arch binary package is offered for this release. Packaging research
+and private candidate evidence are retained by the maintainer for a separate future
+effort. The release archives do not ship an Arch recipe template.
 
-Render `PKGBUILD` into a separate private directory. Its source must be the exact
-`logos_desktop-VERSION.tar.gz` at the versioned release URL, with a real digest.
-Do not use a branch archive, `SKIP` or an archive containing its own final recipe.
-During private validation, place the matching reviewed bytes in `SRCDEST` and
-record that private retrieval mapping. This does not prove public URL access.
-
-Build as an ordinary user in a clean pinned Arch environment. Install declared
-dependencies through pacman, including separately reviewed AUR dependencies
-`python-pythondialog` and `python-inotify`. The other Python dependencies and
-`pyside6` are official Arch packages as checked during candidate preparation.
-Recheck availability before a release. The recipe uses PEP 517 without network
-build isolation and stages its wheel with `python -m installer`. It never installs
-with pip into system Python.
-
-From the rendered recipe directory in that disposable environment:
-
-```bash
-makepkg --verifysource
-makepkg --printsrcinfo > .SRCINFO
-makepkg --cleanbuild
-```
-
-Compare `.SRCINFO` with `PKGBUILD`, inspect the package file list, then test pacman
-install, upgrade and removal in the disposable environment. The package installs
-the controller desktop entry, project icons and licenses. It has no install hooks
-that launch Wine, initialize prefixes, accept terms or migrate user data. Normal
-package removal preserves user profiles, prefixes, libraries and backups.
-
-System Wine is optional because a user can select a separately managed compatible
-runtime. Declared runtime libraries also support that route. Installing whichever
-Wine is newest in Arch does not establish Logos compatibility. The application
-retains its runtime qualification and process-ownership safeguards.
-
-AUR distributes recipes, not a binary repository. `pacman -Syu` alone does not
-rebuild AUR packages. A controller update must use the installed owner's reviewed
-recipe/build and pacman transaction, with normal package authorization. Opening a
-terminal is a handoff, not proof of a successful update. Updating Logos inside its
-prefix and selecting or updating Wine remain separate operations.
-
-The installed Arch owner reads an owned private provider file at
-`~/.local/state/logos-desktop/aur/provider.json`, scoped to
-`/usr/bin/logos-desktop`. It names `schema`, `installation`, `rpc_url`, `git_url`
-and an explicit `allow_loopback` for private fixtures. Optional
-`release_manifest_url` compares the stable source release against AUR metadata to
-show packaging lag. It never converts an Arch installation into a wheel install.
-Without it, current means current for AUR and source availability is not checked.
-
-Run `/usr/bin/logos-desktop-controller-install configure-provider` as the user
-after package installation. It configures `https://aur.archlinux.org/rpc/v5/info?arg[]=logos-desktop`,
-`https://aur.archlinux.org/logos-desktop.git` and the GitHub stable manifest above.
-No package hook creates user configuration. Setup requires a positively identified
-installed package and preserves an existing provider.
-
-Update via AUR opens a separate terminal, pins and displays the complete supported
-recipe, and requires REVIEWED before makepkg. The terminal keeps the result and an
-exact config/frontend restart command visible until acknowledgement. Run that
-command after successful installation, then check the restarted version. Opening
-the terminal or installing a package while the old process runs is not Updated.
-Package authorization remains in makepkg/pacman, never in a root controller GUI.
+Package-ownership checks and owner adapters remain for earlier private installations.
+They do not make an AUR package available, and must not be bypassed to replace
+package-managed files with a wheel. Use the managed wheel instructions for a new
+controller installation. Keep existing profiles, prefixes, libraries and backups
+separate from controller files.
 
 ## Notices and redistribution review
 
@@ -205,7 +150,7 @@ Package authorization remains in makepkg/pacman, never in a root controller GUI.
 | MSI transform | John Goodman contributed `LogosStubFailOK.mst` under the upstream MIT license on 2025-01-23 in commit `eb6f604e7366f6ade6073837c7446fe81fddd85c`. It changes installer action tables and contains vendor summary metadata, with no listed installer or executable payload. Preserve upstream MIT attribution. This does not claim vendor endorsement |
 | Historical artwork | Nate Marti's 2024-10-21 contribution remains in Git history at `919bbec`. Current application and desktop entries use Book Open Text |
 | Vendor product graphics | Removed from the current distribution because their redistribution basis was unresolved. Product names remain text. Home uses the attributed Book Open Text project artwork, as approved for this packaging change |
-| Arch template and desktop entry | MIT, with a separate [recipe notice](packaging/LICENSE) |
+| Desktop metadata | MIT, with the retained [packaging notice](packaging/LICENSE) |
 | Python and Qt dependencies | Resolved separately, not embedded in the controller wheel. Preserve each installed distribution's notices. PySide6/Qt and shiboken have their own LGPL/GPL/commercial terms and component notices |
 
 The project metadata describes the controller and Lucide licenses, not a grant
@@ -236,5 +181,5 @@ See [explicit migration](INSTALL.md#migrate-a-private-candidate). The new verifi
 bootstrap reads the selected older environment's installed file records without
 importing its runtime. It reserves the selected profile's controller lease before
 activation. The incoming wheel is separately digest-verified. Recovery validates
-recorded predecessor bytes and preserves later edits. This is separate from both
-normal owner-update routes and does not change the 1.0.0 release version.
+recorded predecessor bytes and preserves later edits. This is separate from normal
+managed-environment updates and does not change the 1.0.0 release version.

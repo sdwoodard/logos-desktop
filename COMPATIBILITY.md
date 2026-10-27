@@ -2,8 +2,9 @@
 
 These observations are from native CachyOS testing on 2026-10-26. They are not a
 supported distribution or hardware matrix. LogosDesktop remains private.
-Wheel-environment and Arch source candidates have bounded M14 evidence. Renamed
-1.0.0 candidates require their own migration/update validation before release.
+The managed wheel environment is the launch installation route. Earlier private
+Arch source-package checks do not establish an available AUR package. AUR is
+deferred beyond launch. Final artifacts retain their own migration/update validation.
 
 ## Current runtime policy
 

@@ -110,7 +110,8 @@ Stable product update state keeps stale, unchecked, failed, empty and unknown
 installed-version results distinct from current or available. Update admission
 refreshes installed metadata and validates effective configuration against the
 checked newer stable target. Standalone replacement remains disabled. Explicitly
-configured providers use separate wheel-environment and Arch owner transactions.
+configured providers use the wheel-environment transaction for launch. The retained
+Arch owner adapter protects earlier private package installations, with AUR deferred.
 Provider setup creates scoped endpoint configuration without overwriting an
 existing provider or fetching a release. Cancellation propagates through long reads, hashes and scans, while
 safe commit boundaries preserve completed outcomes and pending recovery work.

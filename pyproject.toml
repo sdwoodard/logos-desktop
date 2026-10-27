@@ -69,7 +69,6 @@ logos_desktop = [
     "logos_desktop/img/logos-desktop.svg", "logos_desktop/img/ATTRIBUTION.md", "logos_desktop/img/lucide-LICENSE.txt",
 ]
 "share/doc/logos-desktop/packaging" = ["packaging/logos-desktop.desktop", "packaging/LICENSE"]
-"share/doc/logos-desktop/packaging/arch" = ["packaging/arch/PKGBUILD.in"]
 "share/doc/logos-desktop/scripts" = ["scripts/install-wheel.py"]
 
 [tool.ruff]

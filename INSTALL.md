@@ -2,16 +2,18 @@
 
 These instructions target release 1.0.0. Publication is pending until the
 [v1.0.0 release](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0)
-and the named AUR recipe are available. During private rehearsal, use the same
+is available. During private rehearsal, use the same
 verified files from the candidate packet. Do not substitute an unrelated package
 with the same name or run global pip against system Python.
 
-## Choose your controller owner
+## Supported installation route
 
 | Environment | Route | Controller updates |
 | --- | --- | --- |
-| CachyOS or Arch Linux | Reviewed Arch source recipe | Update via AUR, recipe review, makepkg and pacman |
-| CachyOS x86_64 with Python 3.12+, when you prefer a user-owned controller | Verified wheel bootstrap | Update environment, in a dedicated user-owned root |
+| CachyOS x86_64 with Python 3.12+ | Verified wheel bootstrap | Update environment, in a dedicated user-owned root |
+
+There is no AUR package for this release. Arch packaging is deferred to a separate
+future effort. It is not required to install or update the managed wheel environment.
 
 CachyOS is the native reference. Container source checks on other distributions
 remain experimental. Read [compatibility](COMPATIBILITY.md) for Wine, graphics
@@ -19,7 +21,7 @@ and feature limits. A Python wheel tag does not establish other-platform support
 
 You also need working desktop libraries, a compatible Wine runtime, space for the
 installer/library and a separately chosen backup destination. The application
-checks installation prerequisites before mutation. Package builds must run as an
+checks installation prerequisites before mutation. Install the controller as an
 ordinary user. Accept vendor terms and enter credentials yourself.
 
 Graphical controller updates use Konsole or GNOME Terminal, or xterm when an X11
@@ -83,71 +85,14 @@ remove only that root using your file manager. It is normally
 library and backups. Remove profile-specific desktop entries only after checking
 that they belong to this controller. Do not delete broad XDG directories.
 
-## Arch source package
-
-Obtain the `logos-desktop` source recipe from its exact AUR repository:
-
-```bash
-git clone https://aur.archlinux.org/logos-desktop.git
-cd logos-desktop
-```
-
-During private rehearsal, use the reviewed rendered `PKGBUILD`, `.SRCINFO` and
-matching sdist from the candidate packet instead. The product repository's
-`packaging/arch/PKGBUILD.in` is a template, not a ready-to-run package.
-
-Use a fully upgraded Arch system. Review the complete recipe and source checksum,
-including the separate AUR dependencies `python-pythondialog` and `python-inotify`.
-Build/install those reviewed dependencies first if missing. makepkg does not fetch
-AUR dependencies automatically. The recipe retrieves the checksum-pinned release
-sdist. Private rehearsal places those same bytes in `SRCDEST`. Build as an ordinary user:
-
-```bash
-makepkg --verifysource
-makepkg -si
-/usr/bin/logos-desktop-controller-install configure-provider
-logos-desktop --dialog qt
-```
-
-Review any dependency and pacman authorization requests. The package has no hook
-that starts Wine, accepts terms or creates a prefix. See
-[Arch packaging details](PACKAGING.md#arch-source-candidate) for prerequisites,
-source retrieval and metadata checks.
-
-### Arch controller updates and removal
-
-**Update via AUR** opens an independent terminal. Review the pinned recipe, type
-`REVIEWED` only after review, and complete makepkg/pacman authorization. Follow
-the printed profile-specific restart command. Check the restarted version.
-
-AUR supplies recipes. `pacman -Syu` alone does not rebuild AUR packages. The
-configure-provider step selects the AUR recipe and metadata endpoints for this
-user. It does not install a helper or modify an existing provider. Before AUR
-publication, the source release can be available while its package is still pending.
-
-To remove the controller package:
-
-```bash
-sudo pacman -R logos-desktop
-```
-
-Review the package transaction. Your user configuration, prefixes, libraries and
-backups are separate from the controller package and remain in place.
-
 ## Adopt an existing Logos installation
 
 ### Select your launcher for shared commands
 
-For the managed wheel route, set this to your actual selected root:
+Set this to your actual managed wheel root:
 
 ```bash
 controller="$HOME/.local/lib/logos-desktop/logos-desktop"
-```
-
-For the Arch package instead:
-
-```bash
-controller=/usr/bin/logos-desktop
 ```
 
 Use `"$controller"` in the shared configuration, backup and support examples. This
@@ -207,8 +152,9 @@ activation and preserves them. Historical runtime journals targeting an earlier
 portable filename must be recovered by the controller that created them. Do not
 edit their target paths or delete the journal to bypass recovery.
 
-Arch users upgrade through the reviewed package transaction. Do not run the wheel
-migration against `/usr` or replace package-owned launchers manually.
+An earlier private package-managed controller must remain under its package owner's
+control. Do not run wheel migration against `/usr` or replace package-owned launchers
+manually. There is no supported conversion from a private Arch package in this release.
 
 ## If something fails
 
