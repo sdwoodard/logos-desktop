@@ -92,19 +92,21 @@ class CarePage(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setSpacing(20)
+        layout.setSpacing(12)
         layout.addWidget(heading("Backups & tools"))
         layout.addWidget(description("Protect your library and keep it running well."))
         self.buttons = {}
         self.grid = QGridLayout()
-        self.grid.setSpacing(20)
+        self.grid.setSpacing(12)
 
         self.backups = Card("Back up & restore", "Save a copy of your Logos data before making changes.")
         row = QHBoxLayout()
         row.addWidget(self.button("backup", "Create backup"))
         row.addWidget(self.button("restore", "Restore…"))
         self.backups.content.addLayout(row)
-        self.backups.content.addWidget(self.button("open_backup", "Open backup folder"))
+        backup_tools = QHBoxLayout()
+        backup_tools.addWidget(self.button("open_backup", "Open backup folder"))
+        self.backups.content.addLayout(backup_tools)
 
         repair = Card("Repair & shortcuts", "Recover an interrupted installation or add desktop launchers.")
         repair.content.addWidget(self.button("repair", "Repair installation…"))
@@ -127,6 +129,8 @@ class CarePage(QWidget):
         wine.content.addWidget(self.button("dependencies", "Install system dependencies…"))
         self.cards = (self.backups, repair, indexing, wine)
         for index, card in enumerate(self.cards):
+            card.content.setContentsMargins(16, 16, 16, 16)
+            card.content.setSpacing(8)
             self.grid.addWidget(card, index, 0)
         layout.addLayout(self.grid)
 
@@ -143,7 +147,7 @@ class CarePage(QWidget):
             self.buttons[key] = action
             menu.addAction(action)
         self.tools.setMenu(menu)
-        layout.addWidget(self.tools, alignment=Qt.AlignmentFlag.AlignLeft)
+        backup_tools.addWidget(self.tools)
 
         self.cleanup_toggle = QToolButton()
         self.cleanup_toggle.setText("Cleanup && removal")

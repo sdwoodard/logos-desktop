@@ -112,6 +112,46 @@ class TestQtFrontend(QtCase):
         self.assertFalse(override.exists())
         self.assertEqual(self.config.read_bytes(), self.original)
 
+    def test_home_notation_resolves_before_preview_and_browsing_without_writes(self):
+        from logos_desktop import constants
+        from logos_desktop.config import EphemeralConfiguration
+        from logos_desktop.qt.services import Services
+
+        self.stack.enter_context(patch.dict(os.environ, {"HOME": str(self.root)}))
+        self.stack.enter_context(patch.object(constants, "DATA_HOME", str(self.root / ".local/share/logos-desktop")))
+        missing = self.root / "fresh-profile.json"
+        services = Services()
+        window = self.window(services, EphemeralConfiguration.project({}, str(missing), environment={}))
+        self.pump(lambda: window.app.active is None)
+        form = window.install
+        self.assertEqual(form.destination.text(), "~/.local/share/logos-desktop/installation")
+        self.assertEqual(form.draft().destination, str(self.root / ".local/share/logos-desktop/installation"))
+
+        window.navigation.setCurrentRow(window.install_page_index)
+        form.destination.setFocus()
+        QTest.keyClick(form.destination, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClicks(form.destination, "~/My Logos")
+        window._render()
+        self.assertEqual(form.destination.text(), "~/My Logos")
+        with patch.object(services, "preview",
+                          return_value=lambda app, cancel: Result("cancelled", "Not installed")) as preview:
+            form.continue_button.click()
+            self.pump(lambda: window.app.active is None)
+            self.assertEqual(preview.call_args.args[0].destination, str(self.root / "My Logos"))
+
+        with patch.object(window.dialogs, "picker") as picker:
+            window._browse()
+            self.assertEqual(picker.call_args.args[3], str(self.root / "My Logos"))
+            picker.call_args.args[2](str(self.root / "Browsed Logos"))
+        self.assertEqual(form.destination.text(), "~/Browsed Logos")
+        self.assertEqual(form.draft().destination, str(self.root / "Browsed Logos"))
+        outside = str(self.root) + "-external/Logos"
+        self.assertEqual(form.display_location(outside), outside)
+        self.assertFalse(missing.exists())
+        self.assertFalse((self.root / ".local/share/logos-desktop/installation").exists())
+        self.assertFalse((self.root / "My Logos").exists())
+        self.assertFalse((self.root / "Browsed Logos").exists())
+
     def test_information_preview_preserves_exact_multiline_snapshot_and_copy(self):
         from PySide6.QtWidgets import QPushButton
         window = self.window()

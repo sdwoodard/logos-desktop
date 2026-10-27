@@ -1,6 +1,7 @@
 """Thin pages consuming snapshots and explicitly supplied operation services."""
 
 from dataclasses import dataclass
+from os.path import expanduser
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
@@ -187,7 +188,7 @@ class InstallPage(QWidget):
         form.addRow(product_label, self.product)
 
         self.recommended_location = str(Path(constants.DATA_HOME) / "installation")
-        self.destination = QLineEdit(snapshot.path or self.recommended_location)
+        self.destination = QLineEdit(self.display_location(snapshot.path or self.recommended_location))
         self.destination.setAccessibleName("Installation location")
         self.browse = QPushButton("&Browse…")
         self.browse.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
@@ -200,7 +201,8 @@ class InstallPage(QWidget):
         destination_label = QLabel("&Location")
         destination_label.setBuddy(self.destination)
         form.addRow(destination_label, location)
-        self.location_hint = label("Recommended location. You can choose another folder.", secondary=True)
+        self.location_hint = label("Recommended for your account. You can choose another folder. "
+                                   "~ means your home folder.", secondary=True)
         form.addRow("", self.location_hint)
 
         self.runtime = QComboBox()
@@ -231,19 +233,26 @@ class InstallPage(QWidget):
         layout.addStretch()
 
     def draft(self):
-        return InstallDraft(self.product.currentText(), self.destination.text(),
+        return InstallDraft(self.product.currentText(), expanduser(self.destination.text()),
                              self.runtime.currentText(), self.dependencies.isChecked(), self.release.text().strip())
+
+    @staticmethod
+    def display_location(path):
+        location = Path(path)
+        if location.is_relative_to(Path.home()):
+            return str(Path("~") / location.relative_to(Path.home()))
+        return str(location)
 
     def load_destination(self, snapshot):
         """Hydrate saved paths without replacing a user's typed, cleared or browsed choice."""
         if self.destination.isModified():
             return
-        selected = snapshot.path or self.recommended_location
+        selected = self.display_location(snapshot.path or self.recommended_location)
         if self.destination.text() != selected:
             self.destination.setText(selected)
         self.location_hint.setText(
-            "Selected location. You can edit it before installing." if snapshot.path
-            else "Recommended location. You can choose another folder."
+            "Selected location. You can edit it before installing. ~ means your home folder." if snapshot.path
+            else "Recommended for your account. You can choose another folder. ~ means your home folder."
         )
 
 
@@ -619,11 +628,11 @@ class MainWindow(QMainWindow):
     def _browse(self):
         def chosen(path):
             if path is not None and not self._closing:
-                self.install.destination.setText(path)
+                self.install.destination.setText(self.install.display_location(path))
                 self.install.destination.setModified(True)
                 self.install.destination.setFocus()
         self.dialogs.picker("Choose installation location", PROMPT_OPTION_DIRECTORY, chosen,
-                            self.install.destination.text())
+                             expanduser(self.install.destination.text()))
 
     def _cancel(self):
         if self.app.active is not None:
