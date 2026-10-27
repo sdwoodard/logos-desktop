@@ -11,6 +11,7 @@ without accounts, tokens, private paths or library content. Capture provenance
 and validation records remain with the maintainer. A preview image is not an
 endorsement by the managed product's vendor.
 
-`home-light.png` and `home-dark.png` show the application with a clean demonstration
-profile. Capture details remain in private validation records. The local badges
+`home-light.png`, `home-dark.png`, `tools-light.png` and `tools-dark.png` show the
+application with a clean demonstration profile. The Tools views include More tools
+inside the backup card. Capture details remain in private validation records. The local badges
 describe platform requirements and licensing without a third-party tracking service.

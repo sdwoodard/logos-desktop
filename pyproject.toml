@@ -70,6 +70,7 @@ logos_desktop = [
 ]
 "share/doc/logos-desktop/docs/media" = [
     "docs/media/home-light.png", "docs/media/home-dark.png", "docs/media/social-preview.svg",
+    "docs/media/tools-light.png", "docs/media/tools-dark.png",
     "docs/media/linux-badge.svg", "docs/media/python-badge.svg", "docs/media/license-badge.svg",
 ]
 "share/doc/logos-desktop/logos_desktop/img" = [

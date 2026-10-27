@@ -17,6 +17,18 @@ A saved relative backup path resolves against the saved installation directory.
 Qt Settings accepts an existing absolute folder. Folder-opening actions report a
 missing location instead of creating it.
 
+<details>
+<summary>Find the backup controls</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/tools-dark.png">
+  <img src="media/tools-light.png" alt="Backups and tools, with backup controls and More tools grouped together" width="960">
+</picture>
+
+Backup and restore actions become available after selecting an installed profile.
+
+</details>
+
 ## Command-line use
 
 First [select your controller launcher](INSTALL.md#select-your-launcher-for-shared-commands).
