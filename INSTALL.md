@@ -8,9 +8,9 @@ with the same name or run global pip against system Python.
 
 ## Supported installation route
 
-| Environment | Route | Controller updates |
-| --- | --- | --- |
-| CachyOS x86_64 with Python 3.12+ | Verified wheel bootstrap | Update environment, in a dedicated user-owned root |
+- **Environment:** CachyOS x86_64 with Python 3.12 or newer.
+- **Install:** verified wheel bootstrap into a dedicated user-owned root.
+- **Update:** choose **Update environment** in the installed controller.
 
 There is no AUR package for this release. Arch packaging is deferred to a separate
 future effort. It is not required to install or update the managed wheel environment.
