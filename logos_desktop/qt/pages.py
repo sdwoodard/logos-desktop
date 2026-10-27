@@ -146,7 +146,7 @@ class CarePage(QWidget):
         layout.addWidget(self.tools, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.cleanup_toggle = QToolButton()
-        self.cleanup_toggle.setText("Cleanup & removal")
+        self.cleanup_toggle.setText("Cleanup && removal")
         self.cleanup_toggle.setCheckable(True)
         self.cleanup_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.cleanup_toggle.setArrowType(Qt.ArrowType.RightArrow)
