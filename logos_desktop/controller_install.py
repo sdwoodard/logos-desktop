@@ -106,8 +106,14 @@ def _root(path, *, create=False):
     if (path == path.parent or path != path.resolve(strict=False)
             or not path.is_relative_to(Path.home().resolve())):
         raise InstallError("The installation root must be inside your home directory")
-    for parent in (path.parent, *path.parent.parents):
-        info = parent.lstat()
+    for parent in reversed((path.parent, *path.parent.parents)):
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            if not create:
+                raise
+            parent.mkdir(mode=0o700)
+            info = parent.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
                 or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
             raise InstallError(f"Unsafe installation parent: {parent}")

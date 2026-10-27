@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <strong><a href="docs/INSTALL.md">Get started</a></strong> ·
+  <strong><a href="#install">Install</a></strong> ·
   <a href="docs/README.md">User guide</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
@@ -21,6 +21,36 @@
 LogosDesktop brings setup, updates, backups and everyday maintenance into a Qt
 interface. It runs Logos through Wine and keeps your controller and library separate.
 This is an independent community project, not affiliated with or endorsed by Logos.
+
+## Install
+
+**Linux x86_64 · Python 3.12+ · curl 8.4+**
+
+Copy this into your terminal to install the latest stable release:
+
+```bash
+bash -o pipefail -c '
+  curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 262144 \
+    https://github.com/sdwoodard/logos-desktop/releases/latest/download/install-wheel.py |
+    python3 - --latest
+'
+```
+
+The installer creates a dedicated environment in `~/.local/lib/logos-desktop` and
+configures updates. It runs bootstrap code from this project's GitHub release.
+The command requires a published release. For unreleased builds, use the source route.
+
+**[Download first](docs/INSTALL.md#download-first)** ·
+**[Install from source](CONTRIBUTING.md#source-setup)** ·
+**[Requirements and options](docs/INSTALL.md)**
+
+Open the app:
+
+```bash
+"$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
+```
+
+Choose **Set up Logos** on Home. Your Logos account and content licenses are still required.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/home-dark.png">

@@ -66,13 +66,12 @@ important behavior rather than every touched line or UI label.
 Use clear names, logical whitespace and direct control flow. Explain consequential
 constraints in comments. New abstractions need a concrete clarity, reuse or lifetime
 benefit. Authored comments, docstrings and human-facing Markdown must not contain
-em dashes, semicolons or generic AI phrasing. Preserve required license text and
+em dashes, semicolons or canned phrasing. Preserve required license text and
 literal source evidence.
 
 Use repository issues and pull requests for feedback and changes. Include the triggering
 condition and validation limits. Keep credentials and support archives out of
-commits. Disclose AI assistance when relevant and preserve upstream attribution.
-Retain [LICENSE](LICENSE) and the [acknowledgments and asset notices](docs/ACKNOWLEDGMENTS.md).
+commits. Retain [LICENSE](LICENSE) and the [required asset notices](docs/NOTICES.md).
 
 The [architecture map](docs/ARCHITECTURE.md) describes the backend boundaries.
 Domain operations use the shared App interface rather than hard-coding a frontend.

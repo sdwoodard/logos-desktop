@@ -17,6 +17,6 @@
 - [Architecture](ARCHITECTURE.md)
 - [Packaging](PACKAGING.md)
 - [Project direction](ROADMAP.md)
-- [Acknowledgments and notices](ACKNOWLEDGMENTS.md)
+- [License notices](NOTICES.md)
 
 [Back to LogosDesktop](../README.md)

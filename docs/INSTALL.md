@@ -1,10 +1,57 @@
 # Install LogosDesktop
 
-Use the verified wheel installer from
-[Releases](https://github.com/sdwoodard/logos-desktop/releases). It keeps the
-controller in its own Python environment, separate from system Python and your
-Logos library. If no release is listed yet, the [contributor guide](../CONTRIBUTING.md)
-explains how to work from source.
+The installer keeps LogosDesktop in its own Python environment, separate from
+system Python and your Logos library. Choose quick installation, download the
+installer first, or use an explicitly selected wheel.
+
+## Quick install
+
+Use Linux x86_64 with Python 3.12 or newer, curl 8.4 or newer and Bash. Python must include
+venv support. Some distributions provide it in a separate python3-venv package.
+Run as your ordinary user, without sudo.
+
+```bash
+bash -o pipefail -c '
+  curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 262144 \
+    https://github.com/sdwoodard/logos-desktop/releases/latest/download/install-wheel.py |
+    python3 - --latest
+'
+```
+
+This executes bootstrap code from this project's GitHub release. It reads the
+stable release metadata, verifies the wheel's recorded size and SHA-256 before
+loading its installation code, and configures controller updates automatically.
+These checks trust the release channel. They are not an independent publisher signature.
+Pipefail reports downloader failures but does not authenticate downloaded code.
+
+The commands require a [published release](https://github.com/sdwoodard/logos-desktop/releases).
+If none is listed yet, use the [source setup](../CONTRIBUTING.md#source-setup).
+
+Open LogosDesktop:
+
+```bash
+"$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
+```
+
+The default controller root is ~/.local/lib/logos-desktop. To choose another fresh
+location inside your home folder, use the download-first command below with
+--root /absolute/home/path/controller.
+An existing root is refused. Update an installed controller from Home instead.
+
+## Download first
+
+Download install-wheel.py and SHA256SUMS from the chosen release into a new directory.
+Compare the bootstrap's SHA-256 with the release notes before running it. You can
+also inspect the script first. A checksum downloaded from the same channel detects
+changes but is not independent authentication.
+
+```bash
+sha256sum install-wheel.py
+python3 ./install-wheel.py --latest
+```
+
+This selects the latest stable wheel. To pin an exact version or use an already
+downloaded wheel, follow [the manual wheel route](#managed-wheel-environment).
 
 ## Supported installation route
 
@@ -72,7 +119,8 @@ The independent terminal asks for `UPDATE`. It prepares a sibling environment,
 restarts the selected profile and requires readiness before reporting success.
 Previous environments are retained for recovery.
 
-The configure-provider step installs the scoped GitHub stable-release provider.
+Quick installation configures the scoped GitHub stable-release provider automatically.
+The explicit wheel route uses the configure-provider step shown above.
 It refuses to overwrite an existing provider, including a custom private provider.
 Keep existing configuration unless you intentionally review and remove it before
 running setup again. See [provider details](PACKAGING.md#managed-wheel-installation).
@@ -131,3 +179,9 @@ to force another update. Read [support](SUPPORT.md) and the
 [owner recovery contract](PACKAGING.md#managed-wheel-installation).
 An unknown startup outcome needs inspection before rollback because a successor
 may still be running. Controller migration does not repair a damaged Wine prefix.
+
+If quick installation reports that the controller was installed but update setup
+failed, keep that environment and run the retry command printed by the installer.
+An existing custom provider is preserved rather than overwritten. If setup failed
+before a launcher was created, keep the error and consult support before removing
+files from the chosen root.

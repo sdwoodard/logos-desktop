@@ -48,6 +48,26 @@ class ControllerInstallTests(unittest.TestCase):
         self.identity = install.Identity("venv", "1.0.0", "1.0.0", self.root,
                                          self.root / "logos-desktop", self.root / "provider.json")
 
+    def test_bootstrap_creates_private_parents_only_beneath_safe_home_paths(self):
+        target = self.home / ".local/lib/logos-desktop"
+        with self.assertRaises(FileNotFoundError):
+            install._root(target)
+        self.assertFalse((self.home / ".local").exists())
+        self.assertEqual(install._root(target, create=True), target)
+        for path in (self.home / ".local", self.home / ".local/lib", target):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+
+        unsafe = self.home / "unsafe"
+        unsafe.mkdir()
+        unsafe.chmod(0o777)
+        alias = self.home / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        for path in (unsafe / "new/controller", alias / "new/controller", self.home.parent / "outside/controller"):
+            with self.subTest(path=path), self.assertRaises(install.InstallError):
+                install._root(path, create=True)
+        self.assertFalse((unsafe / "new").exists())
+        self.assertFalse((self.root / "new").exists())
+
     def test_public_provider_setup_binds_owner_and_preserves_existing_configuration(self):
         self.assertEqual(install.configure_provider(self.identity).status, "configured")
         data = install._provider(self.identity)

@@ -69,6 +69,12 @@ and update acceptance must pass before end-user instructions are offered.
 
 ### Managed wheel installation
 
+For the latest stable release, the [quick installer](INSTALL.md#quick-install)
+uses --latest to select the canonical metadata, verify the wheel and configure
+updates. It defaults to ~/.local/lib/logos-desktop. Missing safe parent directories
+inside the user's home are created privately. Existing controller roots are refused.
+
+The explicit artifact route below remains available for pinned and offline wheels.
 Use the bootstrap script from the same reviewed source revision as the wheel.
 Provide the artifact record's exact SHA-256 and byte count. Do not copy placeholder
 values literally. Create the parent first, then choose a fresh root beneath it.
@@ -88,7 +94,8 @@ and publishes an owned stable launcher. Use that launcher for desktop/profile li
 not the interpreter inside one version directory. No system Python files change.
 
 Update requires an owned mode-0600 `provider.json` inside the private installation
-root. Run the installed helper as part of installation:
+root. Quick installation configures this automatically. For an explicit wheel,
+run the installed helper as part of installation:
 
 ```bash
 "$HOME/.local/lib/logos-desktop/current/bin/logos-desktop-controller-install" configure-provider
@@ -147,7 +154,7 @@ separate from controller files.
 | --- | --- |
 | Controller source | Imported MIT source history. Preserve [LICENSE](../LICENSE), including DanielDevBR's notice and contributor credit |
 | Book Open Text project icon | Lucide revision and adaptation recorded in [ATTRIBUTION.md](../logos_desktop/img/ATTRIBUTION.md). Preserve the [ISC notice](../logos_desktop/img/lucide-LICENSE.txt) |
-| MSI transform | John Goodman contributed `LogosStubFailOK.mst` under the upstream MIT license on 2025-01-23 in commit `eb6f604e7366f6ade6073837c7446fe81fddd85c`. It changes installer action tables and contains vendor summary metadata, with no listed installer or executable payload. Preserve upstream MIT attribution. This does not claim vendor endorsement |
+| MSI transform | `LogosStubFailOK.mst` is supplied under the upstream MIT license, introduced on 2025-01-23 in commit `eb6f604e7366f6ade6073837c7446fe81fddd85c`. It changes installer action tables and contains vendor summary metadata, with no listed installer or executable payload. Preserve the applicable MIT notices. This does not claim vendor endorsement |
 | Historical artwork | Nate Marti's 2024-10-21 contribution remains in Git history at `919bbec`. Current application and desktop entries use Book Open Text |
 | Vendor product graphics | Removed from the current distribution because their redistribution basis was unresolved. Product names remain text. Home uses the attributed Book Open Text project artwork, as approved for this packaging change |
 | Desktop metadata | MIT, with the retained [packaging notice](../packaging/LICENSE) |

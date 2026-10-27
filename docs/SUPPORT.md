@@ -4,9 +4,8 @@ Collect diagnostics locally, review the preview and share an archive only
 with the intended recipient. Creating an archive does not upload it.
 
 See [configuration and recovery](CONFIGURATION.md), [backups](BACKUPS.md) and the
-[architecture map](ARCHITECTURE.md) for related behavior. Upstream provenance and
-license credit remain in [acknowledgments](ACKNOWLEDGMENTS.md),
-[CONTRIBUTING](../CONTRIBUTING.md) and [LICENSE](../LICENSE).
+[architecture map](ARCHITECTURE.md) for related behavior. Redistribution requirements
+are described in [license notices](NOTICES.md) and [LICENSE](../LICENSE).
 
 ## Start with the symptom
 
