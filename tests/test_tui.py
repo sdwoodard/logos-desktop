@@ -57,7 +57,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
         entered, release = threading.Event(), threading.Event()
         published = asyncio.Event()
         initial = controller_install.Identity("unsupported", "1.0.0", "", message="Earlier inspection")
-        current = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+        current = controller_install.Identity("venv", "1.0.0", "1.0.0")
 
         def identify():
             if not entered.is_set():
@@ -87,7 +87,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(domain.ui.screen, prompt)
                     self.assertIs(domain._controller_identity, current)
                     self.assertEqual(domain._controller_result.status, "available")
-                    self.assertIn("Update via AUR", domain.set_tui_menu_options())
+                    self.assertIn("Update environment", domain.set_tui_menu_options())
                     await pilot.press("escape")
                     await self.finished(pilot, domain)
                 finally:
@@ -155,7 +155,9 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
 
         entered, finish, cancelled = threading.Event(), threading.Event(), threading.Event()
         self.addCleanup(finish.set)
-        identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+        controller = self.root / "controller"
+        controller.mkdir(mode=0o700)
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0", root=controller)
 
         def provider(owner):
             entered.set()
@@ -164,6 +166,7 @@ class TestTextualOperations(unittest.IsolatedAsyncioTestCase):
             return controller_install.Result("available", "Private provider has B")
 
         with (patch.object(constants, "COORDINATION_DIR", self.root / "coordination"),
+              patch.object(Path, "home", return_value=self.root),
               patch.object(instance, "check_legacy"),
               patch.object(controller_install, "identify", return_value=identity),
               patch.object(controller_install, "check", side_effect=provider),

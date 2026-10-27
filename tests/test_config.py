@@ -99,7 +99,7 @@ print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
             self.assertEqual(json.loads(output), ["dev", "beta", False, True, self.document["WINEPREFIX"], ""])
 
     def test_modern_aliases_win_and_changed_aliases_cannot_resurrect_old_values(self):
-        document = dict(self.document, FLPRODUCT="Verbum", INSTALLDIR=str(self.root / "wrong"), WINE_EXE="wrong")
+        document = dict(self.document, FLPRODUCT="OtherProduct", INSTALLDIR=str(self.root / "wrong"), WINE_EXE="wrong")
         self.path.write_text(json.dumps(document))
         conf = configuration(self.path)
         self.assertEqual(conf.faithlife_product, "Logos")
@@ -127,7 +127,7 @@ print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
                 configuration(self.path)
             self.assertEqual(self.path.read_bytes(), original)
 
-    def test_legacy_discovery_is_pure_then_migrates_without_moving_source(self):
+    def test_explicit_legacy_projection_migrates_without_moving_source(self):
         legacy = self.root / "old.conf"
         original = (
             f"export FLPRODUCT='Logos'\nINSTALLDIR='{self.install}'\nTARGETVERSION=10\n"
@@ -135,10 +135,11 @@ print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
         ).encode()
         legacy.write_bytes(original)
         destination = self.root / "new.json"
-        with patch.multiple(constants, DEFAULT_CONFIG_PATH=str(destination), LEGACY_CONFIG_FILES=[str(legacy)]):
+        with patch.object(constants, "DEFAULT_CONFIG_PATH", str(destination)):
             with patch.dict(os.environ):
                 os.environ.pop("CONFIG_FILE", None)
-                overrides = EphemeralConfiguration.load()
+                document, _ = config_store.read_document(legacy)
+                overrides = EphemeralConfiguration.project(document, str(legacy), destination=str(destination))
                 app = SimpleNamespace(_config_updated_event=threading.Event(), status=Mock())
                 conf = Config(overrides, app)
                 self.assertEqual(conf.config_file_path, str(legacy))
@@ -176,10 +177,10 @@ print(json.dumps([raw.app_release_channel,raw.faithlife_product_release_channel,
         conf = configuration(source)
         destination = self.root / "concurrent.json"
         conf._overrides.config_destination = str(destination)
-        destination.write_text('{"faithlife_product":"Verbum"}')
+        destination.write_text('{"faithlife_product":"OtherProduct"}')
         with self.assertRaisesRegex(config_store.ConfigurationError, "changed"):
             conf._change(curses_color_scheme="Dark")
-        self.assertEqual(json.loads(destination.read_bytes()), {"faithlife_product": "Verbum"})
+        self.assertEqual(json.loads(destination.read_bytes()), {"faithlife_product": "OtherProduct"})
         self.assertEqual(source.read_text(), "FLPRODUCT=Logos\n")
 
     def test_stale_thread_and_process_writers_preserve_independent_fields(self):
@@ -704,7 +705,7 @@ main.main()
         self.assertIn("M07 file handler marker", log.read_text())
         self.assertIn("M07 debug marker", log.read_text())
 
-    def test_first_runtime_switch_preserves_discovered_source_and_custom_conf_original(self):
+    def test_first_runtime_switch_preserves_selected_source_and_custom_conf_original(self):
         source = self.root / "old.conf"
         source.write_text(
             f"FLPRODUCT=Logos\nTARGETVERSION=10\nINSTALLDIR='{self.install}'\nWINE_EXE=data/bin/old.AppImage\n"
@@ -716,10 +717,11 @@ main.main()
             candidate, self.install / "data/bin", artifacts.ArtifactSpec("local:fixture", candidate.name, "appimage"),
         )
         destination = self.root / "migrated.json"
-        with patch.multiple(constants, DEFAULT_CONFIG_PATH=str(destination), LEGACY_CONFIG_FILES=[str(source)]):
+        with patch.object(constants, "DEFAULT_CONFIG_PATH", str(destination)):
             with patch.dict(os.environ):
                 os.environ.pop("CONFIG_FILE", None)
-                overrides = EphemeralConfiguration.load()
+                document, _ = config_store.read_document(source)
+                overrides = EphemeralConfiguration.project(document, str(source), destination=str(destination))
                 app = SimpleNamespace(_config_updated_event=threading.Event())
                 app.conf = Config(overrides, app)
                 with patch.object(wine, "require_compatible"):
@@ -742,7 +744,7 @@ main.main()
         conf = configuration(source)
         destination = self.root / "new.json"
         conf._overrides.config_destination = str(destination)
-        destination.write_text('{"faithlife_product":"Verbum"}')
+        destination.write_text('{"faithlife_product":"OtherProduct"}')
         candidate = self.root / "candidate.AppImage"
         candidate.write_bytes(appimage())
         accepted = artifacts.import_local(
@@ -883,7 +885,7 @@ main.main()
         second = self.root / "second"
         self.path.write_text(json.dumps(dict(
             self.document, install_dir=str(second), WINEPREFIX="prefix", APPDIR_BINDIR="tools",
-            WINESERVER_EXE="tools/server", faithlife_product="Verbum",
+            WINESERVER_EXE="tools/server", faithlife_product="Logos",
         )))
         app = SimpleNamespace(_config_updated_event=threading.Event())
         conf = Config(overrides, app)
@@ -891,7 +893,7 @@ main.main()
         self.assertEqual(conf.wine_prefix, str(second / "prefix"))
         self.assertEqual(conf.installer_binary_dir, str(second / "tools"))
         self.assertEqual(conf.wineserver_binary, str(second / "tools/server"))
-        self.assertEqual(conf.faithlife_product, "Verbum")
+        self.assertEqual(conf.faithlife_product, "Logos")
 
     def test_reload_waits_for_ordinary_save_and_publishes_the_committed_snapshot(self):
         conf = configuration(self.path)

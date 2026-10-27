@@ -223,7 +223,7 @@ class MsiExpectation:
     release: str
 
     def validate(self):
-        require(self.product in ("Logos", "Verbum"), "Unsupported MSI product role")
+        require(self.product == "Logos", "Unsupported MSI product role")
         version(self.release)
 
 

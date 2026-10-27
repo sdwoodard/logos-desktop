@@ -105,11 +105,15 @@ Stable product update state keeps stale, unchecked, failed, empty and unknown
 installed-version results distinct from current or available. Update admission
 refreshes installed metadata and validates effective configuration against the
 checked newer stable target. Standalone replacement remains disabled. Explicitly
-configured providers use the wheel-environment transaction for launch. The retained
-Arch owner adapter protects earlier private package installations, with AUR deferred.
+configured providers use the wheel-environment transaction for launch. System-package
+ownership is detected and refused rather than overwritten by the wheel installer.
 Provider setup creates scoped endpoint configuration without overwriting an
 existing provider or fetching a release. Cancellation propagates through long reads, hashes and scans, while
 safe commit boundaries preserve completed outcomes and pending recovery work.
+
+User integration creates the stable command, generic menu entry and marked shell
+PATH block. It validates existing content and permissions before journaled publication.
+Interrupted setup retains recoverable intent and preserves conflicting later edits.
 
 Normal controller close cancels prompts and observations, waits for owned mutations
 to settle and detaches Logos. Explicit Stop validates selected process identities.

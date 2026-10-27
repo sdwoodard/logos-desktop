@@ -19,7 +19,7 @@ description = "Independent community installer and manager for Logos on Linux th
 dynamic = ["version"]
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT AND ISC"
-license-files = ["LICENSE", "logos_desktop/img/lucide-LICENSE.txt", "packaging/LICENSE"]
+license-files = ["LICENSE", "logos_desktop/img/lucide-LICENSE.txt", "licenses/LogosDesktop-MIT.txt"]
 requires-python = ">=3.12"
 classifiers = [
     "Operating System :: POSIX :: Linux",
@@ -64,9 +64,9 @@ logos_desktop = [
     "README.md", "CONTRIBUTING.md", "CHANGELOG.md", "LICENSE",
 ]
 "share/doc/logos-desktop/docs" = [
-    "docs/README.md", "docs/INSTALL.md", "docs/PACKAGING.md", "docs/CONFIGURATION.md",
+    "docs/README.md", "docs/INSTALL.md", "docs/CONFIGURATION.md",
     "docs/SUPPORT.md", "docs/BACKUPS.md", "docs/COMPATIBILITY.md", "docs/ARCHITECTURE.md",
-    "docs/ROADMAP.md", "docs/NOTICES.md",
+    "docs/NOTICES.md",
 ]
 "share/doc/logos-desktop/docs/media" = [
     "docs/media/home-light.png", "docs/media/home-dark.png", "docs/media/social-preview.svg",
@@ -76,8 +76,8 @@ logos_desktop = [
 "share/doc/logos-desktop/logos_desktop/img" = [
     "logos_desktop/img/logos-desktop.svg", "logos_desktop/img/ATTRIBUTION.md", "logos_desktop/img/lucide-LICENSE.txt",
 ]
-"share/doc/logos-desktop/packaging" = ["packaging/logos-desktop.desktop", "packaging/LICENSE"]
-"share/doc/logos-desktop/scripts" = ["scripts/install-wheel.py"]
+"share/doc/logos-desktop/licenses" = ["licenses/LogosDesktop-MIT.txt"]
+"share/doc/logos-desktop/scripts" = ["scripts/install.sh", "scripts/install-wheel.py"]
 
 [tool.ruff]
 line-length = 120

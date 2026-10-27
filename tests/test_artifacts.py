@@ -455,9 +455,8 @@ class TestArtifacts(unittest.TestCase):
         with self.assertRaises(artifacts.ArtifactError):
             artifacts.validate_format(path, "msi")
         self.validate_product(path)
-        # This exercises the role matcher, not a claim about vendor Verbum branding.
-        path = self.product_path(product="Verbum", directory="Verbum", product_name="Verbum fixture")
-        self.validate_product(path, product="Verbum")
+        with self.assertRaises(artifacts.ArtifactError):
+            self.validate_product(path, product="OtherProduct")
 
     def test_product_expectations_strengthen_x64_without_changing_generic_msi_contract(self):
         path = self.product_path(architecture="x64")
@@ -471,7 +470,7 @@ class TestArtifacts(unittest.TestCase):
 
     def test_product_identity_version_and_primary_mapping_mismatches_fail(self):
         cases = (
-            {"product_name": "LogosUnrelated"}, {"product_name": "Verbum fixture"},
+            {"product_name": "LogosUnrelated"}, {"product_name": "OtherProduct fixture"},
             {"release": "54.3.0.6"}, {"release": "54.3.5"},
             {"product_version": "not-a-version"}, {"product_version": "256.3.5"},
             {"directory": "Pending"}, {"directory": "../Logos"}, {"duplicate": True},

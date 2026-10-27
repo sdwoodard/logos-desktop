@@ -1,187 +1,136 @@
 # Install LogosDesktop
 
-The installer keeps LogosDesktop in its own Python environment, separate from
-system Python and your Logos library. Choose quick installation, download the
-installer first, or use an explicitly selected wheel.
-
 ## Quick install
 
-Use Linux x86_64 with Python 3.12 or newer, curl 8.4 or newer and Bash. Python must include
-venv support. Some distributions provide it in a separate python3-venv package.
-Run as your ordinary user, without sudo.
-
 ```bash
-bash -o pipefail -c '
-  curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 262144 \
-    https://github.com/sdwoodard/logos-desktop/releases/latest/download/install-wheel.py |
-    python3 - --latest
-'
+curl -fsSL https://github.com/sdwoodard/logos-desktop/releases/latest/download/install.sh | bash
 ```
 
-This executes bootstrap code from this project's GitHub release. It reads the
-stable release metadata, verifies the wheel's recorded size and SHA-256 before
-loading its installation code, and configures controller updates automatically.
-These checks trust the release channel. They are not an independent publisher signature.
-Pipefail reports downloader failures but does not authenticate downloaded code.
+Run `logos-desktop`, or search for **LogosDesktop** in your application menu.
+Open a new terminal if the installer adds the command to PATH.
 
-The commands require a [published release](https://github.com/sdwoodard/logos-desktop/releases).
-If none is listed yet, use the [source setup](../CONTRIBUTING.md#source-setup).
+### Dependencies
 
-Open LogosDesktop:
+Use Linux x86_64 with Python 3.12 or newer, venv support, Bash and curl 8.4 or newer.
+Some distributions provide venv in a separate python3-venv package. Install as your
+ordinary user, without sudo. The script reports missing prerequisites rather than
+changing system packages itself.
 
-```bash
-"$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
-```
+The command requires a [published release](https://github.com/sdwoodard/logos-desktop/releases).
+For development before a release is available, use [source setup](../CONTRIBUTING.md#source-setup).
 
-The default controller root is ~/.local/lib/logos-desktop. To choose another fresh
-location inside your home folder, use the download-first command below with
---root /absolute/home/path/controller.
-An existing root is refused. Update an installed controller from Home instead.
+The shell script downloads the Python bootstrap into a private temporary directory.
+It checks download errors before executing that file. The bootstrap selects the
+stable release, verifies the wheel's recorded size and SHA-256, installs a dedicated
+environment and configures updates and launchers. This trusts executable code from
+the project's release channel. Checksums from that channel are not an independent
+publisher signature. The outer curl-to-Bash pipeline does not provide such a guarantee.
+
+## Installed locations and PATH
+
+| Item | Default location |
+| --- | --- |
+| Controller environment | `~/.local/lib/logos-desktop` |
+| Command | `~/.local/bin/logos-desktop` |
+| Application-menu entry | `~/.local/share/applications/logos-desktop.desktop` |
+| Logos installation proposal | `~/.local/share/logos-desktop/installation` |
+
+XDG data settings are honored for the menu entry and Logos data. The menu entry
+uses an absolute launcher, so it does not depend on your shell's PATH.
+
+When needed, setup adds a marked PATH block for Bash, Zsh or Fish. Existing shell
+content and permissions are preserved, and rerunning setup does not duplicate the
+block. Bash uses .bashrc and its existing login-file choice. Zsh honors an absolute
+ZDOTDIR inside your home. Fish uses its user conf.d directory. A child installer
+cannot change the environment of the terminal that launched it.
+
+Use `--no-path` if you manage your own PATH. Setup preserves conflicting commands,
+desktop files, symlinks and edited managed blocks rather than replacing them.
 
 ## Download first
 
-Download install-wheel.py and SHA256SUMS from the chosen release into a new directory.
-Compare the bootstrap's SHA-256 with the release notes before running it. You can
-also inspect the script first. A checksum downloaded from the same channel detects
-changes but is not independent authentication.
+Download install.sh and SHA256SUMS from the chosen release into a new directory.
+Compare the script's hash with the release notes and inspect it before running:
 
 ```bash
-sha256sum install-wheel.py
-python3 ./install-wheel.py --latest
+sha256sum install.sh
+bash ./install.sh
 ```
 
-This selects the latest stable wheel. To pin an exact version or use an already
-downloaded wheel, follow [the manual wheel route](#managed-wheel-environment).
-
-## Supported installation route
-
-- **Environment:** Linux x86_64 with Python 3.12 or newer.
-- **Install:** verified wheel bootstrap into a dedicated user-owned root.
-- **Update:** choose **Update environment** in the installed controller.
-
-There is no AUR package for this release. Arch packaging is deferred to a separate
-future effort. It is not required to install or update the managed wheel environment.
-
-Read [compatibility](COMPATIBILITY.md) for Wine, graphics and feature limits.
-Distribution and desktop integration can vary. The wheel's Python tag does not
-establish support for other architectures or operating systems.
-
-You also need working desktop libraries, a compatible Wine runtime, space for the
-installer/library and a separately chosen backup destination. The application
-checks installation prerequisites before mutation. Install the controller as an
-ordinary user. Accept vendor terms and enter credentials yourself.
-
-Graphical controller updates use Konsole or GNOME Terminal, or xterm when an X11
-display is available. Without a usable terminal, the application keeps the
-controller open and provides the exact helper command for your terminal.
-
-## Managed wheel environment
-
-Download these assets from the chosen release into a new directory:
-
-- `install-wheel.py`
-- `logos_desktop-VERSION-py3-none-any.whl`
-- `SHA256SUMS`
-- `controller-release.json`
-
-The release notes list the exact sizes and hashes. Verify the bootstrap and wheel
-against that record before running either. A checksum file from the same download
-channel detects changes but is not an independent publisher signature.
+For a different fresh controller root inside your home, or to keep shell files unchanged:
 
 ```bash
-sha256sum install-wheel.py logos_desktop-VERSION-py3-none-any.whl
-wc -c < logos_desktop-VERSION-py3-none-any.whl
+bash ./install.sh --root "$HOME/apps/logos-desktop" --no-path
 ```
 
-Replace VERSION, VERIFIED_SHA256 and VERIFIED_BYTES below with the chosen release's
-values. Its release notes provide a filled-in command. A hash calculated only from
-an untrusted download does not authenticate that download.
+### Managed wheel environment
+
+For an exact downloaded version, obtain install-wheel.py and the wheel from the same
+release. Verify both against its recorded hashes. Replace VERSION, VERIFIED_SHA256
+and VERIFIED_BYTES with that release's values. The release notes provide a filled-in
+command.
 
 ```bash
-mkdir -p "$HOME/.local/lib"
 python3 ./install-wheel.py \
   --root "$HOME/.local/lib/logos-desktop" \
   --wheel ./logos_desktop-VERSION-py3-none-any.whl \
   --version VERSION --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES
-"$HOME/.local/lib/logos-desktop/current/bin/logos-desktop-controller-install" configure-provider
-"$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
+"$HOME/.local/lib/logos-desktop/current/bin/logos-desktop-controller-install" setup
 ```
 
-The bootstrap verifies the wheel before loading its implementation. It installs
-the GUI extra and dependencies in a versioned environment. System Python remains
-package-managed. Always use the stable launcher shown above, including in custom
-shortcuts. Do not launch an interpreter inside an old version directory.
+The verified wheel supplies the installation implementation. It creates a versioned
+environment, checks dependencies/resources and publishes a stable launcher. System
+Python remains package-managed. The setup step adds the provider, command and menu entry.
 
 ### Wheel controller updates
 
-On **Home**, choose **Check controller updates**, then **Update environment** when available.
-The independent terminal asks for `UPDATE`. It prepares a sibling environment,
-restarts the selected profile and requires readiness before reporting success.
-Previous environments are retained for recovery.
+On Home, choose **Check controller updates**, then **Update environment**.
+The independent terminal asks for UPDATE, prepares a sibling environment and restarts
+the selected profile. Wait for readiness before treating the update as complete.
+Previous environments are retained for recovery. A changed or unavailable provider
+is reported separately from a current installation.
 
-Quick installation configures the scoped GitHub stable-release provider automatically.
-The explicit wheel route uses the configure-provider step shown above.
-It refuses to overwrite an existing provider, including a custom private provider.
-Keep existing configuration unless you intentionally review and remove it before
-running setup again. See [provider details](PACKAGING.md#managed-wheel-installation).
-A generic pip, pipx or contributor install is not automatically managed.
-
-### Remove the wheel controller
-
-Close the controller and its update helpers. Verify the exact managed root, then
-remove only that root using your file manager. It is normally
-`~/.local/lib/logos-desktop`. Keep your separate configuration, Wine prefix,
-library and backups. Remove profile-specific desktop entries only after checking
-that they belong to this controller. Do not delete broad XDG directories.
+Setup preserves an existing scoped provider. Do not remove a custom provider unless
+you intend to replace it. Generic pip or contributor environments do not establish
+managed installation ownership.
 
 ## Set up Logos
 
-Choose **Set up Logos** on Home. The installation form suggests
-`~/.local/share/logos-desktop/installation`, or the corresponding location under
-your XDG data directory. You can edit the path or browse to another folder. Nothing
-is installed or saved just because the recommendation is displayed.
-
-Review the location and runtime before continuing. Accept the vendor terms and
-sign in with your own account when prompted. An existing library from another
-controller is not automatically imported or reconstructed.
+Choose **Set up Logos** on Home. The form suggests the location above or your XDG
+data location. You can edit it before confirmation. Displaying a recommendation
+does not create an installation. Review the Wine runtime and location, accept vendor
+terms and sign in with your own account. Your content licenses are still required.
+See [compatibility](COMPATIBILITY.md) and keep a separate backup destination.
 
 ## Use a saved profile
 
 ### Select your launcher for shared commands
 
-Set this to your actual managed wheel root:
+The command installed by setup can be used directly:
 
 ```bash
-controller="$HOME/.local/lib/logos-desktop/logos-desktop"
-```
-
-Use `"$controller"` in the shared configuration, backup and support examples. This
-avoids accidentally choosing another installation on PATH. Set it again in each
-new terminal. Contributor checkouts use their own `.venv/bin/logos-desktop`.
-
-To reopen an installation already configured in LogosDesktop, use **Settings →
-Advanced installation settings → Choose installation profile**, or select its
-configuration when starting the controller:
-
-```bash
+controller=logos-desktop
 "$controller" -c /absolute/path/profile.json --dialog qt
 ```
 
-This selects a profile without importing a separate installation or moving its data.
-See [configuration](CONFIGURATION.md) for path and ownership rules. Keep recovery
-journals from earlier development builds. If an old migration is unfinished, use
-the controller that created it or request help before changing its files.
+For multiple controller environments, set `controller` to the intended root's
+absolute stable launcher instead. Choose an existing profile in Settings when needed.
+Selection does not import another installation or move its data. See [configuration](CONFIGURATION.md).
 
-## If something fails
+## Setup and recovery
 
-Keep the error text and previous environment. Do not delete an operation receipt
-to force another update. Read [support](SUPPORT.md) and the
-[owner recovery contract](PACKAGING.md#managed-wheel-installation).
-An unknown startup outcome needs inspection before rollback because a successor
-may still be running. Controller migration does not repair a damaged Wine prefix.
+An existing controller root is not silently overwritten. Use Home for updates.
+If installation succeeded but launcher setup failed, retain the environment and
+run the retry command printed by the installer. You can add --no-path when shell
+files are managed elsewhere. Close other controller update/setup helpers first.
 
-If quick installation reports that the controller was installed but update setup
-failed, keep that environment and run the retry command printed by the installer.
-An existing custom provider is preserved rather than overwritten. If setup failed
-before a launcher was created, keep the error and consult support before removing
-files from the chosen root.
+Launcher setup keeps an installation-scoped journal and preserves later user edits
+during recovery. Unknown or conflicting state is reported without deleting files.
+For owner-update recovery, use the installed helper's recover action. Rollback is
+explicit and only restores an unchanged publication. An unknown successor may still
+be running, so do not delete receipts or versions to force another update.
+
+To remove the controller, close it and its helpers, then remove only its chosen root
+and its own command/menu entry after checking their paths. Keep Logos, its Wine
+prefix, configuration and backups. The generic ~/.local/bin PATH entry may remain.
+Do not delete broad XDG directories. See [support](SUPPORT.md) for help with errors.

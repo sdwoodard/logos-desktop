@@ -71,7 +71,7 @@ class TestTuiMaintenance(unittest.IsolatedAsyncioTestCase):
                 domain.config_updated_hooks = []
                 domain.is_running = True
                 domain.ui = PromptUI(domain)
-                with patch.object(constants, "STATE_DIR", str(root / "state/FaithLife-Community")):
+                with patch.object(constants, "STATE_DIR", str(root / "state/logos-desktop")):
                     context = maintenance.Context.from_app(domain)
                     async with domain.ui.run_test() as pilot:
                         domain._run_operation(control.uninstall)

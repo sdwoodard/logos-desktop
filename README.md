@@ -24,31 +24,29 @@ This is an independent community project, not affiliated with or endorsed by Log
 
 ## Install
 
-**Linux x86_64 · Python 3.12+ · curl 8.4+**
-
 Copy this into your terminal to install the latest stable release:
 
 ```bash
-bash -o pipefail -c '
-  curl -fsSL --proto "=https" --proto-redir "=https" --max-time 60 --max-filesize 262144 \
-    https://github.com/sdwoodard/logos-desktop/releases/latest/download/install-wheel.py |
-    python3 - --latest
-'
+curl -fsSL https://github.com/sdwoodard/logos-desktop/releases/latest/download/install.sh | bash
 ```
 
-The installer creates a dedicated environment in `~/.local/lib/logos-desktop` and
-configures updates. It runs bootstrap code from this project's GitHub release.
-The command requires a published release. For unreleased builds, use the source route.
+Then run:
+
+```bash
+logos-desktop
+```
+
+Or search for **LogosDesktop** in your application menu. If the installer adds the
+command to PATH, open a new terminal first.
+
+**Dependencies:** Linux x86_64, Python 3.12 or newer with venv support, Bash and curl
+8.4 or newer. The installer uses your account and leaves system Python unchanged.
+It downloads code from this project's release channel and configures updates and
+launchers. The command requires a published release.
 
 **[Download first](docs/INSTALL.md#download-first)** ·
 **[Install from source](CONTRIBUTING.md#source-setup)** ·
 **[Requirements and options](docs/INSTALL.md)**
-
-Open the app:
-
-```bash
-"$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
-```
 
 Choose **Set up Logos** on Home. Your Logos account and content licenses are still required.
 
@@ -92,4 +90,4 @@ links, passwords and private library content out of public issues.
 Clear bug reports, useful documentation and focused fixes are welcome.
 [Contributing](CONTRIBUTING.md) explains setup, checks and small first tasks.
 
-[User guide](docs/README.md) · [Project direction](docs/ROADMAP.md) · [Release notes](CHANGELOG.md)
+[User guide](docs/README.md) · [Release notes](CHANGELOG.md)

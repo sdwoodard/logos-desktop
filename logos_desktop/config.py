@@ -75,15 +75,9 @@ class LegacyConfiguration:
 
     @classmethod
     def load(cls) -> "LegacyConfiguration":
-        """Discover legacy input without moving or rewriting it."""
+        """Read the selected or default configuration without searching other projects."""
         destination = LegacyConfiguration.config_file_path()
-        source = destination
-        if "CONFIG_FILE" not in os.environ and not Path(destination).exists():
-            for candidate in constants.LEGACY_CONFIG_FILES:
-                if Path(candidate).is_file():
-                    source = str(config_store.absolute_path(candidate))
-                    break
-        loaded = cls.load_from_path(source)
+        loaded = cls.load_from_path(destination)
         loaded._destination = destination
         return loaded
 
@@ -718,7 +712,7 @@ class Config:
 
     @property
     def faithlife_product(self) -> str:
-        question = "Choose which FaithLife product the script should install: "
+        question = "Choose the product to install: "
         options = constants.FAITHLIFE_PRODUCTS
         return self._ask_if_not_found(
             "faithlife_product",
@@ -863,8 +857,8 @@ class Config:
     def faithlife_installer_download_url(self) -> str:
         if self._overrides.faithlife_installer_download_url is not None:
             return self._overrides.faithlife_installer_download_url
-        after_version_url_part = "/Verbum/" if self.faithlife_product == "Verbum" else "/"
-        return f"https://downloads.logoscdn.com/LBS{self.faithlife_product_version}{after_version_url_part}Installer/{self.faithlife_product_release}/{self.faithlife_product}-x64.msi"
+        return (f"https://downloads.logoscdn.com/LBS{self.faithlife_product_version}/Installer/"
+                f"{self.faithlife_product_release}/{self.faithlife_product}-x64.msi")
 
     @property
     def faithlife_product_release_channel(self) -> str:
@@ -950,12 +944,10 @@ class Config:
 
     @property
     def _faithlife_crash_log(self) -> Optional[str]:
-        """Path to the LogosCrash.log or VerbumCrash.log respectively"""
+        """Path to the selected Logos crash log."""
         faithlife_logs = self._faithlife_logs_dir
         if not faithlife_logs or self._raw.faithlife_product is None:
             return None
-        # FIXME: Confirm Verbum's Crash log has this name - not aware of a Verbum crash right now
-        # to confirm this.
         return f"{faithlife_logs}/{self._raw.faithlife_product}Crash.log"
 
     @property
@@ -1270,7 +1262,6 @@ class Config:
     def logos_cef_exe_windows_path(self) -> Optional[str]:
         if self.logos_appdata_windows_path is None:
             return None
-        # This name is the same even in Verbum
         return f'{self.logos_appdata_windows_path}\\System\\LogosCEF.exe'
 
     @property

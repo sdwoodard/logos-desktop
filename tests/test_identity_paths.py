@@ -29,12 +29,11 @@ class TestIdentityPaths(unittest.TestCase):
             selected.start()
             self.addCleanup(selected.stop)
 
-    def test_diagnostic_loading_never_migrates_legacy_candidate(self):
+    def test_default_loading_does_not_search_other_profiles(self):
         with patch.object(constants, 'DEFAULT_CONFIG_PATH', str(self.destination)):
-            with patch.object(constants, 'LEGACY_CONFIG_FILES', [str(self.source)]):
-                with patch.dict(os.environ, {}, clear=True):
-                    selected = EphemeralConfiguration.load()
-        self.assertEqual(selected.config_path, str(self.source))
+            with patch.dict(os.environ, {}, clear=True):
+                selected = EphemeralConfiguration.load()
+        self.assertEqual(selected.config_path, str(self.destination))
         self.assertFalse(self.destination.exists())
         self.assertFalse((self.root / 'state').exists())
 

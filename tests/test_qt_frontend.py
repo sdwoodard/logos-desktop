@@ -64,7 +64,6 @@ class TestQtFrontend(QtCase):
                                       "faithlife_product_version": "10"}))
         original = legacy.read_bytes()
         missing = self.root / "new-default.json"
-        self.stack.enter_context(patch.object(constants, "LEGACY_CONFIG_FILES", [str(legacy)]))
         self.stack.enter_context(patch.object(constants, "DATA_HOME", str(self.root / "recommended")))
         window = self.window(Services(), EphemeralConfiguration.project({}, str(missing), environment={}))
         self.pump(lambda: window.app.active is None)

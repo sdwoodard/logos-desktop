@@ -297,9 +297,8 @@ def ensure_product_installer_download(app: App):
     major = app.conf.faithlife_product_version
     overrides = app.conf._overrides
     name = getattr(overrides, "faithlife_installer_name", None) or f"{product}_v{release}-x64.msi"
-    product_path = "/Verbum/" if product == "Verbum" else "/"
     url = getattr(overrides, "faithlife_installer_download_url", None) or (
-        f"https://downloads.logoscdn.com/LBS{major}{product_path}Installer/{release}/{product}-x64.msi"
+        f"https://downloads.logoscdn.com/LBS{major}/Installer/{release}/{product}-x64.msi"
     )
     accepted = network.logos_reuse_download(
         url,
@@ -537,7 +536,7 @@ Name={app_name}
 Type=Application
 Exec={exec_cmd}
 Categories=Education;Spirituality;Languages;Literature;Maps;
-Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(additional_keywords or [])}
+Keywords=Logos;Bible;Wine;{";".join(additional_keywords or [])}
 """
     contents += f"Terminal={"true" if terminal is True else "false"}\n"
     if generic_name:
@@ -581,8 +580,6 @@ Keywords=Logos;Verbum;FaithLife;Bible;Control;Christianity;Jesus;{";".join(addit
 def create_launcher_shortcuts(app: App):
     from . import desktop
 
-    if constants.RUNMODE in ('snap', 'flatpak'):
-        return
     if constants.RUNMODE == 'binary':
         launcher = [str(Path(app.conf.install_dir) / constants.BINARY_NAME)]
     elif constants.RUNMODE == 'script':

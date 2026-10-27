@@ -55,8 +55,11 @@ class TestPromptContract(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+            controller = root / "controller"
+            controller.mkdir(mode=0o700)
+            identity = controller_install.Identity("venv", "1.0.0", "1.0.0", root=controller)
             with (patch.object(constants, "COORDINATION_DIR", root / "coordination"),
+                  patch.object(Path, "home", return_value=root),
                   patch.object(instance, "check_legacy"),
                   patch.object(controller_install, "identify", return_value=identity),
                   patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),

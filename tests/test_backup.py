@@ -46,7 +46,7 @@ class TestBackupTransactions(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.addCleanup(patch.stopall)
-        patch.object(constants, "STATE_DIR", str(self.root / "state/FaithLife-Community")).start()
+        patch.object(constants, "STATE_DIR", str(self.root / "state/logos-desktop")).start()
         self.app = fixture_app(self.root)
         self.context = maintenance.Context.from_app(self.app)
         self.live = Path(self.app.conf._logos_appdata_dir)

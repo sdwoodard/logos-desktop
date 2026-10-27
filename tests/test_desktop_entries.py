@@ -71,8 +71,8 @@ class TestDesktopEntries(unittest.TestCase):
             install = root / "install"
             install.mkdir()
             app = SimpleNamespace(conf=SimpleNamespace(
-                install_dir=str(install), faithlife_product="Verbum", logos_exe_windows_path=None,
-                _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Verbum"),
+                install_dir=str(install), faithlife_product="Logos", logos_exe_windows_path=None,
+                _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
                 _overrides=SimpleNamespace(install_dir=None, wine_prefix=None,
                                            config_path=str(root / 'chosen.json'), config_destination=None),
             ))

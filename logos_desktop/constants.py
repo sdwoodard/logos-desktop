@@ -10,33 +10,19 @@ from logos_desktop import paths
 
 
 def get_runmode() -> str:
-    """Gets the executing envoirnment
-    
-    Returns:
-        flatpak or snap or binary (pyinstaller) or script
-    """
-    if os.environ.get("container") == "flatpak":
-        return 'flatpak'
-    elif getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    """Distinguish packaged executables from Python entry points for ownership checks."""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return 'binary'
-    elif os.environ.get('SNAP'):
-        return 'snap'
-    else:
-        return 'script'
+    return 'script'
 
 
 
 # Are we running from binary or src?
 RUNMODE = get_runmode()
-_snap = os.environ.get('SNAP')
 if hasattr(sys, '_MEIPASS'):
     BUNDLE_DIR = Path(sys._MEIPASS)
-elif _snap is not None:
-    BUNDLE_DIR = Path(_snap)
 else:
-    # We are running in normal development mode
     BUNDLE_DIR = Path(__file__).resolve().parent
-del(_snap)
 
 # Now define assets and img directories.
 APP_IMAGE_DIR = BUNDLE_DIR / 'img'
@@ -54,7 +40,7 @@ SUPPORT_LINK = f"{REPOSITORY_LINK}#support"
 REPOSITORY_ISSUES_LINK = f"{REPOSITORY_LINK}/issues"
 REPOSITORY_NEW_ISSUE_LINK = f"{REPOSITORY_LINK}/issues/new"
 
-# Standalone replacement is deferred. Installed-owner updates use their own providers.
+# Unowned executables cannot replace themselves. Managed updates use their own provider.
 APP_SELF_UPDATES_ENABLED = False
 APP_SELF_UPDATE_DISABLED_MESSAGE = (
     "Standalone replacement is disabled. Use the installed controller's owner update route."
@@ -68,14 +54,7 @@ CONTROLLER_DISTRIBUTION = "source"
 CACHE_LIFETIME_HOURS = 12
 """How long to wait before considering our version cache invalid"""
 
-if RUNMODE == 'snap':
-    _snap_user_common = os.getenv('SNAP_USER_COMMON')
-    if not _snap_user_common or not Path(_snap_user_common).is_absolute():
-        raise ValueError("SNAP_USER_COMMON must be an absolute path when running a snap.")
-    CACHE_BASE = Path(_snap_user_common) / '.cache'
-    del _snap_user_common
-else:
-    CACHE_BASE = paths.xdg_base(os.getenv('XDG_CACHE_HOME'), Path.home() / '.cache')
+CACHE_BASE = paths.xdg_base(os.getenv('XDG_CACHE_HOME'), Path.home() / '.cache')
 
 CACHE_DIR = str(CACHE_BASE / 'logos-desktop')
 
@@ -99,16 +78,6 @@ NETWORK_CACHE_PATH = f"{CACHE_DIR}/network.json"
 RELATIVE_BINARY_DIR = "data/bin"
 
 DEFAULT_WINEDEBUG = "err+all"
-LEGACY_CONFIG_FILES = [
-    str(CONFIG_BASE / 'FaithLife-Community/Logos_on_Linux.json'),
-    str(CONFIG_BASE / 'Logos_on_Linux/Logos_on_Linux.json'),
-    str(CONFIG_BASE / 'Logos_on_Linux/Logos_on_Linux.conf'),
-    # If the user didn't have XDG_CONFIG_HOME set before, but now does.
-    os.path.expanduser("~/.config/FaithLife-Community/Logos_on_Linux.json"),
-    os.path.expanduser("~/.config/Logos_on_Linux/Logos_on_Linux.json"),
-    os.path.expanduser("~/.config/Logos_on_Linux/Logos_on_Linux.conf")
-]
-LLI_AUTHOR = "Ferion11, John Goodman, T. H. Wright, N. Marti, N. Shaaban"
 LLI_CURRENT_VERSION = APP_VERSION
 # Standalone tagged script, pinned from official-source HTTPS observations.
 # AppImage companions remain owned by their runtime provider.
@@ -123,8 +92,8 @@ PID_FILE = f'/tmp/{BINARY_NAME}.pid'
 WINE_RECOMMENDED_SIGIL = "Recommended"
 WINE_BETA_SIGIL = "Experimental (AKA Beta)"
 
-FAITHLIFE_PRODUCTS = ["Logos", "Verbum"]
-FAITHLIFE_PRODUCT_VERSIONS = ["10"] # This used to include 9
+FAITHLIFE_PRODUCTS = ["Logos"]
+FAITHLIFE_PRODUCT_VERSIONS = ["10"]
 
 SUPPORT_MESSAGE = f"""For LogosDesktop support, see:
 {SUPPORT_LINK}

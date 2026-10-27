@@ -106,6 +106,11 @@ that installation's normal save destinations.
 
 ## Desktop integration and controller ownership
 
+The controller installer creates a generic LogosDesktop application-menu entry and
+the logos-desktop command. The generic entry opens the default selected configuration.
+Its setup journal belongs to the controller root. This is separate from the
+profile-specific launchers below. See [installation setup](INSTALL.md#installed-locations-and-path).
+
 Use **Backups & tools → Repair & shortcuts** to add desktop launchers after reviewing
 the selected profile. CLI `--create-shortcuts` also requests integration, which runs
 as part of installation. These paths create profile-specific desktop IDs with

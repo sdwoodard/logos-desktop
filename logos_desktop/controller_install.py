@@ -1,4 +1,4 @@
-"""The versioned user environment and Arch source package controller owners.
+"""Installation ownership and updates for the versioned user environment.
 
 Provider configuration belongs to one installation, not a profile or environment
 variable. Helpers own transactions independently of the application's process scope.
@@ -219,35 +219,7 @@ print(json.dumps({"version": d.version, "prefix": sys.prefix, "module": str(modu
 '''
 
 
-def _system_alias(prefix, candidate, expected, *, package=None):
-    """Accept package-owned Arch binusr aliases, not foreign paths or venv links."""
-    if (prefix / "pyvenv.cfg").exists() or prefix.parent.name == "versions":
-        return False
-    candidate = Path(candidate)
-    directories = {prefix / "bin", prefix / "sbin", prefix.parent / "bin", prefix.parent / "sbin"}
-    if not candidate.is_absolute() or candidate.parent not in directories:
-        return False
-    try:
-        canonical = expected.resolve(strict=True)
-        if (candidate.parent.resolve(strict=True) != expected.parent.resolve(strict=True)
-                or candidate.resolve(strict=True) != canonical or not candidate.samefile(expected)):
-            return False
-        owners = _owner(canonical)
-        if len(owners) != 1 or owners[0][0] != "pacman":
-            return False
-        if package is not None and owners != [("pacman", package)]:
-            return False
-        if _owner(expected) != owners:
-            return False
-        alias_owners = _owner(candidate)
-        # An alternate directory spelling need not be a separate database key.
-        # The actual file is owned above, and conflicting alias ownership refuses.
-        return not alias_owners or alias_owners == owners
-    except OSError:
-        return False
-
-
-def _probe(prefix, *, system_aliases=False):
+def _probe(prefix):
     prefix = Path(prefix)
     data = json.loads(_run([str(prefix / "bin/python"), "-I", "-c", PROBE]))
     if Path(data["prefix"]).resolve() != prefix.resolve():
@@ -263,14 +235,6 @@ def _probe(prefix, *, system_aliases=False):
     direct = bool(lines) and lines[0] == f"#!{python}"
     wrapped = (len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[1].startswith("'''exec' ")
                and lines[2] == "' '''" and shlex.split(lines[1][len("'''exec' "):]) == [python, "$0", "$@"])
-    if not direct and not wrapped and system_aliases:
-        candidate = lines[0][2:] if lines and lines[0].startswith("#!") else None
-        if (len(lines) >= 3 and lines[0] == "#!/bin/sh" and lines[1].startswith("'''exec' ")
-                and lines[2] == "' '''"):
-            arguments = shlex.split(lines[1][len("'''exec' "):])
-            candidate = arguments[0] if len(arguments) == 3 and arguments[1:] == ["$0", "$@"] else None
-        if candidate is not None:
-            direct = _system_alias(prefix, candidate, Path(python))
     if not direct and not wrapped:
         raise InstallError("Controller entry point does not bind this interpreter")
     return data["version"]
@@ -313,25 +277,7 @@ def identify():
         entry_owners = _owner(entry)
         metadata_owners = _owner(metadata[0])
         if owners or entry_owners or metadata_owners:
-            if (owners != [("pacman", PACKAGE)] or entry_owners != owners or metadata_owners != owners
-                    or entry != Path("/usr/bin/logos-desktop")):
-                raise InstallError("This controller belongs to a different or mixed package owner")
-            if _probe(prefix, system_aliases=True) != distribution.version:
-                raise InstallError("Installed package metadata and interpreter disagree")
-            installed = _run(["pacman", "-Q", PACKAGE]).split()
-            if len(installed) != 2 or installed[0] != PACKAGE:
-                raise InstallError("Unexpected installed Arch package identity")
-            from packaging.version import Version
-
-            package_version = installed[1].split(":")[-1].rsplit("-", 1)[0]
-            if Version(package_version) != Version(distribution.version):
-                raise InstallError("Arch package version and Python distribution disagree")
-            path_entry = shutil.which("logos-desktop")
-            if (path_entry and Path(path_entry).absolute() != entry
-                    and not _system_alias(prefix, path_entry, entry, package=PACKAGE)):
-                raise InstallError("PATH selects a different controller")
-            return Identity("aur", constants.APP_VERSION, installed[1], launcher=entry,
-                            provider_path=Path.home() / ".local/state/logos-desktop/aur/provider.json")
+            raise InstallError("This controller belongs to a system package manager")
 
         root = _root(prefix.parent.parent)
         if distribution.version != constants.APP_VERSION:
@@ -355,7 +301,10 @@ def identify():
         path_entry = shutil.which("logos-desktop")
         launchers = (root / "logos-desktop", root / "current/bin/logos-desktop", entry)
         if path_entry and Path(path_entry).absolute() not in launchers:
-            raise InstallError("PATH selects a different controller")
+            from .user_integration import command_matches
+
+            if not command_matches(root, path_entry):
+                raise InstallError("PATH selects a different controller")
         return Identity("venv", distribution.version, installed_version, root, root / "logos-desktop",
                         root / "provider.json")
     except (InstallError, OSError, ValueError, KeyError, importlib.metadata.PackageNotFoundError) as error:
@@ -379,14 +328,8 @@ def configure_provider(identity):
         directory = _root(identity.root)
         scope = str(directory)
         data = {"schema": 1, "installation": scope, "manifest_url": RELEASE_MANIFEST}
-    elif identity.owner == "aur" and identity.launcher == Path("/usr/bin/logos-desktop"):
-        directory = Path.home() / ".local/state/logos-desktop/aur"
-        data = {"schema": 1, "installation": str(identity.launcher),
-                "rpc_url": "https://aur.archlinux.org/rpc/v5/info?arg[]=logos-desktop",
-                "git_url": "https://aur.archlinux.org/logos-desktop.git",
-                "release_manifest_url": RELEASE_MANIFEST}
     else:
-        raise InstallError("Provider setup requires an identified managed environment or Arch package")
+        raise InstallError("Provider setup requires an identified managed environment")
     if identity.provider_path != directory / "provider.json":
         raise InstallError("Provider path does not match the identified installation")
     if os.geteuid() == 0:
@@ -505,81 +448,30 @@ def _wheel(data, *, stable=True):
 
 def check(identity):
     """Return provider availability without modifying installed files."""
-    if identity.owner not in ("venv", "aur"):
+    if identity.owner != "venv":
         return Result("refused", identity.message or "Unsupported controller installation")
     try:
-        if identity.owner == "venv" and (identity.root / "operation.json").exists():
+        if (identity.root / "operation.json").exists():
             record = _receipt(identity.root)
             if record["status"] not in ("ready", "rolled-back", "aborted"):
                 command = (sys.executable, "-I", "-m", "logos_desktop.controller_install", "recover")
                 return Result("unknown", "Activation has not confirmed readiness. Reconcile safely with: "
                               + shlex.join(command), command=command)
         config = _provider(identity)
-        if identity.owner == "venv":
-            payload, _ = _download(config["manifest_url"], config, limit=65536)
-            data = json.loads(payload)
-            if data.get("status") in ("unavailable", "provider-lag"):
-                return Result(data["status"], "The installation provider has no usable release")
-            data = _wheel(data)
-            _url(data["url"], config)
-            from packaging.version import Version
-
-            newer = Version(data["version"]) > Version(identity.installed_version)
-        else:
-            payload, _ = _download(config["rpc_url"], config, limit=65536)
-            rpc = json.loads(payload)
-            results = rpc.get("results", [])
-            if rpc.get("type") != "multiinfo" or rpc.get("resultcount") != len(results):
-                raise InstallError("Invalid AUR RPC response")
-            if results and (len(results) != 1 or results[0].get("Name") != PACKAGE
-                            or results[0].get("PackageBase") != PACKAGE):
-                raise InstallError("AUR returned a different package")
-            version = results[0]["Version"] if results else None
-            newer = False
-            if version is not None:
-                if not re.fullmatch(r"(?:[0-9]+:)?[0-9]+\.[0-9]+\.[0-9]+-[0-9]+(?:\.[0-9]+)?", version):
-                    raise InstallError("AUR has no supported stable package version")
-                newer = int(_run(["vercmp", version, identity.installed_version])) > 0
-
-            # Source metadata can explain a missing AUR update, never replace its recipe.
-            if not newer and "release_manifest_url" in config:
-                payload, _ = _download(config["release_manifest_url"], config, limit=65536)
-                source = _wheel(json.loads(payload))
-                _url(source["url"], config)
-                from packaging.version import Version
-
-                upstream = version.split(":")[-1].rsplit("-", 1)[0] if version is not None else None
-                if upstream is None or Version(source["version"]) > Version(upstream):
-                    return Result("provider-lag", f"Source release {source['version']} is not yet available from AUR",
-                                  source["version"])
-            if version is None:
-                return Result("unavailable", "AUR has no logos-desktop source package")
-
-            data = {"version": version}
-            if newer:
-                git_url = _url(config["git_url"], config)
-                command = ["git", "-c", "http.followRedirects=false", "ls-remote", "--", git_url, "HEAD"]
-                commit = _run(command).split()[0]
-                if not re.fullmatch(r"[0-9a-f]{40}", commit):
-                    raise InstallError("AUR recipe has no pinned Git revision")
-                data.update(commit=commit, git_url=git_url)
-        if newer:
-            return Result("available", "An owner-managed update is available", data["version"], data)
-        installed_python = identity.installed_version
-        if identity.owner == "aur":
-            installed_python = installed_python.split(":")[-1].rsplit("-", 1)[0]
+        payload, _ = _download(config["manifest_url"], config, limit=65536)
+        data = json.loads(payload)
+        if data.get("status") in ("unavailable", "provider-lag"):
+            return Result(data["status"], "The installation provider has no usable release")
+        data = _wheel(data)
+        _url(data["url"], config)
         from packaging.version import Version
 
-        if Version(identity.running_version) != Version(installed_python):
+        newer = Version(data["version"]) > Version(identity.installed_version)
+        if newer:
+            return Result("available", "An owner-managed update is available", data["version"], data)
+        if Version(identity.running_version) != Version(identity.installed_version):
             return Result("restart-required", "The installed controller differs from this running process",
                           identity.installed_version)
-        if identity.owner == "aur":
-            message = "No newer version is available from AUR"
-            if "release_manifest_url" not in config:
-                message += ". Source release availability was not checked"
-            else:
-                message += ". The configured source release is not ahead of AUR"
-            return Result("current", message, data["version"])
         return Result("current", "No newer version is available from the installation provider", data["version"])
     except urllib.error.HTTPError as error:
         error.close()
@@ -939,139 +831,6 @@ def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch
     if frontend == "tui" and before_tui_launch is not None:
         before_tui_launch()
     return _launch(root, record, config_path, frontend)
-
-
-def _aur_update(identity, release, config_path=None, frontend="qt"):
-    if (identity.owner != "aur" or identity.launcher != Path("/usr/bin/logos-desktop")
-            or frontend not in ("qt", "tui")):
-        raise InstallError("AUR restart requires its admitted launcher and a known frontend")
-    if os.geteuid() == 0:
-        raise InstallError("AUR builds must run as an ordinary user")
-    state = identity.provider_path.parent
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _root(state)
-    with _locked(state):
-        if identify() != identity:
-            raise InstallError("Installed package changed before AUR handoff")
-
-        build = state / ("build-" + secrets.token_hex(12))
-        _run(["git", "-c", "http.followRedirects=false", "clone", "--no-checkout", "--",
-              release["git_url"], str(build)], timeout=120)
-        _run(["git", "checkout", "--detach", release["commit"]], cwd=build)
-        if _run(["git", "rev-parse", "HEAD"], cwd=build) != release["commit"]:
-            raise InstallError("AUR checkout differs from the accepted revision")
-
-        files = _recipe_files(build, release["commit"])
-        fields = _srcinfo(files[".SRCINFO"])
-        version = fields.get("pkgver", [""])[0] + "-" + fields.get("pkgrel", [""])[0]
-        if fields.get("epoch", ["0"])[0] != "0":
-            version = fields["epoch"][0] + ":" + version
-        if (fields.get("pkgname") != [PACKAGE] or fields.get("pkgbase") != [PACKAGE]
-                or fields.get("arch") != ["x86_64"] or version != release["version"]):
-            raise InstallError("Pinned recipe does not match the AUR RPC package/version")
-
-        print(f"Pinned recipe: {release['commit']}\nRetained build directory: {build}")
-        review = _run(["git", "--no-pager", "show", "--stat", "--patch", release["commit"]], cwd=build)
-        print(_terminal_text(review))
-        for name, text in sorted(files.items()):
-            print(f"\n===== {name} =====\n{_terminal_text(text)}")
-        print("makepkg -si builds this recipe and may install dependencies through pacman authorization.")
-        print("It does not upgrade the whole system. Use a fully upgraded Arch system before continuing.")
-        if input("Type REVIEWED to build and install this pinned recipe: ") != "REVIEWED":
-            return Result("cancelled", "Recipe build was declined")
-
-        # Do not refresh package databases here, which would risk a partial upgrade.
-        pending = subprocess.run(["pacman", "-Qu"], env=_environment(), timeout=15,
-                                 capture_output=True, text=True, check=False)
-        if pending.returncode not in (0, 1) or (pending.returncode == 1 and pending.stderr):
-            raise InstallError("Cannot check pending system upgrades")
-        if pending.stdout.strip():
-            raise InstallError("System upgrades are pending. Complete a normal full upgrade before rebuilding")
-
-        # This sources PKGBUILD, so every admitted file must already be reviewed.
-        if _recipe_files(build, release["commit"]) != files:
-            raise InstallError("Reviewed recipe files changed before execution")
-        generated = _run(["makepkg", "--printsrcinfo"], cwd=build)
-        if _srcinfo(generated) != fields:
-            raise InstallError("Reviewed recipe generates different source metadata. Installation was refused")
-
-        if _recipe_files(build, release["commit"]) != files:
-            raise InstallError("Recipe files changed during metadata generation")
-        result = subprocess.run(["makepkg", "-si"], cwd=build, env=_environment(), check=False)
-        if result.returncode:
-            return Result("failed", "makepkg or package authorization failed. Inspect the retained terminal output")
-
-        installed = _run(["pacman", "-Q", PACKAGE]).split()
-        if (installed != [PACKAGE, release["version"]]
-                or _owner(Path("/usr/bin/logos-desktop")) != [("pacman", PACKAGE)]):
-            return Result("unknown", "Transaction returned but the installed package identity was not verified")
-        command = [str(identity.launcher)]
-        if config_path:
-            command.extend(["-c", str(Path(config_path).expanduser().absolute())])
-        command.extend(["--dialog", frontend])
-        return Result("restart-required", "The package is installed. Use the restart command below. "
-                      "The restarted runtime has not been verified.", release["version"], command=tuple(command))
-
-
-def _recipe_files(build, commit):
-    """Admit only a small flat recipe whose complete tracked contents can be shown."""
-    tree = _run(["git", "ls-tree", "-rz", "--full-tree", commit], cwd=build)
-    entries = tree.rstrip("\0").split("\0")
-    if not 2 <= len(entries) <= 32:
-        raise InstallError("Recipe must contain between two and 32 top-level ordinary files")
-
-    files = {}
-    total = 0
-    for entry in entries:
-        header, name = entry.split("\t", 1)
-        mode, kind, digest = header.split()
-        if (mode not in ("100644", "100755") or kind != "blob"
-                or re.fullmatch(r"[A-Za-z0-9._+-]+", name) is None
-                or name in (".", "..", ".git") or name in files):
-            raise InstallError("Recipe contains nested content, symlinks or unsupported tracked files")
-        path = build / name
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024:
-            raise InstallError("Recipe review requires bounded ordinary files without symlinks")
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as incoming:
-            if not stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
-                raise InstallError("Recipe review requires ordinary files")
-            content = incoming.read(1024 * 1024 + 1)
-        if len(content) > 1024 * 1024:
-            raise InstallError("Recipe file grew past the review size limit")
-        total += len(content)
-        if total > 4 * 1024 * 1024:
-            raise InstallError("Recipe review exceeds the total size limit")
-        actual = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-        if actual != digest:
-            raise InstallError("Recipe working files differ from the pinned Git contents")
-        files[name] = content.decode("utf-8", errors="strict")
-
-    if not {"PKGBUILD", ".SRCINFO"}.issubset(files):
-        raise InstallError("Recipe requires ordinary tracked PKGBUILD and .SRCINFO files")
-    if {path.name for path in build.iterdir()} - {".git"} != set(files):
-        raise InstallError("Recipe contains undisplayed directories or untracked files")
-    return files
-
-
-def _terminal_text(text):
-    return "".join(char if char in "\n\t" or (char.isprintable() and char != "\x7f")
-                   else f"\\x{ord(char):02x}" for char in text)
-
-
-def _srcinfo(text):
-    fields = {}
-    for line in text.splitlines():
-        if " = " in line:
-            key, value = line.strip().split(" = ", 1)
-            fields.setdefault(key, []).append(value)
-    for key in ("pkgbase", "pkgver", "pkgrel"):
-        if len(fields.get(key, [])) != 1:
-            raise InstallError("Recipe has missing or ambiguous package identity")
-    if len(fields.get("epoch", [])) > 1 or any("SKIP" in values for values in fields.values()):
-        raise InstallError("Recipe metadata has ambiguous identity or skipped source checksums")
-    return fields
 
 
 def _installed_bytes(prefix, path):
@@ -1458,10 +1217,11 @@ def bootstrap(argv=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=(
-        "check", "handoff", "recover", "rollback", "bootstrap", "configure-provider",
+        "check", "handoff", "recover", "rollback", "bootstrap", "configure-provider", "setup",
     ))
     parser.add_argument("--config")
     parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
+    parser.add_argument("--no-path", action="store_true", help="Leave shell startup files unchanged during setup")
     args, remaining = parser.parse_known_args(argv)
     helper_keeps_terminal = True
 
@@ -1470,11 +1230,30 @@ def main(argv=None):
         helper_keeps_terminal = False
 
     try:
+        if args.no_path and args.action != "setup":
+            parser.error("--no-path is only supported with setup")
         if args.action == "bootstrap":
             return bootstrap(remaining)
         if remaining:
             parser.error("Unexpected arguments: " + shlex.join(remaining))
         identity = identify()
+        if args.action == "setup":
+            if identity.owner != "venv":
+                raise InstallError("Setup requires an identified managed environment")
+            if identity.running_version != identity.installed_version:
+                raise InstallError("Run setup through the current controller environment")
+            if (identity.root / "operation.json").exists():
+                record = _receipt(identity.root)
+                if record["status"] not in ("ready", "rolled-back", "aborted"):
+                    raise InstallError("Reconcile the pending controller update before setting up launchers")
+            if os.path.lexists(identity.provider_path):
+                _provider(identity)
+            else:
+                configure_provider(identity)
+            from . import user_integration
+
+            print(user_integration.install(identity.root, modify_path=not args.no_path))
+            return 0
         if args.action == "configure-provider":
             result = configure_provider(identity)
             print(f"{result.status}: {result.message}")
@@ -1508,13 +1287,11 @@ def main(argv=None):
                     # terminal. Unknown outcomes retain the conservative handoff.
                     if result.status == "failed":
                         helper_keeps_terminal = True
-            else:
-                result = _aur_update(identity, result.artifact, args.config, args.frontend)
         print(f"{result.status}: {result.message}")
         if result.status == "restart-required" and result.command:
             print("Restart command: " + shlex.join(result.command))
         return 0 if result.status in ("available", "current", "updated", "restart-required", "cancelled") else 1
-    except (InstallError, OSError, ValueError, KeyError) as error:
+    except (RuntimeError, OSError, ValueError, KeyError) as error:
         print(f"failed: {error}", file=sys.stderr)
         return 1
     finally:

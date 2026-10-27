@@ -74,10 +74,10 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.opened, [self.script.MANIFEST_URL, self.url])
         self.provider.assert_called_once_with(
             [str(self.prefix / "bin/python"), "-I", "-m",
-             "logos_desktop.controller_install", "configure-provider"],
+             "logos_desktop.controller_install", "setup"],
             check=False,
         )
-        self.assertIn("Updates are configured", self.output.getvalue())
+        self.assertIn("Installation complete", self.output.getvalue())
 
     def test_invalid_metadata_never_downloads_or_executes_the_wheel(self):
         original = dict(self.data)
@@ -152,11 +152,11 @@ class BootstrapTests(unittest.TestCase):
 
     def test_provider_failure_preserves_installation_and_reports_retry(self):
         self.provider.return_value = SimpleNamespace(returncode=1)
-        with self.assertRaisesRegex(RuntimeError, "Controller installed, but update setup failed. Retry with:"):
+        with self.assertRaisesRegex(RuntimeError, "Controller installed, but launcher setup failed. Retry with:"):
             self.script.main(["--latest"])
         self.assertTrue(self.root.is_dir())
         self.assertTrue(self.marker.is_file())
-        self.assertNotIn("Updates are configured", self.output.getvalue())
+        self.assertNotIn("Installation complete", self.output.getvalue())
 
     def test_explicit_local_wheel_keeps_manual_provider_setup(self):
         wheel = self.home / self.data["filename"]

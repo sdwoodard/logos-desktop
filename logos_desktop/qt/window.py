@@ -181,7 +181,7 @@ class InstallPage(QWidget):
         form.setSpacing(16)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.product = QComboBox()
-        self.product.addItems(["Logos", "Verbum"])
+        self.product.addItem("Logos")
         self.product.setCurrentText(snapshot.product)
         product_label = QLabel("&Product")
         product_label.setBuddy(self.product)
@@ -287,7 +287,7 @@ class SettingsPage(QWidget):
         paths.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         paths.addRow("Location", value(snapshot.path))
         paths.addRow("Wine runtime", value(snapshot.runtime))
-        paths.addRow("Controller updates", label("Disabled during private development"))
+        paths.addRow("Controller updates", label("Not available in sample mode"))
         layout.addWidget(details)
         layout.addStretch()
 
@@ -502,7 +502,7 @@ class MainWindow(QMainWindow):
                     f"Wine: {self.snapshot.runtime}\nLogos: {self.snapshot.version}\n"
                     f"Process: {self.snapshot.state}\nIndexer: {self.snapshot.indexing}\n"
                     f"Logos/LogosDesktop updates: stable\n{self.snapshot.wine_status}\n"
-                    f"Controller: {constants.APP_RELEASE_VERSION or 'private, unversioned'}")
+                    f"Controller: {constants.APP_RELEASE_VERSION or 'unversioned'}")
                 self.maintenance.backups.detail.setText(
                     "Save a verified copy of your Logos data.\n"
                     + (f"Folder: {Path(self.snapshot.backup).name}" if self.snapshot.backup
@@ -543,11 +543,10 @@ class MainWindow(QMainWindow):
                     self.maintenance.buttons["stop_index"].setEnabled(False)
                 update = self.home.updates.buttons["product_update"]
                 update.setVisible(self.snapshot.product_update.startswith("Update available"))
-                managed = self.snapshot.controller_owner in ("venv", "aur")
+                managed = self.snapshot.controller_owner == "venv"
                 controller_update = self.home.updates.buttons["controller_update"]
                 controller_update.setVisible(managed or self.snapshot.controller_standalone)
-                controller_update.setText("Update via AUR…" if self.snapshot.controller_owner == "aur"
-                                          else "Update environment…" if managed else "Update LogosDesktop…")
+                controller_update.setText("Update environment…" if managed else "Update LogosDesktop…")
                 controller_update.setEnabled(self.app.active is None and (
                     self.snapshot.controller_status == "available" if managed else self.snapshot.controller_standalone))
                 self.home.updates.buttons["controller_check"].setEnabled(

@@ -51,5 +51,5 @@ Review custom DLL overrides when investigating startup problems. A workaround fo
 one installation is not necessarily appropriate for another. Use
 [diagnostics and support](SUPPORT.md) to gather the details without changing your data.
 
-AUR, Flatpak, standalone binaries, Snap, Nix and ARM remain deferred. Broader native
-distribution coverage is a separate effort, not a promise implied by the wheel tag.
+The wheel's Python tag does not establish Logos compatibility with other
+architectures or operating systems.

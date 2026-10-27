@@ -127,7 +127,7 @@ def canonical(document, source):
     if output.get("install_dir") is not None:
         install = str(absolute_path(output["install_dir"], base=Path(source).parent))
         output["install_dir"] = output["INSTALLDIR"] = install
-    if output.get("faithlife_product") not in (None, "Logos", "Verbum"):
+    if output.get("faithlife_product") not in (None, "Logos"):
         raise ConfigurationError(f"Unknown product in {source}")
     for name in ("faithlife_product_release_channel", "app_release_channel"):
         if name in output and output[name] not in ("stable", "beta", "dev"):
@@ -208,12 +208,15 @@ class Target:
         if identity != self.identity or content != self.previous:
             raise ConfigurationError(f"Configuration target changed before publication: {self.path}")
 
-    def stage(self, content):
+    def stage(self, content, *, mode=0o600):
+        if type(mode) is not int or mode & ~0o777 or mode & 0o022:
+            raise ConfigurationError("Publication mode must not allow other users to write")
         self.temporary = f".config-{secrets.token_hex(16)}"
         descriptor = os.open(
             self.temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd,
         )
         with os.fdopen(descriptor, "wb") as output:
+            os.fchmod(output.fileno(), mode)
             output.write(content)
             output.flush()
             os.fsync(output.fileno())

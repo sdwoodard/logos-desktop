@@ -36,7 +36,7 @@ def _remove_data_files(names):
 
     context = maintenance.current_context()
     user = get_wine_user(str(context.prefix))
-    if user is None or context.product not in ("Logos", "Verbum"):
+    if user is None or context.product != "Logos":
         raise maintenance.MaintenanceError("Cannot find installed product data")
     live = Path(get_logos_appdata_dir(str(context.prefix), user, context.product))
     if not live.resolve().is_relative_to(context.prefix):
@@ -237,11 +237,11 @@ def get_support(app: App, cancel=None) -> str | None:
             "Keep this archive private and review its contents before sharing.\n"
             "The project repository and issues are private during development.\n"
             "Describe what went wrong and which actions you took.",
-            ['Keep archive local', 'Open private project issue', 'Show links'],
+            ['Keep archive local', 'Open project issue', 'Show links'],
         )
     except UserExitedFromAsk:
         return output_path
-    if answer == "Open private project issue":
+    if answer == "Open project issue":
         system.run_command(["xdg-open", constants.REPOSITORY_NEW_ISSUE_LINK], timeout=10, check=False)
     elif answer == "Show links":
         app.info(

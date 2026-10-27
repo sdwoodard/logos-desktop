@@ -468,7 +468,7 @@ class Services:
 
             if name in ("controller_check", "controller_update"):
                 identity = self._identify_controller()
-                if identity.owner in ("venv", "aur"):
+                if identity.owner == "venv":
                     if name == "controller_check":
                         self.controller_result = controller_install.Result("checking", "Checking installation provider")
                         with self._lock:
@@ -477,9 +477,7 @@ class Services:
                         app.status("Checking the controller installation provider", None)
                         result = controller_install.check(identity)
                     else:
-                        restart = ("The terminal supplies the command to restart this profile after AUR installation."
-                                   if identity.owner == "aur" else
-                                   "The environment helper launches the new controller after installation.")
+                        restart = "The environment helper launches the new controller after installation."
                         if not app.approve("Open controller update in a terminal?",
                                            "The terminal owns review and authorization. " + restart
                                            + " This controller closes after handoff. Logos is left running."):

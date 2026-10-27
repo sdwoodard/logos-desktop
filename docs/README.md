@@ -15,8 +15,6 @@
 
 - [Contributor setup](../CONTRIBUTING.md)
 - [Architecture](ARCHITECTURE.md)
-- [Packaging](PACKAGING.md)
-- [Project direction](ROADMAP.md)
 - [License notices](NOTICES.md)
 
 [Back to LogosDesktop](../README.md)

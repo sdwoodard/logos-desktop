@@ -10,8 +10,6 @@ import os
 from pathlib import Path
 import pty
 import select
-import shlex
-import socket
 import subprocess
 import sys
 import tempfile
@@ -87,23 +85,6 @@ class ControllerInstallTests(unittest.TestCase):
             install.configure_provider(wrong)
         self.assertFalse((self.home / "provider.json").exists())
 
-    def test_public_aur_provider_is_user_scoped_and_refuses_parent_aliases(self):
-        directory = self.home / ".local/state/logos-desktop/aur"
-        identity = install.Identity("aur", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=directory / "provider.json")
-        self.assertEqual(install.configure_provider(identity).status, "configured")
-        data = install._provider(identity)
-        self.assertEqual(data["installation"], "/usr/bin/logos-desktop")
-        self.assertEqual(data["git_url"], "https://aur.archlinux.org/logos-desktop.git")
-        self.assertEqual(data["release_manifest_url"], install.RELEASE_MANIFEST)
-        self.assertNotIn("allow_loopback", data)
-        identity.provider_path.unlink()
-        directory.rmdir()
-        directory.symlink_to(self.root, target_is_directory=True)
-        with self.assertRaises(OSError):
-            install.configure_provider(identity)
-        self.assertFalse((self.root / "provider.json").exists())
-
     def test_public_provider_setup_refuses_symlink_and_concurrent_publication(self):
         outside = self.home / "outside"
         outside.write_bytes(b"preserved")
@@ -127,14 +108,10 @@ class ControllerInstallTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob(".provider-*")))
 
     def test_public_provider_setup_refuses_exposed_parent_and_unidentified_command(self):
-        directory = self.home / ".local/state/logos-desktop/aur"
-        aur = install.Identity("aur", launcher=Path("/usr/bin/logos-desktop"),
-                               provider_path=directory / "provider.json")
         self.home.chmod(0o770)
         try:
-            with self.assertRaisesRegex(install.InstallError, "home"):
-                install.configure_provider(aur)
-            self.assertFalse((self.home / ".local").exists())
+            with self.assertRaisesRegex(install.InstallError, "parent"):
+                install.configure_provider(self.identity)
         finally:
             self.home.chmod(0o700)
         self.root.chmod(0o755)
@@ -382,50 +359,6 @@ class ControllerInstallTests(unittest.TestCase):
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "url": "https://example.invalid/wheel"}
         return path, data
 
-    def recipe_tree(self, build):
-        entries = []
-        for path in sorted(build.iterdir()):
-            content = path.read_bytes()
-            digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-            entries.append(f"100644 blob {digest}\t{path.name}\0")
-        return "".join(entries)
-
-    def aur_metadata_provider(self):
-        bodies = {}
-        requests = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                requests.append(self.path)
-                status, body = bodies.get(self.path, (404, b"missing fixture"))
-                self.send_response(status)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *args):
-                pass
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        base = f"http://127.0.0.1:{server.server_port}"
-        identity = install.Identity("aur", "1.0.0", "1.0.0-1", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=self.home / "aur/provider.json")
-        identity.provider_path.parent.mkdir(mode=0o700)
-        config = {"schema": 1, "installation": "/usr/bin/logos-desktop", "allow_loopback": True,
-                  "rpc_url": base + "/rpc", "git_url": base + "/recipe.git",
-                  "release_manifest_url": base + "/source"}
-        install._write(identity.provider_path, config)
-        rpc = {"type": "multiinfo", "resultcount": 1,
-               "results": [{"Name": "logos-desktop", "PackageBase": "logos-desktop", "Version": "1.0.0-1"}]}
-        source = {"version": "1.1.0", "filename": "logos_desktop-1.1.0-py3-none-any.whl",
-                  "url": base + "/source.whl", "size": 12345, "sha256": "b" * 64}
-        bodies["/rpc"] = (200, json.dumps(rpc).encode())
-        bodies["/source"] = (200, json.dumps(source).encode())
-        return identity, config, bodies, requests, rpc, source
-
     def wait_for(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -471,7 +404,7 @@ class ControllerInstallTests(unittest.TestCase):
         with patch.object(install, "_owner", return_value=[("pacman", "logos-desktop")]):
             identity = install.identify()
         self.assertEqual(identity.owner, "unsupported")
-        self.assertIn("mixed package owner", identity.message)
+        self.assertIn("system package manager", identity.message)
         with patch.object(install, "_owner", side_effect=[[], [], [("rpm", "foreign")]]):
             self.assertEqual(install.identify().owner, "unsupported")
 
@@ -480,6 +413,41 @@ class ControllerInstallTests(unittest.TestCase):
         self.runtime(prefix, package, distribution)
         with patch.object(logos_desktop, "__file__", str(self.home / "source/__init__.py")):
             self.assertIn("Loaded source", install.identify().message)
+
+    def test_registered_user_command_preserves_managed_identity_and_refuses_edits(self):
+        from logos_desktop import user_integration
+
+        prefix, package, distribution = self.distribution()
+        self.runtime(prefix, package, distribution)
+        command = self.home / ".local/bin/logos-desktop"
+        command.parent.mkdir(parents=True)
+        content = user_integration.command_content(self.root)
+        command.write_bytes(content)
+        command.chmod(0o700)
+        with patch.object(install.shutil, "which", return_value=str(command)):
+            self.assertEqual(install.identify().owner, "venv")
+            command.write_bytes(content + b"# user edit\n")
+            self.assertEqual(install.identify().owner, "unsupported")
+            command.write_bytes(content)
+            command.chmod(0o755)
+            self.assertEqual(install.identify().owner, "unsupported")
+
+    def test_setup_preserves_custom_provider_and_refuses_pending_publication(self):
+        from logos_desktop import user_integration
+
+        install._write(self.identity.provider_path, {"schema": 1, "installation": str(self.root),
+                                                    "manifest_url": "https://example.invalid/custom"})
+        original = self.identity.provider_path.read_bytes()
+        with (patch.object(install, "identify", return_value=self.identity),
+              patch.object(user_integration, "install", return_value="fixture setup") as setup):
+            self.assertEqual(install.main(["setup", "--no-path"]), 0)
+            setup.assert_called_once_with(self.root, modify_path=False)
+            self.assertEqual(self.identity.provider_path.read_bytes(), original)
+            (self.root / "operation.json").write_text("{}")
+            setup.reset_mock()
+            with patch.object(install, "_receipt", return_value={"status": "published"}):
+                self.assertEqual(install.main(["setup"]), 1)
+            setup.assert_not_called()
 
     def test_real_probe_rejects_missing_packaged_resource(self):
         prefix, package, _ = self.distribution()
@@ -497,48 +465,6 @@ class ControllerInstallTests(unittest.TestCase):
         with self.assertRaises(install.InstallError):
             install._probe(prefix)
 
-    def test_system_probe_accepts_real_binusr_aliases_only_with_consistent_package_owner(self):
-        system = self.home / "system"
-        prefix = system / "usr"
-        (prefix / "bin").mkdir(parents=True)
-        expected = prefix / "bin/python"
-        expected.symlink_to(Path(sys.executable).resolve())
-        (prefix / "sbin").symlink_to("bin", target_is_directory=True)
-        (system / "bin").symlink_to("usr/bin", target_is_directory=True)
-        (system / "sbin").symlink_to("usr/bin", target_is_directory=True)
-        entry = prefix / "bin/logos-desktop"
-        data = json.dumps({"prefix": str(prefix), "version": "1.0.0"})
-
-        for candidate in (prefix / "sbin/python", system / "bin/python", system / "sbin/python"):
-            with self.subTest(candidate=candidate):
-                self.assertTrue(candidate.samefile(expected))
-                entry.write_text(f"#!{candidate}\n")
-                with (patch.object(install, "_run", return_value=data),
-                      patch.object(install, "_owner", return_value=[("pacman", "python")]) as owners):
-                    with self.assertRaisesRegex(install.InstallError, "entry point"):
-                        install._probe(prefix)
-                    owners.assert_not_called()
-                    self.assertEqual(install._probe(prefix, system_aliases=True), "1.0.0")
-                queried = {call.args[0] for call in owners.call_args_list}
-                self.assertEqual(queried, {expected, candidate, expected.resolve()})
-
-        entry.write_text(f"#!{prefix / 'sbin/python'}\n")
-        with (patch.object(install, "_run", return_value=data),
-              patch.object(install, "_owner", side_effect=[[("pacman", "python")],
-                                                         [("pacman", "python")], []])):
-            self.assertEqual(install._probe(prefix, system_aliases=True), "1.0.0")
-        for owners in ([], [("rpm", "python")], [("pacman", "python"), ("dpkg-query", "python")]):
-            with self.subTest(owners=owners), patch.object(install, "_run", return_value=data), patch.object(
-                install, "_owner", return_value=owners
-            ):
-                with self.assertRaisesRegex(install.InstallError, "entry point"):
-                    install._probe(prefix, system_aliases=True)
-        with (patch.object(install, "_run", return_value=data),
-              patch.object(install, "_owner", side_effect=[[("pacman", "python")],
-                                                         [("pacman", "python")], [("pacman", "foreign")]])):
-            with self.assertRaisesRegex(install.InstallError, "entry point"):
-                install._probe(prefix, system_aliases=True)
-
     def test_same_python_inode_in_another_venv_does_not_relax_entrypoint_binding(self):
         prefix, _, _ = self.distribution(self.a)
         other, _, _ = self.distribution(self.b)
@@ -547,9 +473,8 @@ class ControllerInstallTests(unittest.TestCase):
         self.assertTrue(foreign.samefile(expected))
         (prefix / "bin/logos-desktop").write_text(f"#!{foreign}\n")
         with patch.object(install, "_owner", return_value=[("pacman", "python")]) as owners:
-            for aliases in (False, True):
-                with self.subTest(aliases=aliases), self.assertRaisesRegex(install.InstallError, "entry point"):
-                    install._probe(prefix, system_aliases=aliases)
+            with self.assertRaisesRegex(install.InstallError, "entry point"):
+                install._probe(prefix)
         owners.assert_not_called()
 
     def test_system_probe_rejects_another_venv_even_when_python_has_the_same_inode(self):
@@ -565,112 +490,20 @@ class ControllerInstallTests(unittest.TestCase):
         with (patch.object(install, "_run", return_value=data),
               patch.object(install, "_owner", return_value=[("pacman", "python")]) as owners):
             with self.assertRaisesRegex(install.InstallError, "entry point"):
-                install._probe(prefix, system_aliases=True)
+                install._probe(prefix)
         owners.assert_not_called()
 
-    def test_identify_enables_system_aliases_only_after_consistent_aur_ownership(self):
-        prefix, package, distribution = self.distribution()
-        self.runtime(prefix, package, distribution)
-        with (patch.object(sys, "prefix", "/usr"),
-              patch.object(install, "_owner", return_value=[("pacman", "logos-desktop")]) as owners,
-              patch.object(install, "_probe", return_value="1.0.0") as probe,
-              patch.object(install, "_run", return_value="logos-desktop 1.0.0-1")):
-            self.assertEqual(install.identify().owner, "aur")
-            self.assertEqual([call.args[0] for call in owners.call_args_list],
-                             [package / "__init__.py", Path("/usr/bin/logos-desktop"),
-                              Path(distribution._path) / "METADATA"])
-            probe.assert_called_once_with(Path("/usr"), system_aliases=True)
-        with (patch.object(sys, "prefix", "/usr"),
-              patch.object(install, "_owner", side_effect=[[("pacman", "logos-desktop")],
-                                                         [("pacman", "logos-desktop")], [("pacman", "foreign")]]),
-              patch.object(install, "_probe") as probe):
-            self.assertEqual(install.identify().owner, "unsupported")
-        probe.assert_not_called()
-
-    def test_identify_accepts_binusr_python_and_path_launcher_but_rejects_foreign_aliases(self):
-        prefix, package, distribution = self.distribution()
-        self.runtime(prefix, package, distribution)
-        system = self.home / "system"
-        system_prefix = system / "usr"
-        (system_prefix / "bin").mkdir(parents=True)
-        (system_prefix / "sbin").symlink_to("bin", target_is_directory=True)
-        python = system_prefix / "bin/python"
-        python.symlink_to(Path(sys.executable).resolve())
-        entry = system_prefix / "bin/logos-desktop"
-        entry.write_text("#!/usr/sbin/python\n")
-        foreign = system / "opt/foreign/bin/logos-desktop"
-        foreign.parent.mkdir(parents=True)
-        foreign.symlink_to(entry)
-        self.assertTrue((system_prefix / "sbin/logos-desktop").samefile(entry))
-        self.assertTrue(foreign.samefile(entry))
-        real_probe = install._probe
-        real_alias = install._system_alias
-
-        def physical(path):
-            path = Path(path)
-            if path.is_relative_to("/usr") or path.is_relative_to("/opt"):
-                return system / path.relative_to("/")
-            return path
-
-        def alias(prefix, candidate, expected, **kwargs):
-            return real_alias(physical(prefix), physical(candidate), physical(expected), **kwargs)
-
-        def run(command, **kwargs):
-            if command[0] == str(python):
-                return json.dumps({"prefix": str(system_prefix), "version": "1.0.0"})
-            self.assertEqual(command, ["pacman", "-Q", "logos-desktop"])
-            return "logos-desktop 1.0.0-1"
-
-        cases = (
-            ("/usr/sbin/logos-desktop", "logos-desktop", "logos-desktop", "aur"),
-            ("/opt/foreign/bin/logos-desktop", "logos-desktop", "logos-desktop", "unsupported"),
-            ("/usr/sbin/logos-desktop", "foreign", "logos-desktop", "unsupported"),
-            ("/usr/sbin/logos-desktop", "logos-desktop", "foreign", "unsupported"),
-        )
-        for selected, alias_package, canonical_package, expected_owner in cases:
-            with self.subTest(selected=selected, alias_package=alias_package, canonical_package=canonical_package):
-                def owner(path):
-                    path = Path(path)
-                    if path in (python, python.resolve(), system_prefix / "sbin/python"):
-                        return [("pacman", "python")]
-                    if path == system_prefix / "sbin/logos-desktop":
-                        return [("pacman", alias_package)]
-                    if path == entry:
-                        return [("pacman", canonical_package)]
-                    return [("pacman", "logos-desktop")]
-
-                # Map only the disposable root's namespace. Alias decisions still
-                # use real resolve/samefile calls for both interpreter and launcher.
-                with (patch.object(sys, "prefix", "/usr"),
-                      patch.object(install, "_owner", side_effect=owner),
-                      patch.object(install, "_run", side_effect=run),
-                      patch.object(install, "_probe", side_effect=lambda path, **kw: real_probe(physical(path), **kw)),
-                      patch.object(install, "_system_alias", side_effect=alias) as aliases,
-                      patch.object(install.shutil, "which", return_value=selected) as which):
-                    identity = install.identify()
-                which.assert_called_once_with("logos-desktop")
-                self.assertEqual(identity.owner, expected_owner, identity.message)
-                candidates = [str(call.args[1]) for call in aliases.call_args_list]
-                self.assertEqual(candidates, ["/usr/sbin/python", selected])
-                self.assertEqual(aliases.call_args.kwargs, {"package": "logos-desktop"})
-                if expected_owner == "aur":
-                    self.assertEqual(identity.launcher, Path("/usr/bin/logos-desktop"))
-                else:
-                    self.assertIn("PATH selects a different controller", identity.message)
-
-    def test_venv_path_alias_to_same_launcher_is_not_admitted_as_system_alias(self):
+    def test_unregistered_path_alias_to_same_launcher_is_not_admitted(self):
         prefix, package, distribution = self.distribution()
         self.runtime(prefix, package, distribution)
         alternate = self.home / "other-bin/logos-desktop"
         alternate.parent.mkdir()
         alternate.symlink_to(self.root / "logos-desktop")
         self.assertTrue(alternate.samefile(self.root / "logos-desktop"))
-        with (patch.object(install.shutil, "which", return_value=str(alternate)),
-              patch.object(install, "_system_alias") as system_alias):
+        with patch.object(install.shutil, "which", return_value=str(alternate)):
             identity = install.identify()
         self.assertEqual(identity.owner, "unsupported")
         self.assertIn("PATH selects a different controller", identity.message)
-        system_alias.assert_not_called()
 
     def test_nonprivate_root_and_symlink_parent_are_refused(self):
         self.root.chmod(0o755)
@@ -1452,329 +1285,6 @@ class ControllerInstallTests(unittest.TestCase):
                     result = install.handoff(self.identity, None, frontend, checkpoint=checkpoint)
                 self.assertEqual(result.status, "handed-off")
                 self.assertEqual(sequence[-1], "popen")
-
-    def test_aur_rpc_version_and_recipe_pin_are_provider_specific(self):
-        identity = install.Identity("aur", "1.0.0", "1.0.0-2", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=self.home / "aur/provider.json")
-        self.assertEqual(install.check(identity).status, "unavailable")
-        identity.provider_path.parent.mkdir(mode=0o700)
-        install._write(identity.provider_path, {
-            "schema": 1, "installation": "/usr/bin/logos-desktop",
-            "rpc_url": "https://aur.archlinux.org/rpc/v5/info?arg[]=logos-desktop",
-            "git_url": "https://aur.archlinux.org/logos-desktop.git",
-        })
-        rpc = {"type": "multiinfo", "resultcount": 1,
-               "results": [{"Name": "logos-desktop", "PackageBase": "logos-desktop", "Version": "1.0.0-3"}]}
-        with patch.object(install, "_download", return_value=(json.dumps(rpc).encode(), "")), patch.object(
-            install, "_run", side_effect=["1", "d" * 40 + "\tHEAD"]
-        ) as run:
-            result = install.check(identity)
-        self.assertEqual(result.status, "available")
-        self.assertEqual(result.artifact["commit"], "d" * 40)
-        self.assertEqual(run.call_args_list[0].args[0], ["vercmp", "1.0.0-3", "1.0.0-2"])
-        rpc["results"][0]["Name"] = "logos-desktop-bin"
-        with patch.object(install, "_download", return_value=(json.dumps(rpc).encode(), "")):
-            self.assertEqual(install.check(identity).status, "unavailable")
-
-    def test_aur_source_ahead_and_empty_rpc_disable_handoff_without_wheel_conversion(self):
-        identity, config, bodies, requests, rpc, source = self.aur_metadata_provider()
-        for package_version in ("1.0.0-1", "2:1.0.0-3", None):
-            with self.subTest(package_version=package_version):
-                if package_version is None:
-                    rpc.update(resultcount=0, results=[])
-                else:
-                    rpc["results"][0]["Version"] = package_version
-                bodies["/rpc"] = (200, json.dumps(rpc).encode())
-                requests.clear()
-                current = install.Identity("aur", "1.0.0", package_version or "1.0.0-1",
-                                           launcher=identity.launcher, provider_path=identity.provider_path)
-                with (patch.object(install, "_run", return_value="0") as commands,
-                      patch.object(install, "identify", return_value=current),
-                      patch.object(subprocess, "Popen") as launch,
-                      patch.object(install, "_wheel_update") as wheel):
-                    result = install.handoff(current, self.home / "profile space.json", "qt")
-                self.assertEqual(result.status, "provider-lag")
-                self.assertEqual(result.version, "1.1.0")
-                self.assertIn("Source release 1.1.0 is not yet available from AUR", result.message)
-                self.assertIsNone(result.artifact)
-                self.assertEqual(result.command, ())
-                self.assertEqual(requests, ["/rpc", "/source"])
-                self.assertFalse(any(call.args[0][0] == "git" for call in commands.call_args_list))
-                launch.assert_not_called()
-                wheel.assert_not_called()
-
-    def test_aur_current_source_is_optional_and_newer_aur_recipe_keeps_its_owner(self):
-        identity, config, bodies, requests, rpc, source = self.aur_metadata_provider()
-        source.update(version="1.0.0", filename="logos_desktop-1.0.0-py3-none-any.whl")
-        bodies["/source"] = (200, json.dumps(source).encode())
-        with patch.object(install, "_run", return_value="0") as commands:
-            self.assertEqual(install.check(identity).status, "current")
-        self.assertEqual(requests, ["/rpc", "/source"])
-        self.assertEqual(commands.call_args.args[0], ["vercmp", "1.0.0-1", "1.0.0-1"])
-
-        del config["release_manifest_url"]
-        install._write(identity.provider_path, config)
-        requests.clear()
-        with patch.object(install, "_run", return_value="0"):
-            result = install.check(identity)
-        self.assertEqual(result.status, "current")
-        self.assertIn("from AUR", result.message)
-        self.assertIn("Source release availability was not checked", result.message)
-        self.assertEqual(requests, ["/rpc"])
-
-        # An actual newer AUR recipe remains usable even if the optional source feed is down.
-        config["release_manifest_url"] = config["rpc_url"].replace("/rpc", "/missing-source")
-        install._write(identity.provider_path, config)
-        rpc["results"][0]["Version"] = "1.1.0-1"
-        bodies["/rpc"] = (200, json.dumps(rpc).encode())
-        requests.clear()
-        with patch.object(install, "_run", side_effect=["1", "d" * 40 + "\tHEAD"]):
-            result = install.check(identity)
-        self.assertEqual(result.status, "available")
-        self.assertEqual(result.artifact, {"version": "1.1.0-1", "commit": "d" * 40,
-                                          "git_url": config["git_url"]})
-        self.assertEqual(requests, ["/rpc"])
-
-    def test_aur_configured_source_failure_never_silently_reports_current(self):
-        identity, config, bodies, requests, rpc, source = self.aur_metadata_provider()
-        unreachable = socket.socket()
-        self.addCleanup(unreachable.close)
-        unreachable.bind(("127.0.0.1", 0))
-        closed_url = f"http://127.0.0.1:{unreachable.getsockname()[1]}/source"
-        normal_url = config["release_manifest_url"]
-        cases = (
-            (closed_url, (200, json.dumps(source).encode()), "offline"),
-            (normal_url, (503, b"source unavailable"), "unavailable"),
-            (normal_url, (200, json.dumps({**source, "sha256": "bad"}).encode()), "unavailable"),
-            (normal_url, (200, b"[]"), "unavailable"),
-            (normal_url, (200, json.dumps({**source, "url": []}).encode()), "unavailable"),
-        )
-        for url, response, expected_status in cases:
-            with self.subTest(url=url, response=response):
-                config["release_manifest_url"] = url
-                install._write(identity.provider_path, config)
-                bodies["/source"] = response
-                requests.clear()
-                with patch.object(install, "_run", return_value="0") as commands:
-                    result = install.check(identity)
-                self.assertEqual(result.status, expected_status)
-                self.assertIsNone(result.artifact)
-                self.assertEqual(result.command, ())
-                self.assertNotIn("/source.whl", requests)
-                self.assertFalse(any(call.args[0][0] == "git" for call in commands.call_args_list))
-
-    def test_aur_review_decline_and_makepkg_failure_use_pinned_recipe(self):
-        identity = install.Identity("aur", "1.0.0", "1.0.0-1", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=self.home / "aur/provider.json")
-        release = {"version": "1.1.0-1", "commit": "d" * 40, "git_url": "https://example.invalid/aur.git"}
-
-        def run(command, **kwargs):
-            if "clone" in command:
-                build = Path(command[-1])
-                build.mkdir()
-                (build / "PKGBUILD").write_text("# disposable recipe fixture\n")
-                (build / ".SRCINFO").write_text(
-                    "pkgbase = logos-desktop\n pkgver = 1.1.0\n pkgrel = 1\n arch = x86_64\npkgname = logos-desktop"
-                )
-            if "rev-parse" in command:
-                return release["commit"]
-            if "ls-tree" in command:
-                return self.recipe_tree(kwargs["cwd"])
-            if command == ["makepkg", "--printsrcinfo"]:
-                return "pkgbase = logos-desktop\n pkgver = 1.1.0\n pkgrel = 1\n arch = x86_64\npkgname = logos-desktop"
-            return "fixture recipe diff"
-
-        with (patch.object(install, "identify", return_value=identity),
-              patch.object(install, "_run", side_effect=run) as commands,
-              patch("builtins.input", return_value="NO"), patch("builtins.print"),
-              patch.object(subprocess, "run") as makepkg):
-            self.assertEqual(install._aur_update(identity, release).status, "cancelled")
-        makepkg.assert_not_called()
-        self.assertTrue(any(call.args[0] == ["git", "checkout", "--detach", release["commit"]]
-                            for call in commands.call_args_list))
-        results = [subprocess.CompletedProcess([], 1, "", ""), subprocess.CompletedProcess([], 1)]
-        with (patch.object(install, "identify", return_value=identity),
-              patch.object(install, "_run", side_effect=run), patch("builtins.input", return_value="REVIEWED"),
-              patch("builtins.print"), patch.object(subprocess, "run", side_effect=results) as makepkg):
-            self.assertEqual(install._aur_update(identity, release).status, "failed")
-        self.assertEqual(makepkg.call_args.args[0], ["makepkg", "-si"])
-        self.assertNotIn("-Syu", str(makepkg.call_args_list))
-        self.assertEqual(install._target(self.root), self.a)
-
-    def test_aur_refuses_nested_and_symlink_recipes_before_any_makepkg(self):
-        identity = install.Identity("aur", "1.0.0", "1.0.0-1", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=self.home / "aur/provider.json")
-        release = {"version": "1.1.0-1", "commit": "d" * 40, "git_url": "https://example.invalid/aur.git"}
-        srcinfo = "pkgbase = logos-desktop\n pkgver = 1.1.0\n pkgrel = 1\n arch = x86_64\npkgname = logos-desktop"
-        for layout in ("nested", "symlink-helper", "symlink-PKGBUILD", "untracked-directory"):
-            with self.subTest(layout=layout):
-                tree = []
-
-                def run(command, **kwargs):
-                    if "clone" in command:
-                        build = Path(command[-1])
-                        build.mkdir()
-                        contents = {"PKGBUILD": b"source helpers/build.sh\n", ".SRCINFO": srcinfo.encode()}
-                        if layout == "nested":
-                            contents["helpers/build.sh"] = b"echo undisplayed\n"
-                        if layout == "symlink-helper":
-                            contents["helper.sh"] = b"external-helper"
-                        for name, content in contents.items():
-                            path = build / name
-                            path.parent.mkdir(exist_ok=True)
-                            mode = "100644"
-                            if name == "helper.sh" or (layout == "symlink-PKGBUILD" and name == "PKGBUILD"):
-                                path.symlink_to("external-helper")
-                                mode = "120000"
-                            else:
-                                path.write_bytes(content)
-                            digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-                            tree.append(f"{mode} blob {digest}\t{name}\0")
-                        if layout == "untracked-directory":
-                            (build / "helpers").mkdir()
-                    if "rev-parse" in command:
-                        return release["commit"]
-                    if "ls-tree" in command:
-                        return "".join(tree)
-                    return "fixture diff"
-
-                with (patch.object(install, "identify", return_value=identity),
-                      patch.object(install, "_run", side_effect=run) as commands,
-                      patch.object(subprocess, "run") as packages, patch("builtins.input") as approve):
-                    with self.assertRaises(install.InstallError):
-                        install._aur_update(identity, release)
-                packages.assert_not_called()
-                approve.assert_not_called()
-                self.assertFalse(any(call.args[0][0] == "makepkg" for call in commands.call_args_list))
-
-    def test_successful_aur_cli_preserves_frontend_and_spaced_config_in_restart_command(self):
-        identity = install.Identity("aur", "1.0.0", "1.0.0-1", launcher=Path("/usr/bin/logos-desktop"),
-                                    provider_path=self.home / "aur/provider.json")
-        release = {"version": "1.1.0-1", "commit": "d" * 40, "git_url": "https://example.invalid/aur.git"}
-        srcinfo = "pkgbase = logos-desktop\n pkgver = 1.1.0\n pkgrel = 1\n arch = x86_64\npkgname = logos-desktop"
-        profile = self.home / "profile with spaces" / "config file.json"
-        update = install._aur_update
-
-        def run(command, **kwargs):
-            if "rev-parse" in command:
-                return release["commit"]
-            if command == ["makepkg", "--printsrcinfo"]:
-                return srcinfo
-            if command == ["pacman", "-Q", "logos-desktop"]:
-                return "logos-desktop 1.1.0-1"
-            return "fixture recipe review"
-
-        for frontend in ("qt", "tui"):
-            with self.subTest(frontend=frontend):
-                outcomes = []
-
-                def perform(*args):
-                    result = update(*args)
-                    outcomes.append(result)
-                    return result
-
-                results = [subprocess.CompletedProcess([], 1, "", ""), subprocess.CompletedProcess([], 0)]
-                with (patch.object(install, "identify", return_value=identity),
-                      patch.object(install, "check", return_value=install.Result("available", "fixture", "1.1.0-1",
-                                                                               release)),
-                      patch.object(install, "_aur_update", side_effect=perform) as updater,
-                      patch.object(install, "_run", side_effect=run),
-                      patch.object(install, "_recipe_files", return_value={"PKGBUILD": "fixture", ".SRCINFO": srcinfo}),
-                      patch.object(install, "_owner", return_value=[("pacman", "logos-desktop")]),
-                      patch.object(subprocess, "run", side_effect=results),
-                      patch.object(subprocess, "Popen") as restart,
-                      patch.object(sys.stdin, "isatty", return_value=False),
-                      patch("builtins.input", return_value="REVIEWED"), patch("builtins.print") as output):
-                    self.assertEqual(install.main(["handoff", "--config", str(profile), "--frontend", frontend]), 0)
-                updater.assert_called_once_with(identity, release, str(profile), frontend)
-                expected = ("/usr/bin/logos-desktop", "-c", str(profile), "--dialog", frontend)
-                self.assertEqual(outcomes[0].status, "restart-required")
-                self.assertEqual(outcomes[0].command, expected)
-                output.assert_any_call("Restart command: " + shlex.join(expected))
-                self.assertIn("not been verified", outcomes[0].message)
-                restart.assert_not_called()
-
-    def test_aur_tui_pty_keeps_restart_command_and_errors_visible_until_acknowledged(self):
-        profile = self.home / "profile with spaces" / "config file.json"
-        srcinfo = "pkgbase = logos-desktop\n pkgver = 1.1.0\n pkgrel = 1\n arch = x86_64\npkgname = logos-desktop"
-        expected = ("/usr/bin/logos-desktop", "-c", str(profile), "--dialog", "tui")
-        for transaction_status in (0, 1):
-            with self.subTest(transaction_status=transaction_status):
-                source = textwrap.dedent(f"""\
-                    import fcntl
-                    import os
-                    from pathlib import Path
-                    import subprocess
-                    import termios
-                    from logos_desktop import controller_install as c
-
-                    os.setsid()
-                    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-                    identity = c.Identity('aur', '1.0.0', '1.0.0-1',
-                        launcher=Path('/usr/bin/logos-desktop'),
-                        provider_path=Path({str(self.home / 'aur/provider.json')!r}))
-                    release = {{'version': '1.1.0-1', 'commit': 'd' * 40,
-                               'git_url': 'https://example.invalid/aur.git'}}
-                    srcinfo = {srcinfo!r}
-                    c.identify = lambda: identity
-                    c.check = lambda identity: c.Result('available', 'fixture', '1.1.0-1', release)
-                    c._recipe_files = lambda build, commit: {{'PKGBUILD': 'fixture', '.SRCINFO': srcinfo}}
-                    c._owner = lambda path: [('pacman', 'logos-desktop')]
-
-                    def run(command, **kwargs):
-                        if 'rev-parse' in command:
-                            return release['commit']
-                        if command == ['makepkg', '--printsrcinfo']:
-                            return srcinfo
-                        if command == ['pacman', '-Q', 'logos-desktop']:
-                            return 'logos-desktop 1.1.0-1'
-                        return 'fixture recipe review'
-
-                    def transaction(command, **kwargs):
-                        code = 1 if command == ['pacman', '-Qu'] else {transaction_status}
-                        return subprocess.CompletedProcess(command, code, '', '')
-
-                    c._run = run
-                    subprocess.run = transaction
-                    raise SystemExit(c.main(['handoff', '--frontend', 'tui', '--config', {str(profile)!r}]))
-                    """)
-                master, slave = pty.openpty()
-                env = {**os.environ, "HOME": str(self.home)}
-                helper = subprocess.Popen([sys.executable, "-c", source], stdin=slave, stdout=slave,
-                                          stderr=slave, env=env)
-                os.close(slave)
-                output = bytearray()
-
-                def read_until(text):
-                    deadline = time.monotonic() + 5
-                    while text not in output and time.monotonic() < deadline:
-                        ready, _, _ = select.select([master], [], [], 0.1)
-                        if ready:
-                            try:
-                                output.extend(os.read(master, 65536))
-                            except OSError:
-                                break
-                    self.assertIn(text, output)
-
-                try:
-                    read_until(b"Type REVIEWED")
-                    os.write(master, b"REVIEWED\n")
-                    read_until(b"Press Enter to close this helper:")
-                    if transaction_status == 0:
-                        self.assertIn(b"restart-required:", output)
-                        self.assertIn(("Restart command: " + shlex.join(expected)).encode(), output)
-                        self.assertIn(b"not been verified", output)
-                    else:
-                        self.assertIn(b"failed: makepkg or package authorization failed", output)
-                    time.sleep(0.15)
-                    self.assertIsNone(helper.poll(), "AUR result must remain visible until acknowledgement")
-                    os.write(master, b"\n")
-                    self.assertEqual(helper.wait(timeout=5), transaction_status)
-                finally:
-                    if helper.poll() is None:
-                        helper.terminate()
-                        helper.wait(timeout=5)
-                    os.close(master)
 
     def test_bootstrap_script_checks_hash_before_executing_packaged_implementation(self):
         marker = self.home / "must-not-execute"

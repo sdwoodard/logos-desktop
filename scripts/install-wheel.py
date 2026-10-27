@@ -74,10 +74,12 @@ def latest_release():
     return data
 
 
-def configure_updates(root):
+def configure_installation(root, *, modify_path=True):
     prefix = (root / "current").resolve()
-    command = [str(prefix / "bin/python"), "-I", "-m", "logos_desktop.controller_install", "configure-provider"]
-    retry = "Controller installed, but update setup failed. Retry with: " + shlex.join(command)
+    command = [str(prefix / "bin/python"), "-I", "-m", "logos_desktop.controller_install", "setup"]
+    if not modify_path:
+        command.append("--no-path")
+    retry = "Controller installed, but launcher setup failed. Retry with: " + shlex.join(command)
     try:
         result = subprocess.run(command, check=False)
     except OSError as error:
@@ -98,6 +100,7 @@ def main(argv=None):
     parser.add_argument("--migrate", action="store_true", help="Migrate an explicitly selected managed installation")
     parser.add_argument("--config", help="Absolute existing profile path, required for migration")
     parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
+    parser.add_argument("--no-path", action="store_true", help="Leave shell startup files unchanged")
     args = parser.parse_args(argv)
     if args.latest:
         if any(value is not None for value in (args.version, args.sha256, args.size, args.config)) or args.migrate:
@@ -117,8 +120,11 @@ def main(argv=None):
         print("Checking the latest stable LogosDesktop release…", flush=True)
         data = latest_release()
         args.wheel, args.version, args.sha256, args.size = data["url"], data["version"], data["sha256"], data["size"]
-    elif any(value is None for value in (args.root, args.version, args.sha256, args.size)):
-        parser.error("Explicit wheels require --root, --version, --sha256 and --size")
+    else:
+        if args.no_path:
+            parser.error("--no-path is only supported with --latest")
+        if any(value is None for value in (args.root, args.version, args.sha256, args.size)):
+            parser.error("Explicit wheels require --root, --version, --sha256 and --size")
 
     if (re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?", args.version) is None
             or re.fullmatch(r"[0-9a-f]{64}", args.sha256) is None
@@ -154,8 +160,8 @@ def main(argv=None):
             arguments.extend(["--migrate", "--config", args.config, "--frontend", args.frontend])
         result = module.bootstrap(arguments)
         if result == 0 and args.latest:
-            configure_updates(root)
-            print("Updates are configured. Open LogosDesktop with:\n" + shlex.join([str(root / "logos-desktop")]))
+            configure_installation(root, modify_path=not args.no_path)
+            print("Installation complete. Find LogosDesktop in your application menu.")
         return result
 
 

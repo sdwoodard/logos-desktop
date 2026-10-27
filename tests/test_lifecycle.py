@@ -788,20 +788,6 @@ except maintenance.MaintenanceBusy:
                 child.wait(3)
                 self.assertEqual(self.manager._watchers, {})
 
-    def test_owned_verbum_run_uses_the_same_late_policy_contract(self):
-        self.app.conf._raw.faithlife_product = "Verbum"
-        self.app.conf.logos_exe = str(self.root / "Verbum.exe")
-        self.app.conf.logos_system_exe_windows_path = r"C:\fixture\Verbum.exe"
-        root, run, child = self.pending_policy_run("Verbum")
-        paths = self.policy_files(root)
-        self.create_updates(paths[0])
-        self.create_preferences(paths[1])
-        self.wait_for_policies(run)
-        self.assertEqual(run.context.product, "Verbum")
-        self.assertEqual(run.policies.target[0], root.resolve())
-        self.assert_policy_rows(paths, enforced=True)
-        self.assertIsNone(child.poll())
-
     def test_late_parent_file_schema_and_preference_row_are_never_fabricated(self):
         root, run, child = self.pending_policy_run()
         paths = self.policy_files(root)

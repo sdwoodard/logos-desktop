@@ -26,7 +26,7 @@ class TestMaintenance(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.addCleanup(patch.stopall)
-        patch.object(constants, "STATE_DIR", str(self.root / "state/FaithLife-Community")).start()
+        patch.object(constants, "STATE_DIR", str(self.root / "state/logos-desktop")).start()
         self.app = fixture_app(self.root)
         self.context = maintenance.Context.from_app(self.app)
         self.app.conf.install_dir = str(self.context.install)
@@ -316,7 +316,7 @@ time.sleep(20)
         thread.start()
         try:
             self.assertTrue(entered.wait(5))
-            for attribute, value in (("install_dir", self.root / "other"), ("faithlife_product", "Verbum")):
+            for attribute, value in (("install_dir", self.root / "other"), ("faithlife_product", "OtherProduct")):
                 with self.assertRaises(maintenance.MaintenanceBusy):
                     setattr(configuration, attribute, value)
             with patch("logos_desktop.config.PersistentConfiguration.load_from_path", return_value=configuration._raw):

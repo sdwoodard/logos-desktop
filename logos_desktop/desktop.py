@@ -25,7 +25,7 @@ def controller_launcher(identity=None):
     from . import controller_install
 
     identity = identity or controller_install.identify()
-    if identity.owner in ("venv", "aur") and identity.launcher is not None:
+    if identity.owner == "venv" and identity.launcher is not None:
         return [str(identity.launcher)]
     if getattr(sys, "frozen", False):
         return [sys.executable]

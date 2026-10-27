@@ -29,13 +29,13 @@ from . import instance
 
 
 def get_parser():
-    desc = "Installs FaithLife Bible Software with Wine."
+    desc = "Install and manage Logos on Linux through Wine."
     parser = argparse.ArgumentParser(description=desc)
     parser.add_argument(
         '-v', '--version', action='version',
         version=(
             f"{constants.APP_NAME}, "
-            f"{constants.LLI_CURRENT_VERSION} by {constants.LLI_AUTHOR}"
+            f"{constants.LLI_CURRENT_VERSION}"
         ),
     )
 
@@ -131,19 +131,19 @@ def get_parser():
     )
     cmd.add_argument(
         '--install-app', action='store_true',
-        help='install FaithLife app',
+        help='install Logos',
     )
     cmd.add_argument(
         '--update-installed-app', action='store_true',
-        help='update the installed FaithLife app to the latest release',
+        help='update Logos to the latest release',
     )
     cmd.add_argument(
         '--run-installed-app', '-C', action='store_true',
-        help='run installed FaithLife app',
+        help='run Logos',
     )
     cmd.add_argument(
         '--stop-installed-app', action='store_true',
-        help='stop the installed FaithLife app if running',
+        help='stop Logos if running',
     )
     cmd.add_argument(
         '--run-indexing', action='store_true',
@@ -266,7 +266,7 @@ def parse_args(args, parser) -> Tuple[EphemeralConfiguration, Callable[[Ephemera
     if args.set_appimage:
         ephemeral_config.wine_appimage_path = str(config_store.absolute_path(args.set_appimage[0]))
 
-    if args.skip_dependencies or constants.RUNMODE == 'snap':
+    if args.skip_dependencies:
         ephemeral_config.install_dependencies_skip = True
 
     if args.force_root:
@@ -478,7 +478,7 @@ def run_controller_update(args):
     from . import controller_install
 
     identity = controller_install.identify()
-    if identity.owner in ("venv", "aur"):
+    if identity.owner == "venv":
         config_path = args.config or LegacyConfiguration.config_file_path()
         overrides = EphemeralConfiguration.load_from_path(config_path)
         frontend = args.dialog or overrides.dialog or "qt"
@@ -653,7 +653,7 @@ def _run_owned(ephemeral_config, action, diagnostic):
         sys.exit(1)
 
     # Print terminal banner
-    logging.info(f"{constants.APP_NAME}, {constants.LLI_CURRENT_VERSION} by {constants.LLI_AUTHOR}.")
+    logging.info(f"{constants.APP_NAME}, {constants.LLI_CURRENT_VERSION}.")
 
     try:
         run(ephemeral_config, action)

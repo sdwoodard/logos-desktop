@@ -34,7 +34,7 @@ class TestRecoveryDispatch(unittest.TestCase):
         patch.object(constants, "STATE_DIR", str(self.root / "state/app")).start()
         self.user = "fixture-" + self.root.name
         self.profiles = []
-        for name, product in (("other", "Verbum"), ("chosen", "Logos")):
+        for name, product in (("other", "Logos"), ("chosen", "Logos")):
             install = self.root / name
             prefix = self.root / f"{name}-prefix"
             appdata = prefix / f"drive_c/users/{self.user}/AppData/Local/{product}"

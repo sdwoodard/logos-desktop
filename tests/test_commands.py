@@ -54,7 +54,7 @@ finally:
         self.assertEqual(set(self.root.rglob('*')), before)
 
     def test_missing_default_does_not_discover_or_import_and_explicit_config_wins(self):
-        legacy = self.root / 'config/FaithLife-Community/Logos_on_Linux.json'
+        legacy = self.root / 'config/other-controller/profile.json'
         legacy.parent.mkdir(parents=True)
         legacy.write_bytes(self.config.read_bytes())
         result = self.run_command('--doctor')
@@ -67,7 +67,7 @@ finally:
         self.assertFalse((self.root / 'config/logos-desktop/config.json').exists())
 
     def test_explicit_legacy_cli_actions_refuse_missing_default_without_qt(self):
-        legacy = self.root / 'config/FaithLife-Community/Logos_on_Linux.json'
+        legacy = self.root / 'config/other-controller/profile.json'
         legacy.parent.mkdir(parents=True)
         original = self.config.read_bytes()
         legacy.write_bytes(original)
@@ -191,7 +191,6 @@ class TestNormalGraphicalStartup(unittest.TestCase):
             with (
                 patch.dict(os.environ, {'DIALOG': 'qt'}, clear=True),
                 patch.object(constants, 'DEFAULT_CONFIG_PATH', str(destination)),
-                patch.object(constants, 'LEGACY_CONFIG_FILES', [str(legacy)]),
                 patch.object(constants, 'COORDINATION_DIR', root / 'coordination'),
                 patch.object(constants, 'STATE_DIR', str(root / 'state/logos-desktop')),
                 patch.object(LegacyConfiguration, 'load', side_effect=AssertionError('No implicit legacy selection')),

@@ -28,7 +28,7 @@ class TestUninstallBoundaries(unittest.TestCase):
         self.config.write_text(json.dumps(portable))
         self.base = self.root / "shared cache"
         self.cache = self.base / "logos-desktop"
-        self.state = self.root / "state/FaithLife-Community"
+        self.state = self.root / "state/logos-desktop"
         self.state.mkdir(parents=True)
         overrides = SimpleNamespace(config_path=str(self.config), install_dir=None)
         self.app = SimpleNamespace(
@@ -39,7 +39,7 @@ class TestUninstallBoundaries(unittest.TestCase):
         patch.multiple(
             constants, CACHE_BASE=self.base, CACHE_DIR=str(self.cache),
             NETWORK_CACHE_PATH=str(self.cache / "network.json"), STATE_DIR=str(self.state),
-            CONFIG_DIR=str(self.root / "config/FaithLife-Community"), XDG_DATA_HOME=str(self.root / "data"),
+            CONFIG_DIR=str(self.root / "config/logos-desktop"), XDG_DATA_HOME=str(self.root / "data"),
         ).start()
 
     def test_valid_cleanup_preserves_shared_sentinels_and_link_targets(self):

@@ -581,13 +581,6 @@ def get_package_manager() -> PackageManager | None:
                 "mesa-utils "  # verify opengl version
             )
         incompatible_packages = ""  # appimagelauncher handled separately
-    elif os_name == "org.freedesktop.platform":
-        # Flatpak
-        # Dependencies are managed by the flatpak
-        install_command = download_command = remove_command = query_command =  ["/usr/bin/true"] 
-        query_prefix = ''
-        packages = ""
-        incompatible_packages = ""
     else:
         # Add more conditions for other package managers as needed.
         logging.critical("Your package manager is not yet supported. Please contact the developers.") 

@@ -89,7 +89,7 @@ class TestPrivateUpdates(unittest.TestCase):
 
 class TestPrivateSupport(unittest.TestCase):
     def test_support_choices_keep_archive_local_or_open_only_private_project(self):
-        for choice in ("Keep archive local", "Open private project issue", "Show links"):
+        for choice in ("Keep archive local", "Open project issue", "Show links"):
             with self.subTest(choice=choice), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config_path = root / "fixture-config.json"
@@ -130,9 +130,9 @@ class TestPrivateSupport(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(archive_path.stat().st_mode), 0o600)
 
                 question, options = app.ask.call_args.args
-                self.assertEqual(options, ["Keep archive local", "Open private project issue", "Show links"])
+                self.assertEqual(options, ["Keep archive local", "Open project issue", "Show links"])
                 self.assertNotIn("Upload", question)
-                if choice == "Open private project issue":
+                if choice == "Open project issue":
                     browser.assert_called_once_with(
                         ["xdg-open", "https://github.com/sdwoodard/logos-desktop/issues/new"],
                         timeout=10, check=False,
@@ -143,7 +143,6 @@ class TestPrivateSupport(unittest.TestCase):
                 if choice == "Show links":
                     links = app.info.call_args.args[0]
                     self.assertIn("https://github.com/sdwoodard/logos-desktop/issues", links)
-                    self.assertNotIn("FaithLife-Community", links)
                     self.assertNotIn("t.me", links)
                     self.assertNotIn("matrix.to", links)
 

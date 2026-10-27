@@ -197,11 +197,10 @@ def _recover_locked(app, context):
         source = Path(record.get("source", app.conf._overrides.config_path))
         destination = Path(getattr(app.conf._overrides, "config_destination", None) or app.conf._overrides.config_path)
         if source != destination:
-            allowed_sources = {Path(app.conf._overrides.config_path)}
-            if destination == Path(constants.DEFAULT_CONFIG_PATH):
-                allowed_sources.update(Path(path) for path in constants.LEGACY_CONFIG_FILES)
+            if source != Path(app.conf._overrides.config_path):
+                raise ValueError("Select the recorded source profile explicitly before runtime recovery")
             unchanged = hashlib.sha256(source.read_bytes()).hexdigest() == record["source_hash"]
-            if source not in allowed_sources or not unchanged:
+            if not unchanged:
                 raise ValueError("Migration source changed during runtime recovery")
         proposed = record["next"]
         if {saved["path"] for saved in proposed} != allowed or len(proposed) != len(allowed):

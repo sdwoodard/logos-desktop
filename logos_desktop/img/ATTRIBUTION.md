@@ -10,4 +10,4 @@ Source revision: `02eb9161b57917ccaa262f1bf070507cddde3b08`.
 The adaptation preserves the glyph paths and adds a blue rounded-square background,
 white strokes and application-sized placement. logos-desktop-icon.png is rendered
 from this SVG master. The icon represents the independent LogosDesktop controller.
-It is not a Logos or Verbum corporate mark.
+It is not a Logos corporate mark.

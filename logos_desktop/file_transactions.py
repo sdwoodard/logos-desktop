@@ -68,7 +68,15 @@ def publish_files(journal, record):
         for target, item in zip(targets, record['files']):
             if target.previous != decode_content(item['before']):
                 raise FileTransactionError(f'Target changed since preview: {target.path}')
-            target.stage(decode_content(item['after']))
+            if 'before_mode' in item:
+                mode = (stat.S_IMODE(os.stat(target.path.name, dir_fd=target.fd, follow_symlinks=False).st_mode)
+                        if target.previous is not None else None)
+                if mode != item['before_mode']:
+                    raise FileTransactionError(f'Target permissions changed since preview: {target.path}')
+            if 'mode' in item:
+                target.stage(decode_content(item['after']), mode=item['mode'])
+            else:
+                target.stage(decode_content(item['after']))
         write_record(journal, record)
 
         for target, item in zip(targets, record['files']):
@@ -96,20 +104,27 @@ def rollback_files(journal, record, *, preserve=(), dependents=None):
             continue
         with config_store.Target(item['path']) as target:
             before, after = decode_content(item['before']), decode_content(item['after'])
-            if target.previous == before:
+            current_mode = (stat.S_IMODE(os.stat(target.path.name, dir_fd=target.fd,
+                                                follow_symlinks=False).st_mode)
+                            if target.previous is not None else None)
+            if target.previous == before and ('before_mode' not in item or current_mode == item['before_mode']):
                 continue
             identity = item.get('publication_identity')
             same_publication = identity is None or (
                 target.identity is not None and list(target.identity[:2]) == identity
             )
-            if target.previous != after or not same_publication:
+            if (target.previous != after or not same_publication
+                    or ('mode' in item and current_mode != item['mode'])):
                 retain(str(target.path))
                 continue
             target.validate()
             if before is None:
                 os.unlink(target.path.name, dir_fd=target.fd)
             else:
-                target.stage(before)
+                if 'before_mode' in item:
+                    target.stage(before, mode=item['before_mode'])
+                else:
+                    target.stage(before)
                 target.publish()
             os.fsync(target.fd)
 

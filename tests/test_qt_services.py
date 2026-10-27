@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 import hashlib
 import os
+from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -74,7 +75,9 @@ class TestProductionServices(QtCase):
         from unittest.mock import Mock
         from logos_desktop import controller_install
 
-        identity = controller_install.Identity("aur", "1.0.0", "1.0.0-1")
+        controller = self.root / "controller"
+        controller.mkdir(mode=0o700)
+        identity = controller_install.Identity("venv", "1.0.0", "1.0.0", root=controller)
         terminal = Mock()
 
         def accept(*args, **kwargs):
@@ -82,6 +85,7 @@ class TestProductionServices(QtCase):
             return terminal
 
         with (patch.object(controller_install, "identify", return_value=identity),
+              patch.object(Path, "home", return_value=self.root),
               patch.object(controller_install, "check", return_value=controller_install.Result("available", "B")),
               patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
               patch.object(controller_install.subprocess, "Popen", side_effect=accept) as popen):
@@ -96,7 +100,7 @@ class TestProductionServices(QtCase):
             popen.assert_called_once()
             terminal.terminate.assert_not_called()
             terminal.kill.assert_not_called()
-            self.assertIn("command to restart this profile", window.app.approve.call_args.args[1])
+            self.assertIn("helper launches the new controller", window.app.approve.call_args.args[1])
             failure.assert_not_called()
             stop.assert_not_called()
             self.assertEqual(window.services.snapshot().controller_status, "handed-off")
@@ -812,7 +816,7 @@ class TestProductionServices(QtCase):
         for saved in (False, True):
             if saved:
                 document = json.loads(self.config.read_text())
-                document["LOGOS64_URL"] = "https://example.invalid/Verbum.msi"
+                document["LOGOS64_URL"] = "https://example.invalid/OtherProduct.msi"
                 self.config.write_text(json.dumps(document))
                 app.conf.reload()
                 app.conf._overrides.environment = {}
@@ -1025,10 +1029,8 @@ class TestProductionServices(QtCase):
         legacy.write_text(json.dumps(document))
         (install / f"{constants.BINARY_NAME}.json").write_text(json.dumps(document))
         destination = self.root / "new-default.json"
-        with (patch.object(constants, "DEFAULT_CONFIG_PATH", str(destination)),
-              patch.object(constants, "LEGACY_CONFIG_FILES", [str(legacy)]),
-              patch.dict(os.environ, {"WINEDEBUG": "-all"}, clear=True)):
-            discovered = EphemeralConfiguration.load()
+        with patch.dict(os.environ, {"WINEDEBUG": "-all"}, clear=True):
+            discovered = EphemeralConfiguration.project(document, str(legacy), destination=str(destination))
         self.assertEqual(discovered.config_path, str(legacy))
         self.assertEqual(discovered.config_destination, str(destination))
         window = self.window(Services(), configuration=discovered)

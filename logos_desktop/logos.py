@@ -16,7 +16,7 @@ from . import wine
 
 
 # Linux comm exposes at most 15 bytes of a Windows executable's process name.
-INDEXER_PROCESS_NAMES = {"logosindexer.exe", "verbumindexer.exe"}
+INDEXER_PROCESS_NAMES = {"logosindexer.exe"}
 INDEXER_PROCESS_NAMES |= {name[:15] for name in INDEXER_PROCESS_NAMES}
 _CURRENT_POLICY_TARGET = object()
 
@@ -192,7 +192,7 @@ class LogosManager:
         try:
             root = Path(directory).resolve()
             data = root / "Data"
-            if (context.product not in ("Logos", "Verbum")
+            if (context.product != "Logos"
                     or not root.is_relative_to(context.prefix)
                     or not data.resolve().is_relative_to(context.prefix)):
                 raise maintenance.MaintenanceError("Database protection needs the selected installation's data")
@@ -398,7 +398,7 @@ class LogosManager:
             if role == "index":
                 other = (self.app.conf.logos_exe, self.app.conf.logos_system_exe_windows_path,
                          self.app.conf.logos_cef_exe_windows_path)
-                if name in {"logos.exe", "verbum.exe", "logoscef.exe", "verbumcef.exe"}:
+                if name in {"logos.exe", "logoscef.exe"}:
                     return False
             else:
                 other = (self.app.conf.logos_indexer_exe_windows_path,)

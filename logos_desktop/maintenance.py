@@ -488,7 +488,7 @@ def assert_quiescent(context: Context):
         name = (info.get("name") or "").lower()
         command = info.get("cmdline") or []
         candidate = (
-            "wine" in name or "logos" in name or "verbum" in name or name.endswith(".exe")
+            "wine" in name or "logos" in name or name.endswith(".exe")
             or any(str(context.prefix) in argument for argument in command)
         )
         try:

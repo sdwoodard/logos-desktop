@@ -20,8 +20,8 @@ python3 -m venv .venv
 Alternatively, run `scripts/ensure-venv.sh` from any working directory. It creates
 `.venv` beside the source using installed Python 3.12 or newer. Set `PYTHON` to an
 interpreter path if needed. It preserves existing environments. Install
-`'.[dev,gui]'` afterward for Qt development. See [packaging](docs/PACKAGING.md) for
-the artifact contract, notices and deferred distribution channels.
+`'.[dev,gui]'` afterward for Qt development. See [installation](docs/INSTALL.md) for
+the user-owned environment and launcher setup.
 
 The Python namespace is `logos_desktop`. The `logos-desktop` console command is
 the controller entry point. Runtime filenames and configuration paths use the
@@ -53,8 +53,9 @@ network access or a particular checkout name, home setup or directory block size
 In a disposable account, the full command is
 `.venv/bin/python -B -m unittest discover -s tests -t . -p 'test*.py' -v`.
 The old manual binary
-harness was retired. Build and installed-artifact checks are described in
-[packaging](docs/PACKAGING.md). Source setup is for contributors and does not create
+harness was retired. Build with `python -m build` after installing the build package
+in your virtual environment, then inspect and test the resulting wheel and sdist.
+Verify installed imports, entry points, resources and documentation links. Source setup is for contributors and does not create
 the managed wheel environment used by the canonical installation route.
 
 ## Changes and review

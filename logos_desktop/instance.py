@@ -166,6 +166,7 @@ def check_legacy(prefix):
     selection = _previous_controller()
     selected_paths = {Path(path) for path in selection["files"]} if selection else set()
     selected_modules = selection["modules"] if selection else []
+    # The historical name is only a refusal guard against concurrent prefix ownership.
     legacy_names = {'logos-desktop', 'Logos_on_Linux.sh'}
     for process in psutil.process_iter():
         if process.pid == os.getpid():

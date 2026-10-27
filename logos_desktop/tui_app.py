@@ -485,9 +485,7 @@ class TUI(App):
         from . import controller_install
 
         identity = controller_install.identify()
-        restart = ("The terminal supplies the command to restart this profile after AUR installation."
-                   if identity.owner == "aur" else
-                   "The environment helper launches the new controller after installation.")
+        restart = "The environment helper launches the new controller after installation."
         if not self.approve("Open controller update in a separate terminal?",
                             "The terminal owns review and authorization. " + restart
                             + " This TUI closes after handoff. Logos is left running."):
@@ -618,12 +616,12 @@ class TUI(App):
         labels: list[str] = []
 
         identity = getattr(self, "_controller_identity", None)
-        managed = identity is not None and identity.owner in ("venv", "aur")
+        managed = identity is not None and identity.owner == "venv"
         if managed:
             result = self._controller_result
             labels.append("Check controller updates" if result is None else "Check controller updates again")
             if result is not None and result.status == "available":
-                labels.append("Update via AUR" if identity.owner == "aur" else "Update environment")
+                labels.append("Update environment")
         elif (constants.APP_SELF_UPDATES_ENABLED and getattr(constants, "RUNMODE", "") == "binary"
               and (not hasattr(self, "_controller_identity") or self._controller_standalone)):
             from . import releases
@@ -732,7 +730,7 @@ class TUI(App):
             self._installer_thread = self._run_operation(installer.install, assume_yes=choice == "Install")
             self.status("Starting installation…")
 
-        elif choice in ("Update via AUR", "Update environment"):
+        elif choice == "Update environment":
             self._run_operation(self._handoff_controller)
 
         elif choice in ("Check controller updates", "Check controller updates again"):
