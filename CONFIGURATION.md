@@ -201,8 +201,9 @@ An empty or failed check is not proof that Logos is current. Checking explicitly
 refreshes stable metadata. Updating requires a usable fresh stable target newer
 than the installed version. The installed version is reread under mutation
 admission and conflicting effective configuration is refused before installation.
-Public controller feeds and standalone self-replacement remain disabled. Explicit
-private providers support the separate [owner update routes](INSTALL.md).
+Standalone self-replacement remains disabled. Explicitly configured providers
+support the separate [owner update routes](INSTALL.md). Provider setup selects
+the public endpoints, whose availability depends on release/package publication.
 
 `logos-desktop -c profile.json --repair` explicitly requests journal reconciliation
 and failed-upgrade repair. Its confirmation names the selected prefix. A normal

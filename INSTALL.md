@@ -1,9 +1,10 @@
 # Install LogosDesktop
 
-These are private 1.0.0 candidate instructions. Public releases and AUR entries
-are not available yet. Use only the candidate artifacts and checksums supplied
-through the private project. Do not substitute an unrelated package with the same
-name or run global pip against system Python.
+These instructions target release 1.0.0. Publication is pending until the
+[v1.0.0 release](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0)
+and the named AUR recipe are available. During private rehearsal, use the same
+verified files from the candidate packet. Do not substitute an unrelated package
+with the same name or run global pip against system Python.
 
 ## Choose your controller owner
 
@@ -27,23 +28,32 @@ controller open and provides the exact helper command for your terminal.
 
 ## Managed wheel environment
 
-Obtain `scripts/install-wheel.py`, the 1.0.0 wheel and its exact SHA-256 and byte
-count from the same reviewed candidate. Compare the wheel's digest locally:
+Download these assets from the v1.0.0 release into a new directory:
+
+- `install-wheel.py`
+- `logos_desktop-1.0.0-py3-none-any.whl`
+- `SHA256SUMS`
+- `controller-release.json`
+
+The release notes list the exact sizes and hashes. Verify the bootstrap and wheel
+against that record before running either. A checksum file from the same download
+channel detects changes but is not an independent publisher signature.
 
 ```bash
-sha256sum logos_desktop-1.0.0-py3-none-any.whl
+sha256sum install-wheel.py logos_desktop-1.0.0-py3-none-any.whl
 wc -c < logos_desktop-1.0.0-py3-none-any.whl
 ```
 
-Replace the two uppercase values below with the trusted candidate record. A hash
+Replace the two uppercase values below with the trusted release record. A hash
 calculated only from an untrusted download does not authenticate that download.
 
 ```bash
 mkdir -p "$HOME/.local/lib"
-python3 scripts/install-wheel.py \
+python3 ./install-wheel.py \
   --root "$HOME/.local/lib/logos-desktop" \
   --wheel ./logos_desktop-1.0.0-py3-none-any.whl \
   --version 1.0.0 --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES
+"$HOME/.local/lib/logos-desktop/current/bin/logos-desktop-controller-install" configure-provider
 "$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
 ```
 
@@ -59,10 +69,11 @@ The independent terminal asks for `UPDATE`. It prepares a sibling environment,
 restarts the selected profile and requires readiness before reporting success.
 Previous environments are retained for recovery.
 
-Private updates require the installation-scoped provider described in
-[PACKAGING.md](PACKAGING.md#canonical-private-wheel-installation). No public feed
-is installed by these instructions. A generic pip, pipx or contributor install is
-not automatically a managed environment.
+The configure-provider step installs the scoped GitHub stable-release provider.
+It refuses to overwrite an existing provider, including a custom private provider.
+Keep existing configuration unless you intentionally review and remove it before
+running setup again. See [provider details](PACKAGING.md#canonical-private-wheel-installation).
+A generic pip, pipx or contributor install is not automatically managed.
 
 ### Remove the wheel controller
 
@@ -74,26 +85,34 @@ that they belong to this controller. Do not delete broad XDG directories.
 
 ## Arch source package
 
-During private validation, obtain the reviewed rendered `PKGBUILD`, `.SRCINFO`
-and matching sdist through the private project. The repository's
+Obtain the `logos-desktop` source recipe from its exact AUR repository:
+
+```bash
+git clone https://aur.archlinux.org/logos-desktop.git
+cd logos-desktop
+```
+
+During private rehearsal, use the reviewed rendered `PKGBUILD`, `.SRCINFO` and
+matching sdist from the candidate packet instead. The product repository's
 `packaging/arch/PKGBUILD.in` is a template, not a ready-to-run package.
 
 Use a fully upgraded Arch system. Review the complete recipe and source checksum,
 including the separate AUR dependencies `python-pythondialog` and `python-inotify`.
 Build/install those reviewed dependencies first if missing. makepkg does not fetch
-AUR dependencies automatically. Place the exact supplied sdist in the recipe
-directory or its configured `SRCDEST`, then build as an ordinary user:
+AUR dependencies automatically. The recipe retrieves the checksum-pinned release
+sdist. Private rehearsal places those same bytes in `SRCDEST`. Build as an ordinary user:
 
 ```bash
 makepkg --verifysource
 makepkg -si
+/usr/bin/logos-desktop-controller-install configure-provider
 logos-desktop --dialog qt
 ```
 
 Review any dependency and pacman authorization requests. The package has no hook
 that starts Wine, accepts terms or creates a prefix. See
 [Arch packaging details](PACKAGING.md#arch-source-candidate) for prerequisites,
-private source retrieval and metadata checks.
+source retrieval and metadata checks.
 
 ### Arch controller updates and removal
 
@@ -101,8 +120,10 @@ private source retrieval and metadata checks.
 `REVIEWED` only after review, and complete makepkg/pacman authorization. Follow
 the printed profile-specific restart command. Check the restarted version.
 
-AUR supplies recipes. `pacman -Syu` alone does not rebuild AUR packages. Private
-testing uses an explicit provider. Public AUR submission remains pending.
+AUR supplies recipes. `pacman -Syu` alone does not rebuild AUR packages. The
+configure-provider step selects the AUR recipe and metadata endpoints for this
+user. It does not install a helper or modify an existing provider. Before AUR
+publication, the source release can be available while its package is still pending.
 
 To remove the controller package:
 
@@ -167,7 +188,7 @@ same-version update check is not a migration mechanism. Use the verified new
 bootstrap with the selected existing root and existing JSON profile:
 
 ```bash
-python3 scripts/install-wheel.py \
+python3 ./install-wheel.py \
   --root "$HOME/.local/lib/logos-desktop" \
   --wheel ./logos_desktop-1.0.0-py3-none-any.whl \
   --version 1.0.0 --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES \

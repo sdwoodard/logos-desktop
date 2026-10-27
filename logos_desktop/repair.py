@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import sqlite3
 from typing import Callable, Optional
-from logos_desktop import maintenance
+from logos_desktop import config_store, maintenance
 
 import logos_desktop
 from logos_desktop.app import App
@@ -103,17 +103,20 @@ def repair_installation(app, *, configuration_changes=None, require_target=False
         if require_target and not configuration_changes:
             raise maintenance.MaintenanceError("Refresh stable release information before reinstalling this product")
         changes = configuration_changes or {"faithlife_product_release": None}
-        previous = {name: getattr(app.conf._raw, name) for name in changes}
-        app.conf._change(**changes)
+        publication = app.conf._change(**changes)
+        fields = set(changes) | {config_store.ALIASES[field] for field in changes if field in config_store.ALIASES}
+        previous = {field: publication.previous[field] for field in fields if field in publication.previous}
+        published = {field: publication.document[field] for field in fields if field in publication.document}
         try:
             app.status(f"Recovering {selected.product} after failed upgrade")
             logos_desktop.installer.install(app)
         except BaseException:
-            if require_target:
-                with app.conf.validated_writes(None):
-                    app.conf._change(**previous)
-            else:
-                app.conf._change(**previous)
+            try:
+                conflicts = app.conf.restore_changes(previous, published)
+                if conflicts:
+                    logging.warning("Repair rollback preserved later edits to fields: %s", ", ".join(conflicts))
+            except Exception:
+                logging.exception("Cannot restore product selection after failed repair")
             raise
         app.status(f"Recovery of {selected.product} complete")
 

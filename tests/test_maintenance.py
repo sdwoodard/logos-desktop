@@ -410,6 +410,10 @@ time.sleep(20)
         configuration.app = self.app
         configuration._overrides.config_path = str(self.root / "selected.json")
         configuration._overrides.wine_prefix = None
+        configuration._write.return_value = SimpleNamespace(
+            previous={"faithlife_product_release": "old-target"},
+            document={"faithlife_product_release": None},
+        )
         loaded = replace(configuration._raw)
         observed = []
         self.app.approve = Mock(return_value=True)

@@ -5,8 +5,8 @@ source recipe named `logos-desktop`. They target Linux x86_64 with Python 3.12
 or newer. A `py3-none-any` wheel tag describes the controller's Python code,
 not support for running Logos on other operating systems or architectures.
 
-These are private development candidates. No public release, package index,
-AUR submission or public update feed is enabled by this metadata.
+Publication requires a reviewed release and its named assets. This metadata does
+not publish a release, package index, AUR recipe or update manifest.
 
 ## Artifact contract
 
@@ -87,20 +87,29 @@ and publishes an owned stable launcher. Use that launcher for desktop/profile li
 not the interpreter inside one version directory. No system Python files change.
 
 Update requires an owned mode-0600 `provider.json` inside the private installation
-root. During private development the maintainer supplies the loopback/provider
-fixture URL explicitly. No public URL is configured automatically.
+root. Run the installed helper as part of installation:
+
+```bash
+"$HOME/.local/lib/logos-desktop/current/bin/logos-desktop-controller-install" configure-provider
+```
+
+This explicitly configures the stable GitHub release provider. Existing files are
+never replaced. Custom-provider users retain their configuration. Review and remove
+an existing provider only when intentionally changing it, with helpers closed.
 
 ```json
 {
   "schema": 1,
   "installation": "/absolute/home/path/.local/lib/logos-desktop",
-  "manifest_url": "http://127.0.0.1:PORT/manifest.json",
-  "allow_loopback": true
+  "manifest_url": "https://github.com/sdwoodard/logos-desktop/releases/latest/download/controller-release.json"
 }
 ```
 
 The stable release manifest names `version`, exact wheel `filename`, `url`, `size`
-and `sha256`. Outside explicitly enabled loopback fixtures, HTTPS is required.
+and `sha256`. It is a release asset, generated after the wheel. Its wheel URL is
+versioned. The release must be designated latest stable for discovery. HTTPS is
+required. Private rehearsals use separate explicit loopback configurations with
+`allow_loopback: true`, never a patched release artifact.
 The actual Check controller updates and Update environment actions use this owner.
 An independent terminal asks for UPDATE, prepares a sibling environment and launches
 the selected config/frontend. Previous environments are retained. Startup confirmation
@@ -174,6 +183,12 @@ and an explicit `allow_loopback` for private fixtures. Optional
 show packaging lag. It never converts an Arch installation into a wheel install.
 Without it, current means current for AUR and source availability is not checked.
 
+Run `/usr/bin/logos-desktop-controller-install configure-provider` as the user
+after package installation. It configures `https://aur.archlinux.org/rpc/v5/info?arg[]=logos-desktop`,
+`https://aur.archlinux.org/logos-desktop.git` and the GitHub stable manifest above.
+No package hook creates user configuration. Setup requires a positively identified
+installed package and preserves an existing provider.
+
 Update via AUR opens a separate terminal, pins and displays the complete supported
 recipe, and requires REVIEWED before makepkg. The terminal keeps the result and an
 exact config/frontend restart command visible until acknowledgement. Run that
@@ -206,7 +221,7 @@ candidate. Do not bundle Logos installers, books, accounts or personal databases
 | `shell.nix` | Retired. Its pinned shell omitted current dependencies and was not a validated development route. Use an installed Python and a venv |
 | `snap/` | Retired with its exclusive launchers and graphics. Its wrapper split arguments and its runtime was unvalidated |
 | Inherited Flatpak manifest | Deferred. Process visibility, remapped path identity, document access and installed-app update behavior have not passed |
-| `Dockerfile`, `logos_desktop.spec`, `scripts/build-binary.sh`, `scripts/frozen_identity.py` | Standalone binaries and `logos-desktop-bin` deferred. The inherited PyInstaller toolchain is not a supported build route. Standalone ownership and recovery guards remain in runtime code and regression tests |
+| `Dockerfile`, inherited PyInstaller spec, `scripts/build-binary.sh`, `scripts/frozen_identity.py` | Standalone binaries and `logos-desktop-bin` deferred. The inherited PyInstaller toolchain is not a supported build route. Standalone ownership and recovery guards remain in runtime code and regression tests |
 | `scripts/quick-install.sh` | Retired. It bypassed current artifact, process and installation safeguards |
 | `scripts/ensure-python.sh` | Retired. Contributor setup uses an installed supported interpreter rather than compiling into host paths |
 

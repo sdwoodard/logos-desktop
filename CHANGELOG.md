@@ -1,9 +1,10 @@
 # Release notes
 
-## 1.0.0 candidate, unreleased
+## 1.0.0
 
-The first LogosDesktop release is being prepared privately. No public release
-or AUR submission is available yet.
+Prepared for the first LogosDesktop release. Availability is recorded on the
+[v1.0.0 release page](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0).
+AUR submission can follow the source release.
 
 ### Daily use
 
@@ -19,6 +20,7 @@ or AUR submission is available yet.
 - Backup/restore preflight and recoverable replacement failures.
 - Profile-bound process ownership and bounded controller cleanup.
 - Managed wheel environments and Arch source package update handoffs.
+- Explicit installation-scoped public provider setup that preserves existing configuration.
 - The `logos_desktop` namespace and one `logos-desktop` controller command.
 
 ### Before upgrading

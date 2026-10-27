@@ -8,7 +8,7 @@
 
 **[Installation guide](INSTALL.md)** · [Get help](SUPPORT.md) · [Contribute](CONTRIBUTING.md)
 
-Private 1.0.0 candidate · Linux x86_64 · Native reference: CachyOS
+1.0.0 · Linux x86_64 · Native reference: CachyOS
 
 An independent community project, not affiliated with or endorsed by Logos.
 Your Logos account and the licenses for your content are still required.
@@ -22,9 +22,10 @@ Your Logos account and the licenses for your content are still required.
 
 ## Before you install
 
-**Private 1.0.0 candidate.** Public downloads and AUR submission are not available
-yet. The instructions describe the prepared installation routes and private
-candidate testing. They do not imply a published release.
+**Release 1.0.0 is prepared for publication.** Check the
+[release page](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0)
+for availability. Installation instructions name the exact release assets and
+package owner. AUR availability can follow the source release.
 
 - **Linux x86_64.** CachyOS with KDE Wayland is the native reference environment.
 - **Two installation routes.** Arch source packaging uses pacman. The repository
@@ -73,9 +74,9 @@ confirmation and restart instructions, then check the running version. A provide
 may lag behind a source release or be unavailable. The application reports those
 states rather than silently changing installation methods.
 
-Public update feeds remain disabled during private development. Private tests use
-explicit installation-scoped providers. [Packaging details](PACKAGING.md) explain
-the verified transaction and recovery boundaries.
+The installation guide configures the owner's update provider explicitly.
+[Packaging details](PACKAGING.md) explain provider scope, transaction confirmation
+and recovery. Standalone binary replacement remains disabled.
 
 ## Support
 

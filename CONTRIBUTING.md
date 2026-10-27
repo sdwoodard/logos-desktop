@@ -1,6 +1,6 @@
 # Contributing to LogosDesktop
 
-This is private development source. Repository access is required. Use disposable
+Use disposable
 configuration, cache and Wine-prefix paths. Do not run install, repair, restore or
 uninstall against a personal library during development.
 
@@ -26,12 +26,12 @@ the artifact contract, Arch template, notices and retired distribution recipes.
 The Python namespace is `logos_desktop`. The `logos-desktop` console command is
 the controller entry point. Existing runtime filenames and
 configuration paths use the LogosDesktop identity with explicit legacy adoption.
-Public feeds and standalone self-replacement remain disabled. Private provider-backed
-owner updates are separate from contributor source installations.
+Standalone self-replacement remains disabled. Provider-backed owner updates are
+separate from contributor source installations.
 
 ## Focused checks
 
-The product uses stdlib unittest. The private manual workflow runs full inexpensive
+The product uses stdlib unittest. The manual workflow runs full inexpensive
 discovery, including the retained utility tests. Use a disposable account/container
 for the full suite. HOME/XDG overrides alone do not isolate the account-home
 coordination namespace. For a focused offline test that uses its own fixtures:
@@ -68,7 +68,7 @@ benefit. Authored comments, docstrings and human-facing Markdown must not contai
 em dashes, semicolons or generic AI phrasing. Preserve required license text and
 literal source evidence.
 
-Use the private repository for feedback and changes. Include the triggering
+Use repository issues and pull requests for feedback and changes. Include the triggering
 condition and validation limits. Keep credentials and support archives out of
 commits. Disclose AI assistance when relevant and preserve upstream attribution.
 Retain [LICENSE](LICENSE) and the provenance described in [README.md](README.md).

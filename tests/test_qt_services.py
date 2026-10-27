@@ -849,6 +849,58 @@ class TestProductionServices(QtCase):
             self.assertEqual(getattr(app.conf._raw, field), value)
         self.original = self.config.read_bytes()
 
+    def test_failed_repair_preserves_later_selection_edits_and_original_exception(self):
+        window = self.production_window()
+        app = window.app
+        product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        (product / "System").mkdir(parents=True)
+        (product / "System/Logos.exe").write_bytes(b"synthetic")
+        app.conf._change(faithlife_product_release="40.1.0.0", faithlife_product_release_channel="beta")
+        baseline = self.config.read_bytes()
+        failure = RuntimeError("original installer failure")
+
+        for field in ("faithlife_product_release", "TARGET_RELEASE_VERSION"):
+            with self.subTest(field=field):
+                self.config.write_bytes(baseline)
+                app.conf.reload()
+
+                def fail_after_edit(owner):
+                    document = json.loads(self.config.read_text())
+                    document[field] = "47.1.0.0"
+                    document["unrelated"] = {"keep": True}
+                    self.config.write_text(json.dumps(document))
+                    raise failure
+
+                with (patch.object(app, "approve", return_value=True),
+                      patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
+                          status="ok", stale=False, versions=["46.2.0.5"])),
+                      patch("logos_desktop.installer.install", side_effect=fail_after_edit)):
+                    with self.assertRaises(RuntimeError) as raised:
+                        self.services.operation("repair")(app, threading.Event())
+                self.assertIs(raised.exception, failure)
+                stored = json.loads(self.config.read_text())
+                self.assertEqual(stored[field], "47.1.0.0")
+                self.assertEqual(stored["unrelated"], {"keep": True})
+                self.assertEqual(app.conf.faithlife_product_release_channel, "beta")
+                self.original = self.config.read_bytes()
+
+    def test_failed_repair_keeps_installer_exception_when_restoration_fails(self):
+        window = self.production_window()
+        app = window.app
+        product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        (product / "System").mkdir(parents=True)
+        (product / "System/Logos.exe").write_bytes(b"synthetic")
+        failure = RuntimeError("original installer failure")
+        with (patch.object(app, "approve", return_value=True),
+              patch.object(app.conf._network, "product_release", return_value=SimpleNamespace(
+                  status="ok", stale=False, versions=["46.2.0.5"])),
+              patch("logos_desktop.installer.install", side_effect=failure),
+              patch.object(app.conf, "restore_changes", side_effect=OSError("disk full"))):
+            with self.assertRaises(RuntimeError) as raised:
+                self.services.operation("repair")(app, threading.Event())
+        self.assertIs(raised.exception, failure)
+        self.original = self.config.read_bytes()
+
     def test_explicit_qt_repair_dispatch_uses_graphical_policy_and_terminal_dispatch_stays_terminal(self):
         from logos_desktop import main, repair
         with patch("logos_desktop.qt.startup.start") as start, patch("logos_desktop.cli.CLI") as cli:

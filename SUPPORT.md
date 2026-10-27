@@ -1,7 +1,6 @@
 # Diagnostics and support
 
-LogosDesktop is in private development. Repository and issue access require project
-access. Collect diagnostics locally, review the preview and share an archive only
+Collect diagnostics locally, review the preview and share an archive only
 with the intended recipient. Creating an archive does not upload it.
 
 See [configuration and recovery](CONFIGURATION.md), [backups](BACKUPS.md) and the
@@ -21,9 +20,9 @@ license credit remain in [README](README.md), [CONTRIBUTING](CONTRIBUTING.md) an
 | Restore or migration reports a conflict | Preserve the reported recovery journal and previous data. Inspect the conflicting paths before retrying |
 | Logos opens but scrolling or rendering is poor | Read the dated graphics limitations and record the selected Wine, GPU/driver and reproduction |
 
-Report a reproducible problem in the private project's
-[issues](https://github.com/sdwoodard/logos-desktop/issues). Repository access is
-required. Do not post unreviewed archives or credentials.
+Report a reproducible problem in the project's
+[issues](https://github.com/sdwoodard/logos-desktop/issues).
+Do not post unreviewed archives or credentials.
 
 ## Run a read-only check
 

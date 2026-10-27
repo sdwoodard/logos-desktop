@@ -109,9 +109,10 @@ replacement. Missing historical source metadata remains unknown. See
 Stable product update state keeps stale, unchecked, failed, empty and unknown
 installed-version results distinct from current or available. Update admission
 refreshes installed metadata and validates effective configuration against the
-checked newer stable target. Public controller feeds and standalone replacement
-remain disabled. Explicit private providers use separate wheel-environment and
-Arch owner transactions. Cancellation propagates through long reads, hashes and scans, while
+checked newer stable target. Standalone replacement remains disabled. Explicitly
+configured providers use separate wheel-environment and Arch owner transactions.
+Provider setup creates scoped endpoint configuration without overwriting an
+existing provider or fetching a release. Cancellation propagates through long reads, hashes and scans, while
 safe commit boundaries preserve completed outcomes and pending recovery work.
 
 Normal controller close cancels prompts and observations, waits for owned mutations

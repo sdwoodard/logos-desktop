@@ -42,6 +42,7 @@ INSTALLED_VERSION = r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?"
 VERSION_PATH = re.compile(r"versions/" + INSTALLED_VERSION + r"-[0-9a-f]{64}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 MAX_WHEEL = 64 * 1024 * 1024
+RELEASE_MANIFEST = "https://github.com/sdwoodard/logos-desktop/releases/latest/download/controller-release.json"
 
 
 class InstallError(RuntimeError):
@@ -364,6 +365,78 @@ def _provider(identity):
     if data.get("schema") != 1 or data.get("installation") != scope:
         raise InstallError("Provider configuration belongs to another installation")
     return data
+
+
+def configure_provider(identity):
+    """Create the public provider for an identified installation without replacement."""
+    if identity.owner == "venv" and identity.root is not None:
+        directory = _root(identity.root)
+        scope = str(directory)
+        data = {"schema": 1, "installation": scope, "manifest_url": RELEASE_MANIFEST}
+    elif identity.owner == "aur" and identity.launcher == Path("/usr/bin/logos-desktop"):
+        directory = Path.home() / ".local/state/logos-desktop/aur"
+        data = {"schema": 1, "installation": str(identity.launcher),
+                "rpc_url": "https://aur.archlinux.org/rpc/v5/info?arg[]=logos-desktop",
+                "git_url": "https://aur.archlinux.org/logos-desktop.git",
+                "release_manifest_url": RELEASE_MANIFEST}
+    else:
+        raise InstallError("Provider setup requires an identified managed environment or Arch package")
+    if identity.provider_path != directory / "provider.json":
+        raise InstallError("Provider path does not match the identified installation")
+    if os.geteuid() == 0:
+        raise InstallError("Configure the provider as the user who runs the controller")
+
+    # Walk from the user's home without following directory aliases. Existing
+    # shared user directories stay unchanged, while the final parent is private.
+    home = Path.home().resolve()
+    relative = directory.relative_to(home)
+    for parent in home.parents:
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
+            raise InstallError("Unsafe ancestor of the provider home directory")
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = ".provider-" + secrets.token_hex(16)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise InstallError("Provider home must be owned and not writable by other users")
+        for part in relative.parts:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise InstallError("Provider parent must be owned and not writable by other users")
+        if os.fstat(fd).st_mode & 0o077:
+            raise InstallError("Provider directory must be private")
+
+        output_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                            0o600, dir_fd=fd)
+        with os.fdopen(output_fd, "w") as output:
+            json.dump(data, output, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, "provider.json", src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+        except FileExistsError as error:
+            raise InstallError(
+                "Provider already exists and was preserved. Keep it or review it before removal"
+            ) from error
+        os.unlink(temporary, dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        os.close(fd)
+    return Result("configured", "Public update provider configured for this installation")
 
 
 def _url(url, config):
@@ -1376,7 +1449,9 @@ def bootstrap(argv=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check", "handoff", "recover", "rollback", "bootstrap"))
+    parser.add_argument("action", choices=(
+        "check", "handoff", "recover", "rollback", "bootstrap", "configure-provider",
+    ))
     parser.add_argument("--config")
     parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
     args, remaining = parser.parse_known_args(argv)
@@ -1387,6 +1462,10 @@ def main(argv=None):
         if remaining:
             parser.error("Unexpected arguments: " + shlex.join(remaining))
         identity = identify()
+        if args.action == "configure-provider":
+            result = configure_provider(identity)
+            print(f"{result.status}: {result.message}")
+            return 0
         # Only the canonical venv TUI route can transfer input to a live successor.
         # AUR always keeps this terminal for its manual restart instructions.
         helper_keeps_terminal = not (identity.owner == "venv" and args.frontend == "tui")

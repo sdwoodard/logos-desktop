@@ -54,9 +54,11 @@ SUPPORT_LINK = f"{REPOSITORY_LINK}#support"
 REPOSITORY_ISSUES_LINK = f"{REPOSITORY_LINK}/issues"
 REPOSITORY_NEW_ISSUE_LINK = f"{REPOSITORY_LINK}/issues/new"
 
-# Private development has no supported controller release feed or replacement path.
+# Standalone replacement is deferred. Installed-owner updates use their own providers.
 APP_SELF_UPDATES_ENABLED = False
-APP_SELF_UPDATE_DISABLED_MESSAGE = "Controller self-updates are disabled during private development."
+APP_SELF_UPDATE_DISABLED_MESSAGE = (
+    "Standalone replacement is disabled. Use the installed controller's owner update route."
+)
 APP_RELEASE_LINEAGE = "logos-desktop"
 APP_VERSION = "1.0.0"
 APP_RELEASE_VERSION = APP_VERSION
@@ -124,7 +126,7 @@ WINE_BETA_SIGIL = "Experimental (AKA Beta)"
 FAITHLIFE_PRODUCTS = ["Logos", "Verbum"]
 FAITHLIFE_PRODUCT_VERSIONS = ["10"] # This used to include 9
 
-SUPPORT_MESSAGE = f"""LogosDesktop is in private development. For support, see:
+SUPPORT_MESSAGE = f"""For LogosDesktop support, see:
 {SUPPORT_LINK}
 Keep support archives private and review them before sharing.
 """

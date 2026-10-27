@@ -48,6 +48,82 @@ class ControllerInstallTests(unittest.TestCase):
         self.identity = install.Identity("venv", "1.0.0", "1.0.0", self.root,
                                          self.root / "logos-desktop", self.root / "provider.json")
 
+    def test_public_provider_setup_binds_owner_and_preserves_existing_configuration(self):
+        self.assertEqual(install.configure_provider(self.identity).status, "configured")
+        data = install._provider(self.identity)
+        self.assertEqual(data, {"schema": 1, "installation": str(self.root),
+                                "manifest_url": install.RELEASE_MANIFEST})
+        self.assertEqual(self.identity.provider_path.stat().st_mode & 0o777, 0o600)
+        original = self.identity.provider_path.read_bytes()
+        with self.assertRaisesRegex(install.InstallError, "already exists"):
+            install.configure_provider(self.identity)
+        self.assertEqual(self.identity.provider_path.read_bytes(), original)
+        self.assertFalse(list(self.root.glob(".provider-*")))
+
+        with self.assertRaisesRegex(install.InstallError, "identified"):
+            install.configure_provider(install.Identity("unsupported"))
+        wrong = install.Identity("venv", root=self.root, provider_path=self.home / "provider.json")
+        with self.assertRaisesRegex(install.InstallError, "path"):
+            install.configure_provider(wrong)
+        self.assertFalse((self.home / "provider.json").exists())
+
+    def test_public_aur_provider_is_user_scoped_and_refuses_parent_aliases(self):
+        directory = self.home / ".local/state/logos-desktop/aur"
+        identity = install.Identity("aur", launcher=Path("/usr/bin/logos-desktop"),
+                                    provider_path=directory / "provider.json")
+        self.assertEqual(install.configure_provider(identity).status, "configured")
+        data = install._provider(identity)
+        self.assertEqual(data["installation"], "/usr/bin/logos-desktop")
+        self.assertEqual(data["git_url"], "https://aur.archlinux.org/logos-desktop.git")
+        self.assertEqual(data["release_manifest_url"], install.RELEASE_MANIFEST)
+        self.assertNotIn("allow_loopback", data)
+        identity.provider_path.unlink()
+        directory.rmdir()
+        directory.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(OSError):
+            install.configure_provider(identity)
+        self.assertFalse((self.root / "provider.json").exists())
+
+    def test_public_provider_setup_refuses_symlink_and_concurrent_publication(self):
+        outside = self.home / "outside"
+        outside.write_bytes(b"preserved")
+        self.identity.provider_path.symlink_to(outside)
+        with self.assertRaisesRegex(install.InstallError, "already exists"):
+            install.configure_provider(self.identity)
+        self.assertEqual(outside.read_bytes(), b"preserved")
+        self.assertTrue(self.identity.provider_path.is_symlink())
+        self.identity.provider_path.unlink()
+
+        link = os.link
+
+        def publish_concurrently(*args, **kwargs):
+            self.identity.provider_path.write_bytes(b"concurrent provider")
+            return link(*args, **kwargs)
+
+        with patch.object(install.os, "link", side_effect=publish_concurrently):
+            with self.assertRaisesRegex(install.InstallError, "already exists"):
+                install.configure_provider(self.identity)
+        self.assertEqual(self.identity.provider_path.read_bytes(), b"concurrent provider")
+        self.assertFalse(list(self.root.glob(".provider-*")))
+
+    def test_public_provider_setup_refuses_exposed_parent_and_unidentified_command(self):
+        directory = self.home / ".local/state/logos-desktop/aur"
+        aur = install.Identity("aur", launcher=Path("/usr/bin/logos-desktop"),
+                               provider_path=directory / "provider.json")
+        self.home.chmod(0o770)
+        try:
+            with self.assertRaisesRegex(install.InstallError, "home"):
+                install.configure_provider(aur)
+            self.assertFalse((self.home / ".local").exists())
+        finally:
+            self.home.chmod(0o700)
+        self.root.chmod(0o755)
+        with self.assertRaises(install.InstallError):
+            install.configure_provider(self.identity)
+        self.assertFalse(self.identity.provider_path.exists())
+        with patch.object(install, "identify", return_value=install.Identity("unsupported")):
+            self.assertEqual(install.main(["configure-provider"]), 1)
+
     def distribution(self, relative=None):
         prefix = self.root / (relative or self.a)
         version, digest = prefix.name.split("-", 1)
