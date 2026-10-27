@@ -20,12 +20,13 @@ python3 -m venv .venv
 Alternatively, run `scripts/ensure-venv.sh` from any working directory. It creates
 `.venv` beside the source using installed Python 3.12 or newer. Set `PYTHON` to an
 interpreter path if needed. It preserves existing environments. Install
-`'.[dev,gui]'` afterward for Qt development. See [PACKAGING.md](PACKAGING.md) for
+`'.[dev,gui]'` afterward for Qt development. See [packaging](docs/PACKAGING.md) for
 the artifact contract, notices and deferred distribution channels.
 
 The Python namespace is `logos_desktop`. The `logos-desktop` console command is
-the controller entry point. Existing runtime filenames and
-configuration paths use the LogosDesktop identity with explicit legacy adoption.
+the controller entry point. Runtime filenames and configuration paths use the
+LogosDesktop identity. Explicit saved-profile selection and legacy-format decoding
+remain supported. Installation discovery, import and reconstruction are retired.
 Standalone self-replacement remains disabled. Provider-backed owner updates are
 separate from contributor source installations.
 
@@ -44,7 +45,7 @@ coordination namespace. For a focused offline test that uses its own fixtures:
 Qt uses the official PySide6 Essentials package. CLI and TUI use does not require
 Qt. The legacy `--dialog tk` option is a compatibility alias for Qt.
 Run Qt adapter checks with `QT_QPA_PLATFORM=offscreen` when no display is available.
-A skipped GUI check is not a pass. A native Wayland check is still needed for
+A skipped GUI check is not a pass. A native desktop check is still needed for
 desktop integration.
 
 Tests use local response and filesystem fixtures. They should run without public
@@ -53,7 +54,7 @@ In a disposable account, the full command is
 `.venv/bin/python -B -m unittest discover -s tests -t . -p 'test*.py' -v`.
 The old manual binary
 harness was retired. Build and installed-artifact checks are described in
-[PACKAGING.md](PACKAGING.md). Source setup is for contributors and does not create
+[packaging](docs/PACKAGING.md). Source setup is for contributors and does not create
 the managed wheel environment used by the canonical installation route.
 
 ## Changes and review
@@ -71,9 +72,9 @@ literal source evidence.
 Use repository issues and pull requests for feedback and changes. Include the triggering
 condition and validation limits. Keep credentials and support archives out of
 commits. Disclose AI assistance when relevant and preserve upstream attribution.
-Retain [LICENSE](LICENSE) and the provenance described in [README.md](README.md).
+Retain [LICENSE](LICENSE) and the [acknowledgments and asset notices](docs/ACKNOWLEDGMENTS.md).
 
-The [architecture map](ARCHITECTURE.md) describes the inherited backend boundaries.
+The [architecture map](docs/ARCHITECTURE.md) describes the backend boundaries.
 Domain operations use the shared App interface rather than hard-coding a frontend.
 
 ## Find a first task
@@ -81,10 +82,10 @@ Domain operations use the shared App interface rather than hard-coding a fronten
 These are suggested bounded contributions, not assigned or preapproved issues:
 
 - Reproduce one documentation command in a disposable environment. Likely files:
-  `INSTALL.md` and `SUPPORT.md`. Report exact versions and the failing step, then
+  `docs/INSTALL.md` and `docs/SUPPORT.md`. Report exact versions and the failing step, then
   propose a corrected command without broadening support claims.
 - Add one regression for a demonstrated profile-selection failure. Start at
-  `tests/test_config.py` or `tests/test_adoption.py`. Show the failing behavior
+  `tests/test_config.py` or `tests/test_instance.py`. Show the failing behavior
   before the fix and verify that another profile stays unchanged.
 - Improve one keyboard-access problem in a dialog. Start at
   `logos_desktop/qt/dialogs.py` and `tests/test_qt_frontend.py`. Describe the native

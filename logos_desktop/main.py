@@ -115,9 +115,6 @@ def get_parser():
     )
     cmd = grp.add_mutually_exclusive_group()
     cmd.add_argument('--doctor', action='store_true', help='inspect stored configuration without repairs')
-    cmd.add_argument('--discover-installations', action='store_true', help='list existing installation candidates')
-    cmd.add_argument('--adopt-installation', metavar='PATH', help='adopt an explicit config or installation directory')
-    cmd.add_argument('--rollback-adoption', metavar='JOURNAL', help='roll back controller-owned adoption files')
     cmd.add_argument('--update-status', action='store_true', help='inspect stable product update availability')
     cmd.add_argument('--check-controller-updates', action='store_true',
                      help='check this controller installation provider without installing')
@@ -125,8 +122,6 @@ def get_parser():
     cmd.add_argument('--restore-snapshot', metavar='PATH', help='verify and confirm an exact snapshot restore')
     cmd.add_argument('--support-preview', action='store_true', help='print the exact sanitized support snapshot')
     cmd.add_argument('--support-export', metavar='PATH', help='preview and explicitly export a sanitized zip archive')
-    cfg.add_argument('--adoption-destination', metavar='PATH', help='durable configuration destination')
-    cfg.add_argument('--confirm-adoption', action='store_true', help='explicitly confirm adoption or rollback')
     cfg.add_argument('--confirm-export', action='store_true', help='explicitly confirm support archive export')
     cfg.add_argument('--overwrite-export', action='store_true', help='allow replacing an existing support archive')
     cmd.add_argument('--repair', dest='repair_app', action='store_true', help='repair the selected installation')

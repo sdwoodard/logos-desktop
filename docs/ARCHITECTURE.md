@@ -3,8 +3,8 @@
 ## Frontends and dispatch
 
 `main.py` selects the graphical control panel on Wayland or X11 and the Textual
-panel in a headless terminal. `commands.py` handles discovery, adoption, rollback,
-doctor, update status, snapshot listing/selection and support preview/export before
+panel in a headless terminal. `commands.py` handles doctor, update status,
+snapshot listing/selection and support preview/export before
 normal configuration startup, logging and recovery. Other explicit actions use
 `cli.py`, with graphical install and repair routed through Qt when selected.
 `--dialog qt` and `--dialog tui` select an interface. The retained
@@ -21,7 +21,7 @@ adapts the shared `App` interactions to owned workers. `qt/bridge.py` delivers
 queued results, bounded progress and independent process observations.
 `qt/dialogs.py` resolves each prompt once on confirmation, rejection or close.
 
-Pages render immutable installation snapshots. `qt/services.py` performs discovery,
+Pages render immutable installation snapshots. `qt/services.py` performs runtime discovery,
 inspection and operations away from the GUI thread. Installation controls remain
 draft values until confirmed. Qt exposes Logos and latest stable releases, with
 explicit refusal of conflicting invocation and custom-installer overrides.
@@ -39,7 +39,7 @@ contrast, with explicit disabled and focus states.
 | --- | --- |
 | `app.py` | Interaction contract, owned workers, subscriptions and shutdown |
 | `config.py`, `config_store.py` | Precedence, profile projection, migration and atomic merged saves |
-| `adoption.py` | Bounded read-first discovery, explicit separate-profile publication and conflict-preserving rollback |
+| `file_transactions.py` | Bounded owned-file reads and journaled desktop publication with conflict-preserving rollback |
 | `instance.py` | Canonical-prefix controller ownership, profile transfer and bounded local activation |
 | `desktop.py` | Profile-bound desktop entries, serialized MIME integration and separate rollback |
 | `doctor.py`, `support.py` | Read-only structured diagnostics, immutable sanitized snapshots and explicit archive publication |
@@ -55,20 +55,16 @@ inspect the merged document before publication. Runtime activation adopts the ex
 document it validated and published rather than rereading a mutable file. Recovery
 preserves unexpected changes instead of guessing which data may be overwritten.
 
-## Configuration, adoption and admission
+## Configuration and admission
 
 New config, state, data and cache children use `logos-desktop` under absolute XDG
 bases or standard home fallbacks. The Python namespace is `logos_desktop` and
 the controller command is `logos-desktop`. Explicitly selected legacy files remain
 readable inputs. Existing prefixes are not relocated. See
-[configuration and adoption](CONFIGURATION.md) for paths and CLI examples.
-
-Adoption discovery does not execute configuration or activate Wine. Explicit
-selection and confirmation precede separate no-clobber configuration publication.
-The versioned state journal records intent, original bytes and publication identity.
-It is not a transaction over the library. Ordinary profile/portable saves and
-desktop/MIME integration have separate publication boundaries and failure outcomes.
-Rollback preserves later edits and retains conflict records.
+[configuration](CONFIGURATION.md) for paths and CLI examples. Legacy installation
+discovery, profile import and reconstruction are retired. Ordinary profile selection
+does not copy configuration or library data. Profile/portable saves and desktop/MIME
+integration retain separate publication boundaries and conflict-preserving recovery.
 
 Controller coordination is anchored to the actual account home at
 `.local/state/logos-desktop/coordination`, independent of invocation HOME and XDG
@@ -93,8 +89,7 @@ legacy-binary use of the same prefix is unsupported.
 Doctor inspects stored paths, architecture, runtime headers, a vetted system Wine
 command preview, free space, backup-folder availability, process and recovery state.
 It does not repair or execute configured runtimes. A valid ELF header does not prove
-Wine version compatibility. Unavailable facts remain unknown. Adoption refuses
-ambiguous Wine-user layouts instead of choosing an arbitrary user.
+Wine version compatibility. Unavailable facts remain unknown.
 
 Support freezes allowlisted structured diagnostics. Preview renders every archive
 member's exact text. Export validates the closed ZIP against that same snapshot

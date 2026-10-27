@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from logos_desktop import adoption, config_store, constants, desktop
+from logos_desktop import config_store, constants, desktop, file_transactions
 
 
 class TestMimeEnvironment(unittest.TestCase):
@@ -101,13 +101,13 @@ class TestDesktopIntegration(unittest.TestCase):
         desktop.adopt(plan)
         collision = self.plan('another.json', url=False)
         collision.files[0].path.write_bytes(b'[Desktop Entry]\nName=Unrelated\n')
-        with self.assertRaises(adoption.AdoptionError):
+        with self.assertRaises(file_transactions.FileTransactionError):
             self.plan('another.json', url=False)
 
     def test_mime_change_after_preview_and_after_commit_preserved(self):
         plan = self.plan()
         self.defaults[desktop.SCHEMES[0]] = 'other.desktop'
-        with self.assertRaises(adoption.AdoptionError):
+        with self.assertRaises(file_transactions.FileTransactionError):
             desktop.adopt(plan)
         self.assertFalse(plan.files[0].path.exists())
         self.defaults.update(dict.fromkeys(desktop.SCHEMES, ''))

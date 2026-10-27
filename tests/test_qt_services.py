@@ -47,14 +47,14 @@ class TestProductionServices(QtCase):
             for _ in range(3):
                 window._render()
             self.assertEqual(admission.call_count, 1)
-            self.assertFalse(window.maintenance.buttons["controller_update"].isHidden())
-            self.assertFalse(window.maintenance.buttons["controller_update"].isEnabled())
-            window.maintenance.buttons["controller_check"].click()
+            self.assertFalse(window.home.updates.buttons["controller_update"].isHidden())
+            self.assertFalse(window.home.updates.buttons["controller_update"].isEnabled())
+            window.home.updates.buttons["controller_check"].click()
             self.pump(lambda: window.app.active is None)
             check.assert_called_once()
-            self.assertTrue(window.maintenance.buttons["controller_update"].isEnabled())
+            self.assertTrue(window.home.updates.buttons["controller_update"].isEnabled())
             self.assertEqual(window.snapshot.controller_status, "available")
-            self.assertIn("Private wheel provider", window.maintenance.controller.detail.text())
+            self.assertIn("Private wheel provider", window.home.updates.controller.detail.text())
 
     def test_public_flag_does_not_admit_an_unsupported_source_controller(self):
         from logos_desktop import constants, controller_install, updates
@@ -65,9 +65,9 @@ class TestProductionServices(QtCase):
               patch.object(updates, "eligible", side_effect=updates.UpdateError("Source is not standalone")),
               patch.object(controller_install, "check") as check):
             window = self.production_window()
-            self.assertTrue(window.maintenance.buttons["controller_update"].isHidden())
-            self.assertFalse(window.maintenance.buttons["controller_check"].isEnabled())
-            self.assertIn("Source checkout", window.maintenance.controller.detail.text())
+            self.assertTrue(window.home.updates.buttons["controller_update"].isHidden())
+            self.assertFalse(window.home.updates.buttons["controller_check"].isEnabled())
+            self.assertIn("Source checkout", window.home.updates.controller.detail.text())
             check.assert_not_called()
 
     def test_managed_handoff_closes_without_claiming_update_or_stopping_logos(self):
@@ -162,9 +162,9 @@ class TestProductionServices(QtCase):
                     window.start(window.services.operation("controller_update"))
                     self.pump(lambda: window.app.active is None)
                 self.assertEqual(window.snapshot.controller_status, state)
-                self.assertIn("'/private root/python'", window.maintenance.controller.detail.text())
+                self.assertIn("'/private root/python'", window.home.updates.controller.detail.text())
                 self.assertFalse(window._closing)
-                self.assertFalse(window.maintenance.buttons["controller_update"].isEnabled())
+                self.assertFalse(window.home.updates.buttons["controller_update"].isEnabled())
             failure.assert_not_called()
 
     def production_window(self):
@@ -193,8 +193,8 @@ class TestProductionServices(QtCase):
         self.assertEqual(window.snapshot.profile, str(self.config))
         self.assertTrue(window.maintenance.buttons["repair"].isEnabled())
         self.assertFalse(window.home.run.isEnabled())
-        self.assertFalse(window.maintenance.buttons["controller_update"].isVisible())
-        self.assertFalse(window.maintenance.buttons["controller_check"].isEnabled())
+        self.assertFalse(window.home.updates.buttons["controller_update"].isVisible())
+        self.assertFalse(window.home.updates.buttons["controller_check"].isEnabled())
         self.assertEqual(window.install.product.count(), 1)
         self.assertEqual(window.install.product.currentText(), "Logos")
 
@@ -304,7 +304,7 @@ class TestProductionServices(QtCase):
         with (patch.multiple(constants, APP_SELF_UPDATES_ENABLED=True, APP_RELEASE_VERSION="1.0.0"),
               patch("logos_desktop.updates.eligible")):
             window = self.production_window()
-            self.assertIn("controller_update", window.maintenance.buttons)
+            self.assertIn("controller_update", window.home.updates.buttons)
             for cancel in (False, True):
                 prepared = Mock()
 
@@ -328,6 +328,15 @@ class TestProductionServices(QtCase):
 
     def test_cancel_check_reaps_real_metadata_probe_and_restores_controls(self):
         from logos_desktop import processes
+        from logos_desktop.network import ProductLookup
+
+        document = json.loads(self.config.read_text())
+        document["faithlife_product_version"] = "10"
+        self.config.write_text(json.dumps(document))
+        self.original = self.config.read_bytes()
+        product = self.root / "Logos/data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
+        product.mkdir(parents=True)
+        (product / "Logos.exe").write_bytes(b"fixture, never executed")
         window = self.production_window()
         children = []
         original = subprocess.Popen
@@ -338,6 +347,8 @@ class TestProductionServices(QtCase):
             return process
 
         def lookup(*args, **kwargs):
+            if kwargs.get("refresh") is False:
+                return ProductLookup((), "unavailable", "Cancelled lookup", stale=True)
             try:
                 processes.capture([sys.executable, "-B", "-c", "import time\ntime.sleep(60)"],
                                   env=dict(os.environ), timeout=70, limit=4096, label="Fixture metadata")
@@ -347,14 +358,15 @@ class TestProductionServices(QtCase):
 
         with (patch.object(window.app.conf._network, "product_release", side_effect=lookup),
               patch.object(processes.subprocess, "Popen", side_effect=spawn)):
-            window._action("check")
+            window.home.updates.buttons["check"].click()
             self.pump(lambda: bool(children))
+            self.assertFalse(window.home.updates.buttons["check"].isEnabled())
             window.cancel.click()
             self.pump(lambda: window.app.active is None)
         self.assertIsNotNone(children[0].poll())
         self.assertTrue(children[0].stdout.closed)
         self.assertIn("cancelled", window.status.text())
-        self.assertTrue(window.maintenance.buttons["check"].isEnabled())
+        self.assertTrue(window.home.updates.buttons["check"].isEnabled())
 
     def test_successor_bootstrap_failure_preserves_recoverable_journal_and_success_confirms_once(self):
         from contextlib import nullcontext
@@ -366,6 +378,7 @@ class TestProductionServices(QtCase):
         from tests.test_controller_update import controller_elf
 
         original_window = startup.MainWindow
+        original_show = startup.show_initial_window
         for failed in (True, False):
             old = controller_elf("1.0.0")
             new = controller_elf("1.1.0")
@@ -404,13 +417,20 @@ class TestProductionServices(QtCase):
                 return window
 
             injected = patch.object(QtApp, "_initialize", bootstrap_failure) if failed else nullcontext()
+
+            def show_install_page(window, token):
+                self.assertIs(window.pages.currentWidget().widget(), window.install)
+                original_show(window, token)
+
             try:
                 with (patch.object(updates, "_startup", (destination, record)),
                       patch.object(updates, "confirm_startup", wraps=updates.confirm_startup) as confirm,
                       patch.object(controller_install, "confirm_startup") as managed_confirm,
                       patch.object(startup, "MainWindow", side_effect=create_window),
+                      patch.object(startup, "show_initial_window", side_effect=show_install_page),
                       patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "gui")}), injected):
-                    startup.start(EphemeralConfiguration.project({}, str(self.config), environment={}))
+                    configuration = EphemeralConfiguration.project({}, str(self.config), environment={})
+                    startup.start(configuration, install_only=True)
                     if failed:
                         confirm.assert_not_called()
                         managed_confirm.assert_not_called()
@@ -624,12 +644,17 @@ class TestProductionServices(QtCase):
     def test_running_product_and_indexer_disable_conflicting_mutation_but_keep_stops_available(self):
         window = self.production_window()
         original = self.services.snapshot()
-        self.services._snapshot = replace(original, installed=True, running=True, state="Running", indexing="Running")
+        self.services._snapshot = replace(original, installed=True, running=True, state="Running", indexing="Running",
+                                          product_update="Update available: fixture", controller_owner="venv",
+                                          controller_status="available")
         window._render()
         for name in ("backup", "restore", "runtime_update", "repair", "uninstall", "index"):
             self.assertFalse(window.maintenance.buttons[name].isEnabled())
         self.assertTrue(window.home.run.isEnabled())
         self.assertTrue(window.maintenance.buttons["stop_index"].isEnabled())
+        self.assertFalse(window.home.updates.buttons["product_update"].isEnabled())
+        self.assertTrue(window.home.updates.buttons["check"].isEnabled())
+        self.assertTrue(window.home.updates.buttons["controller_update"].isEnabled())
         self.services._snapshot = replace(original, installed=True, state="Stopped", indexing="Stopped")
         window._render()
         self.assertTrue(window.maintenance.buttons["backup"].isEnabled())
@@ -772,7 +797,7 @@ class TestProductionServices(QtCase):
                   patch.object(app, "ask", side_effect=AssertionError("No manual release selection")),
                   patch("logos_desktop.installer.install", lambda owner: seen.append((
                       owner.conf.faithlife_product_release, owner.conf.faithlife_product_release_channel)))):
-                window.maintenance.buttons["repair"].trigger()
+                window.maintenance.buttons["repair"].click()
                 self.pump(lambda: app.active is None)
         self.assertEqual(seen, [("46.2.0.5", "stable")])
         self.original = self.config.read_bytes()
@@ -1056,47 +1081,7 @@ class TestProductionServices(QtCase):
         settle.set()
         self.pump(lambda: window.app.active is None and not window._refresh_pending)
 
-    def test_adoption_directory_publishes_only_after_reserved_selection_and_rolls_back(self):
-        from logos_desktop import adoption
-        window = self.production_window()
-        app = window.app
-        install = self.root / "legacy"
-        product = install / "data/wine64_bottle/drive_c/users/test/AppData/Local/Logos"
-        product.mkdir(parents=True)
-        (product / "Logos.exe").write_bytes(b"library sentinel")
-        destination = self.root / "adopted.json"
-        actual_selection = app.profile_selection
-        reservations = []
-
-        @contextmanager
-        def reserve(candidate):
-            reservations.append(candidate._raw.install_dir)
-            self.assertEqual(candidate._overrides.wine_prefix, str(install / "data/wine64_bottle"))
-            self.assertFalse(destination.exists())
-            with actual_selection(candidate):
-                yield
-
-        with (patch.object(app, "approve", return_value=False), patch.object(app, "profile_selection", reserve)):
-            result = self.services.adopt_profile(install, directory=True, destination=destination)(
-                app, threading.Event())
-        self.assertEqual(result.outcome, "cancelled")
-        self.assertFalse(destination.exists())
-        with (patch.object(app, "approve", return_value=True) as approve,
-              patch.object(app, "profile_selection", reserve), patch("logos_desktop.installer.install") as installer):
-            result = self.services.adopt_profile(install, directory=True, destination=destination)(
-                app, threading.Event())
-        installer.assert_not_called()
-        self.assertEqual(reservations, [str(install)])
-        self.assertIn(str(destination), approve.call_args.args[1])
-        self.assertEqual(result.outcome, "succeeded")
-        self.assertEqual(app.conf.config_file_path, str(destination))
-        with patch.object(app, "approve", return_value=True):
-            result = self.services.rollback_migration(adoption._journal_path(destination))(app, threading.Event())
-        self.assertEqual(result.outcome, "succeeded")
-        self.assertFalse(destination.exists())
-        self.assertEqual((product / "Logos.exe").read_bytes(), b"library sentinel")
-
-    def test_missing_ownership_api_refuses_before_adoption_commit(self):
+    def test_missing_ownership_api_refuses_profile_selection(self):
         window = self.production_window()
         with patch.object(window.app, "profile_selection", None):
             with self.assertRaisesRegex(maintenance.MaintenanceError, "ownership transfer"):
@@ -1450,27 +1435,6 @@ class TestProductionServices(QtCase):
         self.assertEqual(preview.call_args.args[0], str(self.config))
         self.assertIn(str(plan.files[0].path), approve.call_args.args[1])
         self.assertIn("other.desktop", approve.call_args.args[1])
-
-    def test_config_adoption_preserves_original_and_refuses_competing_destination(self):
-        window = self.production_window()
-        install = self.root / "legacy"
-        (install / "data/wine64_bottle").mkdir(parents=True)
-        source = self.root / "legacy.json"
-        original = json.dumps({"install_dir": str(install), "faithlife_product": "Logos"}).encode()
-        source.write_bytes(original)
-        destination = self.root / "new.json"
-        destination.write_text('{"sentinel":"competing profile"}')
-        with patch.object(window.app, "approve", return_value=True):
-            with self.assertRaisesRegex(ValueError, "Destination already"):
-                self.services.adopt_profile(source, destination=destination)(window.app, threading.Event())
-        self.assertEqual(source.read_bytes(), original)
-        self.assertEqual(destination.read_text(), '{"sentinel":"competing profile"}')
-        destination.unlink()
-        with patch.object(window.app, "approve", return_value=True) as approve:
-            result = self.services.adopt_profile(source, destination=destination)(window.app, threading.Event())
-        self.assertEqual(result.outcome, "succeeded")
-        self.assertIn(f"Original: {source}", approve.call_args.args[1])
-        self.assertEqual(source.read_bytes(), original)
 
     def test_update_projection_distinguishes_current_stale_and_fresh(self):
         from logos_desktop.network import ProductLookup

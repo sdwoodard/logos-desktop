@@ -23,8 +23,36 @@ else:
 
 @unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
 class TestQtFrontend(QtCase):
-    def test_unconfigured_home_discovery_requires_explicit_candidate_and_adoption_destination(self):
-        from unittest.mock import Mock
+    def test_numbered_shortcuts_follow_visible_pages_after_installation(self):
+        from dataclasses import replace
+        from logos_desktop.qt.services import Services
+
+        services = Services()
+        window = self.window(services)
+        self.pump(lambda: window.app.active is None)
+        window.activateWindow()
+        window.navigation.setFocus()
+        self.application.processEvents()
+
+        for number, page in enumerate((window.home, window.install, window.maintenance,
+                                       window.diagnostics, window.settings), start=1):
+            QTest.keyClick(window.navigation, getattr(Qt.Key, f"Key_{number}"), Qt.KeyboardModifier.AltModifier)
+            self.assertIs(window.pages.currentWidget().widget(), page)
+
+        QTest.keyClick(window.navigation, Qt.Key.Key_2, Qt.KeyboardModifier.AltModifier)
+        services._snapshot = replace(services.snapshot(), installed=True)
+        window._render()
+        self.assertIs(window.pages.currentWidget().widget(), window.home)
+        self.assertTrue(window.navigation.item(window.install_page_index).isHidden())
+
+        for number, page in enumerate((window.home, window.maintenance, window.diagnostics,
+                                       window.settings), start=1):
+            QTest.keyClick(window.navigation, getattr(Qt.Key, f"Key_{number}"), Qt.KeyboardModifier.AltModifier)
+            self.assertIs(window.pages.currentWidget().widget(), page)
+        QTest.keyClick(window.navigation, Qt.Key.Key_5, Qt.KeyboardModifier.AltModifier)
+        self.assertIs(window.pages.currentWidget().widget(), window.settings)
+
+    def test_first_run_recommends_location_without_writes_or_overwriting_edits(self):
         from logos_desktop import constants
         from logos_desktop.config import EphemeralConfiguration
         from logos_desktop.qt.services import Services
@@ -37,33 +65,52 @@ class TestQtFrontend(QtCase):
         original = legacy.read_bytes()
         missing = self.root / "new-default.json"
         self.stack.enter_context(patch.object(constants, "LEGACY_CONFIG_FILES", [str(legacy)]))
+        self.stack.enter_context(patch.object(constants, "DATA_HOME", str(self.root / "recommended")))
         window = self.window(Services(), EphemeralConfiguration.project({}, str(missing), environment={}))
         self.pump(lambda: window.app.active is None)
         self.assertFalse(window.snapshot.selected)
-        self.assertTrue(window.existing_installation.isVisible())
-        self.assertFalse(window.adopt_candidate.isEnabled())
-        window.discover_profiles.click()
-        self.assertEqual(window.profile_candidates.count(), 1)
-        self.assertEqual(window.profile_candidates.currentIndex(), -1)
-        self.assertFalse(window.adopt_candidate.isEnabled())
+        self.assertFalse(window.home.updates.buttons["check"].isEnabled())
+        self.assertEqual(window.install.destination.text(), str(self.root / "recommended/installation"))
         self.assertIsNone(window.app.conf._raw.install_dir)
         self.assertFalse(missing.exists())
 
-        window.profile_candidates.setCurrentIndex(0)
-        self.assertTrue(window.adopt_candidate.isEnabled())
-        destination = self.root / "adopted.json"
-        operation = Mock()
-        with (patch.object(window.services, "adopt_profile", return_value=operation) as adopt,
-              patch.object(window, "start") as start,
-              patch.object(window.dialogs, "picker") as picker):
-            window.adopt_candidate.click()
-            adopt.assert_not_called()
-            callback = picker.call_args.args[2]
-            callback(str(destination))
-            adopt.assert_called_once_with(str(legacy), directory=False, destination=str(destination))
-            start.assert_called_once_with(operation)
+        window.home.run.click()
+        self.assertIs(window.pages.currentWidget().widget(), window.install)
+        window.install.destination.setFocus()
+        QTest.keyClick(window.install.destination, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClicks(window.install.destination, str(self.root / "chosen"))
+        window._render()
+        self.assertEqual(window.install.destination.text(), str(self.root / "chosen"))
+        QTest.keyClick(window.install.destination, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(window.install.destination, Qt.Key.Key_Backspace)
+        window._render()
+        self.assertEqual(window.install.destination.text(), "")
+        with patch.object(window.dialogs, "picker") as picker:
+            window._browse()
+            picker.call_args.args[2](str(self.root / "browsed"))
+        window._render()
+        self.assertEqual(window.install.destination.text(), str(self.root / "browsed"))
         self.assertEqual(legacy.read_bytes(), original)
-        self.assertFalse(destination.exists())
+        self.assertFalse((self.root / "recommended").exists())
+        self.assertFalse(missing.exists())
+
+    def test_delayed_install_form_hydration_honors_saved_and_invocation_paths(self):
+        from logos_desktop.config import EphemeralConfiguration
+        from logos_desktop.qt.services import Services
+
+        window = self.window(Services())
+        self.pump(lambda: window.app.active is None)
+        self.assertEqual(window.install.destination.text(), str(self.root / "Logos"))
+        self.assertFalse((self.root / "Logos").exists())
+
+        override = self.root / "explicit location"
+        config = EphemeralConfiguration.project({}, str(self.config), environment={},
+                                                cli_overrides={"install_dir": str(override)})
+        selected = self.window(Services(), config)
+        self.pump(lambda: selected.app.active is None)
+        self.assertEqual(selected.install.destination.text(), str(override))
+        self.assertFalse(override.exists())
+        self.assertEqual(self.config.read_bytes(), self.original)
 
     def test_information_preview_preserves_exact_multiline_snapshot_and_copy(self):
         from PySide6.QtWidgets import QPushButton

@@ -61,10 +61,17 @@ logos_desktop = [
 
 [tool.setuptools.data-files]
 "share/doc/logos-desktop" = [
-    "README.md", "INSTALL.md", "PACKAGING.md", "CONTRIBUTING.md", "CONFIGURATION.md",
-    "SUPPORT.md", "BACKUPS.md", "COMPATIBILITY.md", "ARCHITECTURE.md", "CHANGELOG.md", "ROADMAP.md", "LICENSE",
+    "README.md", "CONTRIBUTING.md", "CHANGELOG.md", "LICENSE",
 ]
-"share/doc/logos-desktop/docs/media" = ["docs/media/home-light.png", "docs/media/home-dark.png", "docs/media/social-preview.svg"]
+"share/doc/logos-desktop/docs" = [
+    "docs/README.md", "docs/INSTALL.md", "docs/PACKAGING.md", "docs/CONFIGURATION.md",
+    "docs/SUPPORT.md", "docs/BACKUPS.md", "docs/COMPATIBILITY.md", "docs/ARCHITECTURE.md",
+    "docs/ROADMAP.md", "docs/ACKNOWLEDGMENTS.md",
+]
+"share/doc/logos-desktop/docs/media" = [
+    "docs/media/home-light.png", "docs/media/home-dark.png", "docs/media/social-preview.svg",
+    "docs/media/linux-badge.svg", "docs/media/python-badge.svg", "docs/media/license-badge.svg",
+]
 "share/doc/logos-desktop/logos_desktop/img" = [
     "logos_desktop/img/logos-desktop.svg", "logos_desktop/img/ATTRIBUTION.md", "logos_desktop/img/lucide-LICENSE.txt",
 ]

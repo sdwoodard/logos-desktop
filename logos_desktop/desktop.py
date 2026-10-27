@@ -14,7 +14,7 @@ import stat
 import subprocess
 import sys
 
-from . import adoption, config_store, constants, maintenance, runtime
+from . import config_store, constants, file_transactions, maintenance, runtime
 
 
 SCHEMES = ('x-scheme-handler/logos4', 'x-scheme-handler/libronixdls')
@@ -70,7 +70,7 @@ def integration_lock():
             info = os.fstat(descriptor)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
-                raise adoption.AdoptionError('Integration lock must be private and owned')
+                raise file_transactions.FileTransactionError('Integration lock must be private and owned')
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
         finally:
@@ -142,7 +142,7 @@ def _legacy_handler(previous, data, config, launcher, product, windows_executabl
 
     if previous != f'{product}-url-handler.desktop':
         return None
-    profile_bytes = adoption._read(config)
+    profile_bytes = file_transactions.read_owned(config)
     if profile_bytes is None:
         return None
     document = config_store.canonical(config_store.decode(profile_bytes, config), config)
@@ -150,7 +150,7 @@ def _legacy_handler(previous, data, config, launcher, product, windows_executabl
     if not install or list(launcher) != [str(Path(install) / constants.BINARY_NAME)]:
         return None
     path = data / 'applications' / previous
-    content = adoption._read(path)
+    content = file_transactions.read_owned(path)
     if content is None:
         return None
     parser = configparser.ConfigParser(interpolation=None, strict=True)
@@ -191,23 +191,25 @@ def preview(config, launcher, *, product='Logos', windows_executable=None, data_
     checks = {}
     for filename, content in entries:
         path = data / 'applications' / filename
-        before = adoption._read(path)
+        before = file_transactions.read_owned(path)
         if not _owned(before, profile_id):
-            raise adoption.AdoptionError(f'Desktop ID is not owned by this profile: {path}')
+            raise file_transactions.FileTransactionError(f'Desktop ID is not owned by this profile: {path}')
         files.append(FileChange(path, before, content))
 
     defaults = tuple((scheme, _default(scheme)) for scheme in SCHEMES) if windows_executable else ()
     if not defaults:
         return Preview(config, profile_id, journal, tuple(files), (), (), ())
     mime_path = config_root / 'mimeapps.list'
-    before = adoption._read(mime_path)
+    before = file_transactions.read_owned(mime_path)
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.optionxform = str
     if before is not None:
         try:
             parser.read_string(before.decode('utf-8'))
         except (UnicodeError, configparser.Error) as error:
-            raise adoption.AdoptionError('Cannot safely parse the existing MIME associations') from error
+            raise file_transactions.FileTransactionError(
+                'Cannot safely parse the existing MIME associations'
+            ) from error
     changed = False
     for scheme, previous in defaults:
         if previous is None:
@@ -228,8 +230,8 @@ def preview(config, launcher, *, product='Logos', windows_executable=None, data_
         output = io.StringIO()
         parser.write(output, space_around_delimiters=False)
         content = output.getvalue().encode('utf-8')
-        if len(content) > adoption.MAX_CONFIG_BYTES:
-            raise adoption.AdoptionError('MIME associations exceed the publication limit')
+        if len(content) > file_transactions.MAX_CONFIG_BYTES:
+            raise file_transactions.FileTransactionError('MIME associations exceed the publication limit')
         files.append(FileChange(mime_path, before, content))
     return Preview(config, profile_id, journal, tuple(files), defaults, tuple(issues), tuple(checks.items()))
 
@@ -237,31 +239,33 @@ def preview(config, launcher, *, product='Logos', windows_executable=None, data_
 def adopt(plan):
     """Commit the preview under the shared lock, recording every previous byte."""
     with integration_lock():
-        if any(adoption._read(path) != content for path, content in plan.checks):
-            raise adoption.AdoptionError('Legacy desktop ownership evidence changed after preview')
+        if any(file_transactions.read_owned(path) != content for path, content in plan.checks):
+            raise file_transactions.FileTransactionError('Legacy desktop ownership evidence changed after preview')
         if any(_default(scheme) != previous for scheme, previous in plan.defaults):
-            raise adoption.AdoptionError('MIME defaults changed after preview')
-        prior = adoption._read(plan.journal, limit=8 * adoption.MAX_CONFIG_BYTES)
+            raise file_transactions.FileTransactionError('MIME defaults changed after preview')
+        prior = file_transactions.read_owned(plan.journal, limit=8 * file_transactions.MAX_CONFIG_BYTES)
         if prior is not None:
             previous = json.loads(prior)
             if previous.get('state') == 'committed':
-                if all(adoption._read(item.path) == item.after for item in plan.files):
+                if all(file_transactions.read_owned(item.path) == item.after for item in plan.files):
                     return Result(plan.journal, 'incomplete' if plan.issues else 'committed', plan.issues)
-                raise adoption.AdoptionError('Desktop publication changed, rollback or resolve it first')
+                raise file_transactions.FileTransactionError(
+                    'Desktop publication changed, rollback or resolve it first'
+                )
             if previous.get('state') != 'rolled-back':
-                raise adoption.AdoptionError('Desktop integration needs rollback before retry')
+                raise file_transactions.FileTransactionError('Desktop integration needs rollback before retry')
         record = {'schema_version': 1, 'kind': 'desktop', 'state': 'prepared', 'profile': plan.profile_id,
                   'config': str(plan.config), 'defaults': list(plan.defaults),
-                  'files': [{'path': str(item.path), 'before': adoption._encoded(item.before),
-                             'after': adoption._encoded(item.after)} for item in plan.files]}
-        adoption._publish_files(plan.journal, record)
+                  'files': [{'path': str(item.path), 'before': file_transactions.encode_content(item.before),
+                             'after': file_transactions.encode_content(item.after)} for item in plan.files]}
+        file_transactions.publish_files(plan.journal, record)
         issues = list(plan.issues)
         for scheme, previous in plan.defaults:
             expected = f'logos-desktop-{plan.profile_id}-url.desktop'
             if any(item.path.name == 'mimeapps.list' for item in plan.files) and _default(scheme) != expected:
                 issues.append(f'MIME publication could not be confirmed: {scheme}')
         record['observed_defaults'] = [[scheme, _default(scheme)] for scheme, _ in plan.defaults]
-        adoption._write_record(plan.journal, record)
+        file_transactions.write_record(plan.journal, record)
         return Result(plan.journal, 'incomplete' if issues else 'committed', tuple(issues))
 
 
@@ -269,16 +273,16 @@ def rollback(journal):
     """Restore exact owned publications, preserving conflicting later edits."""
     journal = config_store.absolute_path(journal)
     with integration_lock():
-        content = adoption._read(journal, limit=8 * adoption.MAX_CONFIG_BYTES)
+        content = file_transactions.read_owned(journal, limit=8 * file_transactions.MAX_CONFIG_BYTES)
         if content is None:
-            raise adoption.AdoptionError('Desktop integration journal is missing')
+            raise file_transactions.FileTransactionError('Desktop integration journal is missing')
         record = json.loads(content)
         profile = hashlib.sha256(os.fsencode(record['config'])).hexdigest()[:24]
         expected = Path(constants.COORDINATION_DIR) / 'desktop' / f'{profile}.json'
         if (record.get('schema_version') != 1 or record.get('kind') != 'desktop'
                 or record.get('profile') != profile or journal != expected
                 or not 2 <= len(record['files']) <= 4):
-            raise adoption.AdoptionError('Invalid desktop integration journal')
+            raise file_transactions.FileTransactionError('Invalid desktop integration journal')
         preserve = []
         dependents = {}
         handlers = tuple(item['path'] for item in record['files']
@@ -287,7 +291,7 @@ def rollback(journal):
             path = Path(item['path'])
             if path.name == 'mimeapps.list':
                 dependents[str(path)] = handlers
-                if adoption._read(path) == adoption._decoded(item['before']):
+                if file_transactions.read_owned(path) == file_transactions.decode_content(item['before']):
                     if any(_default(scheme) == Path(handler).name for scheme in SCHEMES for handler in handlers):
                         preserve.extend(handlers)
                     continue
@@ -298,10 +302,10 @@ def rollback(journal):
                     preserve.append(str(path))
             elif (path.parent.name != 'applications'
                   or path.name not in {f'logos-desktop-{profile}{suffix}.desktop' for suffix in ('', '-app', '-url')}
-                  or not _owned(adoption._decoded(item['after']), profile)):
-                raise adoption.AdoptionError('Invalid desktop journal target')
+                  or not _owned(file_transactions.decode_content(item['after']), profile)):
+                raise file_transactions.FileTransactionError('Invalid desktop journal target')
         if not dependents and any(_default(scheme) == Path(handler).name
                                   for scheme in SCHEMES for handler in handlers):
             preserve.extend(handlers)
-        conflicts = adoption._rollback_files(journal, record, preserve=preserve, dependents=dependents)
+        conflicts = file_transactions.rollback_files(journal, record, preserve=preserve, dependents=dependents)
         return Result(journal, record['state'], conflicts=conflicts)

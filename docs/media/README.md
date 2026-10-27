@@ -11,7 +11,6 @@ without accounts, tokens, private paths or library content. Capture provenance
 and validation records remain with the maintainer. A preview image is not an
 endorsement by the managed product's vendor.
 
-`home-light.png` and `home-dark.png` show the actual 1.0.0 candidate's first-run
-Home on KDE Wayland with an empty demonstration profile. They were captured from
-the native application window, not drawn UI mockups. The light view uses the
-application preference. The dark view follows the test desktop's system palette.
+`home-light.png` and `home-dark.png` show the application with a clean demonstration
+profile. Capture details remain in private validation records. The local badges
+describe platform requirements and licensing without a third-party tracking service.

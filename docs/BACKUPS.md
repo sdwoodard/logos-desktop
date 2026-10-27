@@ -7,7 +7,7 @@ Close Logos and its indexer normally before backing up or restoring. The control
 refuses maintenance when it finds relevant running processes or another operation
 using the selected installation. It does not stop unrelated Wine applications.
 
-Use `logos-desktop --backup` or `logos-desktop --restore`. Choose an existing folder
+Use **Backups & tools → Back up & restore**, or the CLI commands below. Choose an existing folder
 outside the live product data. Decline the saved folder prompt to select another
 location. A new location needs interactive confirmation on its current filesystem
 before it can be used with assume-yes. Reconnect a missing backup disk rather than
@@ -16,6 +16,8 @@ recreating its mount directory.
 A saved relative backup path resolves against the saved installation directory.
 Qt Settings accepts an existing absolute folder. Folder-opening actions report a
 missing location instead of creating it.
+
+## Command-line use
 
 First [select your controller launcher](INSTALL.md#select-your-launcher-for-shared-commands).
 
@@ -42,6 +44,8 @@ workflow, type `restore /absolute/path/backups/snapshot-name` exactly as prompte
 Closed input or a different answer refuses restore. Assume-yes does not replace
 this exact-source confirmation.
 
+## What a snapshot contains
+
 Snapshots contain the product's `Data`, `Documents` and `Users` roots, including
 explicitly absent roots and empty directories. They do not contain the whole Wine
 prefix, application binaries or controller configuration. Keep a separate complete
@@ -57,6 +61,8 @@ Older folders without completion metadata remain untouched and are not offered
 for automatic restore. The old format could leave a partial copy looking complete.
 Keep those folders for separately reviewed recovery rather than adding a completion
 marker by hand.
+
+## If an operation is interrupted
 
 Copy and preflight failures leave the current data in place. Replacement failures
 attempt rollback. Interrupted replacement keeps a journal and original data under

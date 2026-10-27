@@ -67,7 +67,7 @@ pipx, editable or source install does not establish that ownership. The disposab
 smoke environment above is not a managed installation. Owner-aware installation
 and update acceptance must pass before end-user instructions are offered.
 
-### Canonical private wheel installation
+### Managed wheel installation
 
 Use the bootstrap script from the same reviewed source revision as the wheel.
 Provide the artifact record's exact SHA-256 and byte count. Do not copy placeholder
@@ -77,8 +77,8 @@ values literally. Create the parent first, then choose a fresh root beneath it.
 mkdir -p "$HOME/.local/lib"
 python3 scripts/install-wheel.py \
   --root "$HOME/.local/lib/logos-desktop" \
-  --wheel /path/to/logos_desktop-1.0.0-py3-none-any.whl \
-  --version 1.0.0 --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES
+  --wheel /path/to/logos_desktop-VERSION-py3-none-any.whl \
+  --version VERSION --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES
 "$HOME/.local/lib/logos-desktop/logos-desktop" --dialog qt
 ```
 
@@ -145,12 +145,12 @@ separate from controller files.
 
 | Material | Provenance and required treatment |
 | --- | --- |
-| Controller source | Imported MIT source history. Preserve [LICENSE](LICENSE), including DanielDevBR's notice and contributor credit |
-| Book Open Text project icon | Lucide revision and adaptation recorded in [ATTRIBUTION.md](logos_desktop/img/ATTRIBUTION.md). Preserve the [ISC notice](logos_desktop/img/lucide-LICENSE.txt) |
+| Controller source | Imported MIT source history. Preserve [LICENSE](../LICENSE), including DanielDevBR's notice and contributor credit |
+| Book Open Text project icon | Lucide revision and adaptation recorded in [ATTRIBUTION.md](../logos_desktop/img/ATTRIBUTION.md). Preserve the [ISC notice](../logos_desktop/img/lucide-LICENSE.txt) |
 | MSI transform | John Goodman contributed `LogosStubFailOK.mst` under the upstream MIT license on 2025-01-23 in commit `eb6f604e7366f6ade6073837c7446fe81fddd85c`. It changes installer action tables and contains vendor summary metadata, with no listed installer or executable payload. Preserve upstream MIT attribution. This does not claim vendor endorsement |
 | Historical artwork | Nate Marti's 2024-10-21 contribution remains in Git history at `919bbec`. Current application and desktop entries use Book Open Text |
 | Vendor product graphics | Removed from the current distribution because their redistribution basis was unresolved. Product names remain text. Home uses the attributed Book Open Text project artwork, as approved for this packaging change |
-| Desktop metadata | MIT, with the retained [packaging notice](packaging/LICENSE) |
+| Desktop metadata | MIT, with the retained [packaging notice](../packaging/LICENSE) |
 | Python and Qt dependencies | Resolved separately, not embedded in the controller wheel. Preserve each installed distribution's notices. PySide6/Qt and shiboken have their own LGPL/GPL/commercial terms and component notices |
 
 The project metadata describes the controller and Lucide licenses, not a grant
@@ -175,11 +175,12 @@ remain available in source history for attribution and investigation. The obsole
 manual binary harness and historical frontend screenshots were retired. Meaningful
 installation, update and frontend regressions remain in the offline suite.
 
-## Private candidate migration
+## Earlier controller environments
 
-See [explicit migration](INSTALL.md#migrate-a-private-candidate). The new verified
-bootstrap reads the selected older environment's installed file records without
-importing its runtime. It reserves the selected profile's controller lease before
-activation. The incoming wheel is separately digest-verified. Recovery validates
-recorded predecessor bytes and preserves later edits. This is separate from normal
-managed-environment updates and does not change the 1.0.0 release version.
+The verified bootstrap retains an explicit `--migrate --config /absolute/profile.json`
+mode for a selected older managed controller environment. This is controller-owned
+environment recovery, not legacy Logos installation import or library reconstruction.
+It verifies installed file records, reserves profile ownership and retains predecessor
+bytes for recovery. Resolve older pending runtime/restore journals with the controller
+that created them before attempting migration. Do not change journal paths to bypass
+recovery checks. See [installation recovery](INSTALL.md#if-something-fails).

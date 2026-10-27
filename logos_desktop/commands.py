@@ -1,10 +1,9 @@
 """Headless commands dispatched before controller startup and log setup."""
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import adoption, backup, config_store, doctor, instance, maintenance, network, support, system
+from . import backup, config_store, doctor, instance, maintenance, network, support, system
 from .config import EphemeralConfiguration, LegacyConfiguration, PersistentConfiguration
 
 
@@ -16,67 +15,6 @@ def configuration(path=None, *, document=None, environment=None):
     overrides = EphemeralConfiguration.project(document, str(path), environment=environment)
     raw = PersistentConfiguration.from_document(document, overrides.environment)
     return SimpleNamespace(_raw=raw, _overrides=overrides, config_file_path=str(path))
-
-
-def _discover(path=None):
-    if path is None:
-        result = adoption.discover()
-    elif Path(path).expanduser().is_dir():
-        result = adoption.discover([], installation=path)
-    else:
-        result = adoption.discover([path])
-    for candidate in result.candidates:
-        print(f"Configuration: {candidate.source or '(reconstruct from directory)'}\n"
-              f"Installation: {candidate.install}\nPrefix: {candidate.prefix}")
-    if result.issues:
-        raise maintenance.MaintenanceError("\n".join(result.issues))
-    return result
-
-
-def _preflight(conf):
-    report = doctor.inspect(conf)
-    print(report['summary'])
-    if any(check['status'] == 'error' for check in report['checks']):
-        raise maintenance.MaintenanceError("Doctor found blockers. Resolve them before adoption")
-
-
-def _adopt(args):
-    if not args.confirm_adoption:
-        raise maintenance.MaintenanceError("Adoption requires --confirm-adoption")
-    found = _discover(args.adopt_installation)
-    plan = adoption.preview(found, args.adoption_destination or args.config)
-    conf = configuration(plan.destination, document=json.loads(plan.content), environment={})
-    print(f"Destination: {plan.destination}\nJournal: {plan.journal}")
-    with instance.Session(plan.candidate.prefix):
-        _preflight(conf)
-        context = maintenance.Context(plan.candidate.prefix, plan.candidate.install, plan.candidate.product)
-        with maintenance.use(context, exclusive=True):
-            result = adoption.adopt(plan)
-    print(f"Adoption: {result.state}\nConfiguration: {result.destination}\nJournal: {result.journal}")
-
-
-def _rollback(args):
-    if not args.confirm_adoption:
-        raise maintenance.MaintenanceError("Rollback requires --confirm-adoption")
-    journal = config_store.absolute_path(args.rollback_adoption)
-    content = adoption._read(journal, limit=8 * adoption.MAX_CONFIG_BYTES)
-    if content is None:
-        raise maintenance.MaintenanceError("Adoption journal is missing")
-    record = json.loads(content)
-    destination = config_store.absolute_path(record['destination'])
-    if args.config and config_store.absolute_path(args.config) != destination:
-        raise maintenance.MaintenanceError("Journal does not match --config")
-    if journal != adoption._journal_path(destination) or record.get('kind') != 'adoption':
-        raise maintenance.MaintenanceError("Invalid adoption journal")
-    # The recorded publication identifies ownership even after a later config edit.
-    document = json.loads(adoption._decoded(record['files'][0]['after']))
-    conf = configuration(destination, document=document, environment={})
-    context = maintenance.Context.from_app(SimpleNamespace(conf=conf), prompt=False)
-    with instance.Session(context.prefix), maintenance.use(context, exclusive=True):
-        result = adoption.rollback(journal)
-    print(f"Rollback: {result.state}")
-    if result.conflicts:
-        raise maintenance.MaintenanceError("Rollback preserved later edits: " + ", ".join(result.conflicts))
 
 
 def _restore(args, conf):
@@ -120,13 +58,8 @@ def normal_graphical_start(args):
 
 def dispatch(args):
     """Return an exit status, or None when normal startup should continue."""
-    selected = any((args.doctor, args.discover_installations, args.adopt_installation,
-                    args.rollback_adoption, args.update_status, args.list_backups,
+    selected = any((args.doctor, args.update_status, args.list_backups,
                     args.restore_snapshot, args.support_preview, args.support_export))
-    if args.confirm_adoption and not (args.adopt_installation or args.rollback_adoption):
-        raise maintenance.MaintenanceError("--confirm-adoption requires an adoption or rollback action")
-    if args.adoption_destination and not args.adopt_installation:
-        raise maintenance.MaintenanceError("--adoption-destination requires --adopt-installation")
     if (args.confirm_export or args.overwrite_export) and not args.support_export:
         raise maintenance.MaintenanceError("Export confirmation options require --support-export PATH")
     if not selected:
@@ -134,26 +67,15 @@ def dispatch(args):
         if not args.config and not path.exists():
             if normal_graphical_start(args):
                 return None
-            _discover()
             raise maintenance.MaintenanceError(
-                "Configuration is missing. Select --config or use --adopt-installation PATH explicitly")
+                "Configuration is missing. Set up Logos in the application or select an existing profile with --config")
         return None
-    if args.adopt_installation:
-        _adopt(args)
-        return 0
-    if args.rollback_adoption:
-        _rollback(args)
-        return 0
-    if args.discover_installations:
-        found = _discover(args.config)
-        if not found.candidates:
-            raise maintenance.MaintenanceError("No installations discovered. Select a config or directory explicitly")
-        return 0
 
     path = config_store.absolute_path(args.config or LegacyConfiguration.config_file_path())
     if not path.exists():
-        _discover(str(path) if args.config else None)
-        raise maintenance.MaintenanceError("Configuration is missing. Use --adopt-installation PATH explicitly")
+        raise maintenance.MaintenanceError(
+            "Configuration is missing. Set up Logos or select a saved profile with --config"
+        )
     conf = configuration(path)
     app = SimpleNamespace(conf=conf)
     if args.doctor:

@@ -53,16 +53,14 @@ finally:
         self.assertIn('architecture:', result.stdout)
         self.assertEqual(set(self.root.rglob('*')), before)
 
-    def test_missing_default_discovers_without_selecting_and_explicit_config_wins(self):
+    def test_missing_default_does_not_discover_or_import_and_explicit_config_wins(self):
         legacy = self.root / 'config/FaithLife-Community/Logos_on_Linux.json'
         legacy.parent.mkdir(parents=True)
         legacy.write_bytes(self.config.read_bytes())
         result = self.run_command('--doctor')
         self.assertEqual(result.returncode, 1)
-        self.assertIn(str(legacy), result.stdout)
-        self.assertIn('--adopt-installation', result.stderr)
-        result = self.run_command('--discover-installations')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(str(legacy), result.stdout)
+        self.assertIn('--config', result.stderr)
         result = self.run_command('-c', self.config, '--doctor')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(str(legacy), result.stdout)
@@ -77,7 +75,7 @@ finally:
             with self.subTest(action=action):
                 result = self.run_command('--dialog', 'qt', action)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(str(legacy), result.stdout)
+                self.assertNotIn(str(legacy), result.stdout)
                 self.assertIn('Configuration is missing', result.stderr)
                 self.assertEqual(legacy.read_bytes(), original)
         self.assertFalse((self.root / 'config/logos-desktop/config.json').exists())
@@ -102,8 +100,6 @@ finally:
 
     def test_explicit_confirmation_and_missing_sources_fail_safely(self):
         for arguments, message in (
-            (('--adopt-installation', self.config, '-y'), '--confirm-adoption'),
-            (('--rollback-adoption', self.root / 'missing', '-y'), '--confirm-adoption'),
             (('-c', self.config, '--list-backups'), 'No such file'),
             (('-c', self.root / 'missing', '--doctor'), 'Configuration is missing'),
             (('--confirm-export',), '--support-export'),
@@ -113,20 +109,20 @@ finally:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
-    def test_adoption_and_rollback_round_trip_with_explicit_config_authority(self):
-        destination = self.root / 'adopted.json'
-        result = self.run_command('--adopt-installation', self.config,
-                                  '--adoption-destination', destination, '--confirm-adoption')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(destination.is_file())
-        journal = next((self.root / 'state').rglob('adoption/*.json'))
-        result = self.run_command('-c', self.config, '--rollback-adoption', journal, '--confirm-adoption')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('does not match --config', result.stderr)
-        result = self.run_command('-c', destination, '--rollback-adoption', journal, '--confirm-adoption')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(destination.exists())
-        self.assertTrue(self.config.exists())
+    def test_retired_adoption_options_refuse_before_any_state_or_profile_write(self):
+        before = {str(path): path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        for arguments in (
+            ('--discover-installations',), ('--adopt-installation', self.config),
+            ('--rollback-adoption', self.config), ('--adoption-destination', self.root / 'new.json'),
+            ('--confirm-adoption',),
+            ('--previous-controller', '/unrelated/controller', '--adopt-installation', self.config),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_command(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('unrecognized arguments', result.stderr)
+                after = {str(path): path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+                self.assertEqual(after, before)
 
     def test_projection_uses_stored_fields_without_config_getters(self):
         with patch('logos_desktop.config.Config', side_effect=AssertionError('No manager config')):

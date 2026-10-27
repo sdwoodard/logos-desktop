@@ -1,11 +1,11 @@
 # Project direction
 
-The current goal is a dependable first release for Linux x86_64, using CachyOS
-as the native reference and the managed wheel environment as its installation route.
+The current goal is a dependable Linux desktop experience, with clear setup,
+updates and recovery through the managed wheel installation route.
 
 ## Before the first public release
 
-- Finish renamed-artifact migration and owner-update validation.
+- Validate the main setup, update and recovery journeys.
 - Validate the repository's installation and contribution instructions.
 - Rehearse the exact release artifacts and publish only after maintainer approval.
 
@@ -19,5 +19,5 @@ font and scrolling behavior need evidence and a maintainer. They are not schedul
 features or promised fixes for third-party software.
 
 For a first contribution, start with the bounded tasks in
-[CONTRIBUTING.md](CONTRIBUTING.md#find-a-first-task). Discuss a substantial new
+[CONTRIBUTING.md](../CONTRIBUTING.md#find-a-first-task). Discuss a substantial new
 installation channel or runtime policy before implementing it.

@@ -81,7 +81,7 @@ def _selection(conf):
 
 def select_previous_controller(path):
     """Remember an explicitly selected controller, never a bundled historical alias."""
-    from . import adoption, config_store
+    from . import config_store, file_transactions
 
     path = config_store.absolute_path(path)
     original = path
@@ -90,7 +90,7 @@ def select_previous_controller(path):
     interpreter = None
     modules = []
     for _ in range(4):
-        content = adoption._read(path)
+        content = file_transactions.read_owned(path)
         if content is None or not os.access(path, os.X_OK) or str(path) in files:
             raise InstanceBusy("Select an existing owned executable controller without a wrapper cycle")
         files[str(path)] = hashlib.sha256(content).hexdigest()
@@ -139,12 +139,12 @@ def select_previous_controller(path):
 
 
 def _previous_controller():
-    from . import adoption
+    from . import file_transactions
 
     path = Path(constants.COORDINATION_DIR) / "previous-controller.json"
     if not path.exists() and not path.is_symlink():
         return None
-    record = json.loads(adoption._read(path))
+    record = json.loads(file_transactions.read_owned(path))
     if (record.get("schema") != 2 or not isinstance(record.get("files"), dict)
             or not 1 <= len(record["files"]) <= 4
             or not isinstance(record.get("modules"), list)
@@ -152,7 +152,7 @@ def _previous_controller():
         raise InstanceBusy("Invalid previous controller selection")
     for name, digest in record["files"].items():
         selected = Path(name)
-        content = adoption._read(selected)
+        content = file_transactions.read_owned(selected)
         if not selected.is_absolute() or content is None or hashlib.sha256(content).hexdigest() != digest:
             raise InstanceBusy("Selected previous controller changed. Select its current executable again")
     return record

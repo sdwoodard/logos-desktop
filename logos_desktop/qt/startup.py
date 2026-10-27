@@ -39,7 +39,7 @@ def _start(config, function=None, *, install_only=False):
     services = Services()
     window = MainWindow(config, theme, services)
     if install_only:
-        window.navigation.setCurrentRow(4)
+        window.navigation.setCurrentRow(window.install_page_index)
     window.closed.connect(application.quit)
     try:
         show_initial_window(window, startup_token)

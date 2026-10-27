@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [support](https://github.com/sdwoodard/logos-desktop/blob/main/SUPPORT.md)
-        and [compatibility](https://github.com/sdwoodard/logos-desktop/blob/main/COMPATIBILITY.md) first. Do not attach account links,
+        Check [support](https://github.com/sdwoodard/logos-desktop/blob/main/docs/SUPPORT.md)
+        and [compatibility](https://github.com/sdwoodard/logos-desktop/blob/main/docs/COMPATIBILITY.md) first. Do not attach account links,
         passwords, library databases, personal notes or unchecked support archives.
   - type: textarea
     id: result

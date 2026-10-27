@@ -1,114 +1,65 @@
 <p align="center">
-  <img src="logos_desktop/img/logos-desktop.svg" alt="" width="48" height="48">
+  <img src="logos_desktop/img/logos-desktop.svg" alt="" width="112" height="112">
 </p>
 
-# LogosDesktop
+<h1 align="center">LogosDesktop</h1>
 
-**Install and manage Logos on Linux through Wine, from one desktop panel.**
+<p align="center"><strong>Install and manage Logos on Linux, from one desktop app.</strong></p>
 
-**[Installation guide](INSTALL.md)** · [Get help](SUPPORT.md) · [Contribute](CONTRIBUTING.md)
+<p align="center">
+  <a href="docs/INSTALL.md"><img src="docs/media/linux-badge.svg" alt="For Linux"></a>
+  <a href="docs/INSTALL.md"><img src="docs/media/python-badge.svg" alt="Python 3.12 or newer"></a>
+  <a href="LICENSE"><img src="docs/media/license-badge.svg" alt="MIT and ISC licensed"></a>
+</p>
 
-1.0.0 · Linux x86_64 · Native reference: CachyOS
+<p align="center">
+  <strong><a href="docs/INSTALL.md">Get started</a></strong> ·
+  <a href="docs/README.md">User guide</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-An independent community project, not affiliated with or endorsed by Logos.
-Your Logos account and the licenses for your content are still required.
+LogosDesktop brings setup, updates, backups and everyday maintenance into a Qt
+interface. It runs Logos through Wine and keeps your controller and library separate.
+This is an independent community project, not affiliated with or endorsed by Logos.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/media/home-dark.png">
-  <img src="docs/media/home-light.png" alt="LogosDesktop first-run Home with Set up Logos and explicit existing-install adoption controls" width="880">
+  <img src="docs/media/home-light.png" alt="LogosDesktop Home with setup and update controls" width="960">
 </picture>
 
-*Actual 1.0.0 candidate on KDE Wayland, showing a clean demonstration profile.*
+## Start with your library
 
-## Before you install
+Follow the [installation guide](docs/INSTALL.md), then choose **Set up Logos** on
+Home. The app suggests a location you can change before installing. Your Logos
+account and content licenses are still required.
 
-**Release 1.0.0 is prepared for publication.** Check the
-[release page](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0)
-for availability. Installation instructions name the exact release assets and
-managed environment. AUR packaging is deferred beyond this launch.
+Release downloads and verified commands appear on
+[Releases](https://github.com/sdwoodard/logos-desktop/releases).
+Check [requirements and compatibility](docs/COMPATIBILITY.md) before choosing a
+Wine runtime. Building from source? Start with [Contributing](CONTRIBUTING.md).
 
-- **Linux x86_64.** CachyOS with KDE Wayland is the native reference environment.
-- **One installation route.** The verified wheel bootstrap uses a dedicated
-  user-owned Python environment, including on the reference CachyOS system.
-- **Wine is a separate requirement.** Read [tested versions and known limitations](COMPATIBILITY.md)
-  before choosing a runtime. Other distro source probes remain experimental.
-- Flatpak, standalone binaries, Snap, Nix and ARM are not launch channels.
+## Keep everyday tasks close
 
-## What you can do
+- **Home:** open or stop Logos and check updates for Logos and LogosDesktop.
+- **Backups & tools:** protect your data, manage indexing and find repair tools.
+- **Help & logs:** run diagnostics and preview a support report before sharing it.
+- **Settings:** choose your appearance, backup folder and installation profile.
 
-Use the Qt desktop panel, terminal interface or explicit CLI actions.
-
-- **Start and stop Logos** with status tied to the selected installation.
-- **Adopt an existing installation** without moving its library or prefix.
-- **Back up and restore** with preflight checks and recoverable failed replacements.
-- **Manage three distinct updates:** the controller, Logos and the Wine runtime.
-- **Inspect problems** with Doctor and a previewable local support export.
-- **Use your desktop theme** or choose a persistent light or dark preference.
-
-See [configuration and existing-install adoption](CONFIGURATION.md) and
-[backup and recovery](BACKUPS.md) for the details that matter to your data.
-
-## Install, then open your installation
-
-Start with the [installation guide](INSTALL.md). It explains prerequisites,
-verification, the right update owner and removal for each route.
-
-On first run, choose an installation location or explicitly select an existing
-configuration. Review the proposed paths before confirming adoption. Handle the
-vendor's terms and account sign-in yourself. LogosDesktop does not supply books,
-credentials or a replacement for a Logos content license.
-
-Existing private candidate users should read [migration](INSTALL.md#migrate-a-private-candidate)
-before replacing their controller.
-
-## Updates have different owners
-
-| Action | What changes |
-| --- | --- |
-| Update LogosDesktop | The controller's managed wheel installation, through **Update environment** |
-| Update Logos | Vendor software inside the selected Wine prefix |
-| Update Wine | The selected runtime, subject to its provider and compatibility checks |
-
-An opened terminal is an update handoff, not a completed transaction. Follow its
-confirmation and restart instructions, then check the running version. A provider
-may lag behind a source release or be unavailable. The application reports those
-states rather than silently changing installation methods.
-
-The installation guide configures the owner's update provider explicitly.
-[Packaging details](PACKAGING.md) explain provider scope, transaction confirmation
-and recovery. Standalone binary replacement remains disabled.
+Controller updates use the installation's managed Python environment. Logos and
+Wine updates are separate. Follow the terminal's confirmation and restart steps
+before treating an update as complete. See [update guidance](docs/INSTALL.md#wheel-controller-updates)
+and [backup and recovery](docs/BACKUPS.md).
 
 ## Support
 
-Start with [symptoms and next steps](SUPPORT.md). Include the controller version,
-distro, selected Wine/provider, Logos version and a short reproduction.
+Start with [troubleshooting](docs/SUPPORT.md) and the [known limitations](docs/COMPATIBILITY.md).
+For a bug report, include the action, expected result and what happened instead.
+Support reports are created locally. Review them before sharing, and keep account
+links, passwords and private library content out of public issues.
 
-Support export is local and requires review. Do not post passwords, account links,
-library databases, personal notes or an unchecked archive. No support material is
-uploaded automatically.
+## Help shape the project
 
-[Compatibility notes](COMPATIBILITY.md) describe the tested runtime and the known
-scrolling, graphics, font and printing limits. Successful installation is not a
-promise that every Logos feature works under Wine.
+Clear bug reports, useful documentation and focused fixes are welcome.
+[Contributing](CONTRIBUTING.md) explains setup, checks and small first tasks.
 
-## Make a useful first contribution
-
-[Set up the source and run focused checks](CONTRIBUTING.md). Small reproducible bug
-reports, clearer instructions and focused fixes are welcome. The contribution guide
-includes concrete starting tasks and explains how changes are reviewed.
-
-[Architecture](ARCHITECTURE.md) · [Current direction](ROADMAP.md) · [Release notes](CHANGELOG.md)
-
-## Credit and licenses
-
-This project preserves its imported Git history and contributor authorship.
-Contributors include Ferion11, John Goodman, T. H. Wright, N. Marti and N. Shaaban.
-The [MIT license](LICENSE), including DanielDevBR's copyright notice, is retained.
-
-The project mark adapts Lucide's Book Open Text under ISC. See
-[asset attribution](logos_desktop/img/ATTRIBUTION.md) and its
-[license](logos_desktop/img/lucide-LICENSE.txt). Dependency licenses remain separate.
-Logos and Verbum are third-party products.
-
-Development uses AI assistance through OpenCode. The maintainer records scoped
-validation and independent review. AI assistance is not a claim of human testing.
+[User guide](docs/README.md) · [Project direction](docs/ROADMAP.md) · [Release notes](CHANGELOG.md)

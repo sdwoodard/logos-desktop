@@ -5,20 +5,20 @@ with the intended recipient. Creating an archive does not upload it.
 
 See [configuration and recovery](CONFIGURATION.md), [backups](BACKUPS.md) and the
 [architecture map](ARCHITECTURE.md) for related behavior. Upstream provenance and
-license credit remain in [README](README.md), [CONTRIBUTING](CONTRIBUTING.md) and
-[LICENSE](LICENSE).
+license credit remain in [acknowledgments](ACKNOWLEDGMENTS.md),
+[CONTRIBUTING](../CONTRIBUTING.md) and [LICENSE](../LICENSE).
 
 ## Start with the symptom
 
 | Symptom | Next step |
 | --- | --- |
 | Command is missing or opens another installation | Use the stable launcher for your selected installation, as described below |
-| Home has no installation selected | Select an existing configuration explicitly or review a new installation from Home |
+| Home has no installation selected | Choose Set up Logos, or select a saved LogosDesktop profile in Settings |
 | An older controller blocks startup | Close that selected controller normally. Do not kill unrelated Wine processes or delete ownership locks |
-| Controller update is unavailable or behind a source release | Check the installation provider in Backups & tools. Package lag is different from an offline or missing provider |
+| Controller update is unavailable | Check the installation provider on Home. An offline service is different from a current installation |
 | Wine recommendation is unavailable | Check COMPATIBILITY.md and the actual provider result. Do not substitute an arbitrary older runtime |
-| Restore or migration reports a conflict | Preserve the reported recovery journal and previous data. Inspect the conflicting paths before retrying |
-| Logos opens but scrolling or rendering is poor | Read the dated graphics limitations and record the selected Wine, GPU/driver and reproduction |
+| Restore or runtime recovery reports a conflict | Preserve the reported recovery journal and previous data. Inspect the conflicting paths before retrying |
+| Logos opens but scrolling or rendering is poor | Read the compatibility notes and record the selected Wine, GPU/driver and reproduction |
 
 Report a reproducible problem in the project's
 [issues](https://github.com/sdwoodard/logos-desktop/issues).
@@ -98,5 +98,5 @@ log separately.
 When requesting help, describe the action, expected result, observed result and
 whether the problem repeats. Include the LogosDesktop build/version, Linux
 distribution and relevant doctor outcome when known. Keep credentials, login URLs
-and private library content out of the report. Preserve reported adoption, runtime
+and private library content out of the report. Preserve historical migration, runtime
 or restore journals when an operation reports a conflict or pending recovery.

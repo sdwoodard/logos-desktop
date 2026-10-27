@@ -37,18 +37,16 @@ the standard home locations:
 | New installation proposal | `~/.local/share/logos-desktop/installation/` |
 | Cache | `~/.cache/logos-desktop/` |
 
-Existing installations and external prefixes stay where they are. The new portable
+Existing installations and external prefixes stay where they are. The portable
 configuration name is `logos-desktop.json` in the installation directory.
 Explicitly selected legacy JSON and shell-assignment files remain readable inputs.
-Some older Logos_on_Linux locations are discoverable. Other historical names need
-the explicit file picker or command-line path. Startup does not replace those
-files with the new default.
+Use an explicit profile path when needed. Startup does not import another controller's
+installation or replace its files with the default profile.
 
-When the default is missing, normal graphical startup opens an unconfigured Home.
-Discover legacy configurations, explicitly select a result, or choose a legacy
-configuration file or installation directory to adopt. Discovery does not select
-the first result. Confirm a separate durable destination before adoption. Explicit
-CLI actions with a missing default report candidates and require a selection.
+When the default is missing, Home offers **Set up Logos**. The installation form
+shows the recommended location and lets you edit it before confirmation. To reopen
+a configured LogosDesktop installation, choose its profile in Settings. Explicit
+CLI diagnostics require an existing profile and do not create one automatically.
 
 Settings resolve in this order:
 
@@ -73,57 +71,13 @@ override. Without it, the selected runtime supplies its companion.
 
 ## Legacy files and saves
 
-### Explicit adoption
-
-Adoption reads JSON, supported shell assignments or a portable configuration as
-data. It never executes shell input. A supplied installation directory is checked
-for portable configuration first. Without one, reconstruction supports the
-conventional `data/wine64_bottle` layout with one identifiable product and Wine
-user. Multiple Wine users or ambiguous data profiles require resolution rather
-than a guessed selection. Reconstruction does not establish Wine compatibility or
-invent a runtime selection. Review unknown diagnostics and select a runtime
-separately when needed.
-
-Examples use absolute placeholder paths. First [select your launcher](INSTALL.md#select-your-launcher-for-shared-commands).
-Run one action per invocation:
-
-```bash
-"$controller" --discover-installations
-"$controller" -c /absolute/path/legacy.json --discover-installations
-"$controller" --adopt-installation /absolute/path/legacy.json \
-  --adoption-destination /absolute/path/profile.json --confirm-adoption
-"$controller" --adopt-installation /absolute/path/installation \
-  --adoption-destination /absolute/path/profile.json --confirm-adoption
-"$controller" -c /absolute/path/profile.json --dialog qt
-```
-
-`--adoption-destination` selects the new file. For adoption, `-c` can also supply
-the destination if that option is absent. The default destination is the new
-default configuration path. Adoption refuses an existing destination unless it
-is an unchanged publication with a matching committed adoption journal. It leaves
-the original configuration and library in place and does not install, download,
-move data or accept third-party terms. Invocation overrides are not silently saved
-as the adopted selection.
-
-The private, versioned journal is under
-`$XDG_STATE_HOME/logos-desktop/adoption/<destination-hash>.json`, with the normal
-state fallback above. The operation prints its exact pathname. It records original
-configuration bytes and the published file identity before no-clobber publication.
-Keep this journal for interrupted adoption and rollback:
-
-```bash
-"$controller" --rollback-adoption /absolute/path/to/adoption-journal.json --confirm-adoption
-```
-
-Rollback removes only the unchanged controller-owned publication. Later edits or
-replacement files are preserved and reported as conflicts, with the journal
-retained. Resolve those conflicts before retrying adoption. Rollback never rewinds
-the library, removes the external prefix or undoes Wine/MSI changes. Reverting
-source code does not roll back on-disk adoption.
+Legacy installation discovery, import and reconstruction are not supported. Existing
+data is not removed. Keep any journals from earlier development builds and use the
+controller that created an unfinished migration for recovery, or request help.
 
 ### Direct legacy selection and ordinary saves
 
-Selecting a legacy file with `-c` is different from adopting it to a separate file.
+Selecting a supported legacy file with `-c` keeps that file as the active profile.
 An explicitly selected `.conf` remains the selected pathname, and its first save
 converts it to JSON. JSON is recognized by content on restart. Shell assignments
 are parsed as data, never executed. Unsupported shell expressions are rejected.
@@ -144,7 +98,6 @@ copy under the saved installation is secondary. A portable-copy failure after th
 primary commit is reported explicitly. The primary stays saved, and the previous
 portable copy remains readable. A directory-sync failure is reported as unconfirmed
 durability. These outcomes do not claim atomicity across two filesystems.
-Adoption itself publishes only the separate selected profile, not a portable copy.
 
 If another writer changes the selected installation context, reload before saving.
 Malformed configuration is reported without silently replacing it with defaults.
@@ -153,18 +106,17 @@ that installation's normal save destinations.
 
 ## Desktop integration and controller ownership
 
-Adoption does not add desktop launchers. Qt offers a separate confirmed integration
-action. CLI `--create-shortcuts` explicitly requests integration, which also runs
+Use **Backups & tools → Repair & shortcuts** to add desktop launchers after reviewing
+the selected profile. CLI `--create-shortcuts` also requests integration, which runs
 as part of installation. These paths create profile-specific desktop IDs with
 an exact `-c` argument. URL handlers route to that profile. Existing unrelated MIME
 defaults are preserved. Uninspectable defaults or unconfirmed routing are reported
-as incomplete integration, independently of configuration adoption success.
+as incomplete integration.
 
 Desktop integration has its own journal under the account's
 `~/.local/state/logos-desktop/coordination/desktop/` directory. Qt Settings offers
-separate adoption and desktop-integration rollback actions. The CLI
-`--rollback-adoption` accepts adoption journals, not desktop journals. Desktop
-rollback preserves later file/default changes and retains a handler when needed
+**Undo desktop integration** under advanced installation settings. Desktop rollback
+preserves later file/default changes and retains a handler when needed
 by a conflicting MIME association.
 
 Supported entry points share one controller owner per canonical Wine prefix,
@@ -179,6 +131,11 @@ Use explicit Stop or `--stop-installed-app` to stop verified selected product
 processes, or `--stop-indexing` for the selected indexer.
 
 ## Inspection, updates and repair
+
+Home has separate **Logos updates** and **LogosDesktop updates** cards. Runtime,
+indexing, backup and repair tasks are grouped under **Backups & tools**.
+First [select your controller launcher](INSTALL.md#select-your-launcher-for-shared-commands)
+for the command examples below.
 
 `logos-desktop -c profile.json --status` inspects the selected prefix without Wine,
 installation recovery or configuration changes. Support, editing and Stop also

@@ -3,13 +3,14 @@
 ## 1.0.0
 
 Prepared for the first LogosDesktop release. Availability is recorded on the
-[v1.0.0 release page](https://github.com/sdwoodard/logos-desktop/releases/tag/v1.0.0).
+[release page](https://github.com/sdwoodard/logos-desktop/releases).
 AUR packaging is deferred beyond the first-release work.
 
 ### Daily use
 
 - Qt control panel with system-following, light and dark themes.
-- Explicit existing-install adoption, profile selection and desktop integration.
+- Editable recommended installation location, saved-profile selection and desktop integration.
+- Home update cards and grouped backup, repair, indexing and runtime tools.
 - Separate controller, Logos and Wine update operations.
 - Doctor, previewable local support export and clearer failure outcomes.
 - CLI and terminal interface through the same installation services.
@@ -25,11 +26,12 @@ AUR packaging is deferred beyond the first-release work.
 
 ### Before upgrading
 
-Read [installation and migration](INSTALL.md), [backup guidance](BACKUPS.md) and
-[runtime compatibility](COMPATIBILITY.md). Older private managed wheel builds
+Read [installation](docs/INSTALL.md), [backup guidance](docs/BACKUPS.md) and
+[runtime compatibility](docs/COMPATIBILITY.md). Older private managed wheel builds
 need explicit verified migration. Controller removal preserves the separate
 library and configuration. Flatpak and standalone binaries remain deferred.
 
 Known limits include variable scrolling delay, graphics/font issues and
 unvalidated print/export. No universal Wine or distro compatibility is claimed.
-Earlier development history and contributor authorship remain in Git.
+Earlier development history and contributor authorship remain in Git. Legacy
+installation discovery and adoption are retired. Existing user data is not removed.

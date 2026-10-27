@@ -11,12 +11,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from logos_desktop.constants import APP_IMAGE_DIR, PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE, PROMPT_OPTION_NEW_FILE
-from logos_desktop import adoption, constants, releases
+from logos_desktop.constants import APP_IMAGE_DIR, PROMPT_OPTION_DIRECTORY, PROMPT_OPTION_FILE
+from logos_desktop import constants, releases
 from .app import QtApp
 from .bridge import Bridge
 from .dialogs import DialogHost
-from .pages import Card, CarePage, HelpPage, ProfileSettings
+from .pages import Card, CarePage, HelpPage, ProfileSettings, UpdateCards
 
 
 @dataclass(frozen=True)
@@ -111,6 +111,9 @@ class HomePage(QWidget):
         group.content.addWidget(self.health)
         layout.addWidget(group)
 
+        self.updates = UpdateCards()
+        layout.addWidget(self.updates)
+
         details_toggle = QToolButton()
         details_toggle.setText("Installation details")
         details_toggle.setCheckable(True)
@@ -183,7 +186,8 @@ class InstallPage(QWidget):
         product_label.setBuddy(self.product)
         form.addRow(product_label, self.product)
 
-        self.destination = QLineEdit(snapshot.path)
+        self.recommended_location = str(Path(constants.DATA_HOME) / "installation")
+        self.destination = QLineEdit(snapshot.path or self.recommended_location)
         self.destination.setAccessibleName("Installation location")
         self.browse = QPushButton("&Browse…")
         self.browse.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
@@ -196,6 +200,8 @@ class InstallPage(QWidget):
         destination_label = QLabel("&Location")
         destination_label.setBuddy(self.destination)
         form.addRow(destination_label, location)
+        self.location_hint = label("Recommended location. You can choose another folder.", secondary=True)
+        form.addRow("", self.location_hint)
 
         self.runtime = QComboBox()
         self.runtime.addItems([snapshot.runtime, "System Wine (sample)"])
@@ -226,7 +232,19 @@ class InstallPage(QWidget):
 
     def draft(self):
         return InstallDraft(self.product.currentText(), self.destination.text(),
-                            self.runtime.currentText(), self.dependencies.isChecked(), self.release.text().strip())
+                             self.runtime.currentText(), self.dependencies.isChecked(), self.release.text().strip())
+
+    def load_destination(self, snapshot):
+        """Hydrate saved paths without replacing a user's typed, cleared or browsed choice."""
+        if self.destination.isModified():
+            return
+        selected = snapshot.path or self.recommended_location
+        if self.destination.text() != selected:
+            self.destination.setText(selected)
+        self.location_hint.setText(
+            "Selected location. You can edit it before installing." if snapshot.path
+            else "Recommended location. You can choose another folder."
+        )
 
 
 class SettingsPage(QWidget):
@@ -317,6 +335,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self.navigation)
         self.pages = QStackedWidget()
         self.home = HomePage()
+        self.home.updates.setVisible(self.production)
         self.install = InstallPage(self.snapshot)
         self.settings = SettingsPage(theme, self.snapshot)
         page_widgets = [self.home, self.install, self.settings]
@@ -360,37 +379,16 @@ class MainWindow(QMainWindow):
             self.profile_settings.save_requested.connect(self._save_settings)
             self.profile_settings.profile_requested.connect(self._select_profile)
             self.profile_settings.runtime_requested.connect(self._select_runtime)
-            self.profile_settings.adoption_requested.connect(self._adopt_profile)
-            self.profile_settings.rollback_requested.connect(self._rollback_migration)
-            self.existing_installation = Card(
-                "Already have Logos on Linux?",
-                "Discover legacy configurations or choose an installation to adopt. Nothing is selected automatically.")
-            self.discover_profiles = QPushButton("Discover existing installations")
-            self.discover_profiles.clicked.connect(self._discover_profiles)
-            self.profile_candidates = QComboBox()
-            self.profile_candidates.setAccessibleName("Discovered installation configurations")
-            self.adopt_candidate = QPushButton("Adopt selected configuration…")
-            self.adopt_candidate.setEnabled(False)
-            self.profile_candidates.currentIndexChanged.connect(
-                lambda index: self.adopt_candidate.setEnabled(index >= 0 and self.app.active is None))
-            self.adopt_candidate.clicked.connect(
-                lambda: self._adopt_path(self.profile_candidates.currentData(), directory=False))
-            choose_config = QPushButton("Choose legacy configuration…")
-            choose_config.clicked.connect(lambda: self._adopt_profile(False))
-            choose_directory = QPushButton("Choose installation directory…")
-            choose_directory.clicked.connect(lambda: self._adopt_profile(True))
-            for widget in (self.discover_profiles, self.profile_candidates, self.adopt_candidate,
-                           choose_config, choose_directory):
-                self.existing_installation.content.addWidget(widget)
-            self.home.layout().insertWidget(3, self.existing_installation)
+            self.profile_settings.rollback_requested.connect(self._rollback_desktop)
             self.maintenance = CarePage()
             self.diagnostics = HelpPage()
-            for page in (self.maintenance, self.diagnostics):
+            for page in (self.home.updates, self.maintenance, self.diagnostics):
                 page.requested.connect(self._action)
             self.navigation.clear()
-            self.navigation.addItems(["Home", "Backups & tools", "Help & logs", "Settings", "Install Logos"])
+            self.navigation.addItems(["Home", "Install Logos", "Backups & tools", "Help & logs", "Settings"])
             self.navigation.setCurrentRow(0)
-            page_widgets = [self.home, self.maintenance, self.diagnostics, self.settings, self.install]
+            page_widgets = [self.home, self.install, self.maintenance, self.diagnostics, self.settings]
+        self.install_page_index = page_widgets.index(self.install)
         for page in page_widgets:
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -429,9 +427,9 @@ class MainWindow(QMainWindow):
         self.bridge.initialized.connect(self._initialized, Qt.ConnectionType.QueuedConnection)
         self.bridge.close_requested.connect(self._exit_requested, Qt.ConnectionType.QueuedConnection)
         self.bridge.observation.connect(self._observation, Qt.ConnectionType.QueuedConnection)
-        for key, index in (("Alt+1", 0), ("Alt+2", 1), ("Alt+3", 2)):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.activated.connect(lambda index=index: self.navigation.setCurrentRow(index))
+        for index in range(len(page_widgets)):
+            shortcut = QShortcut(QKeySequence(f"Alt+{index + 1}"), self)
+            shortcut.activated.connect(lambda index=index: self._navigate_visible_page(index))
         quit_shortcut = QShortcut(QKeySequence.StandardKey.Quit, self)
         quit_shortcut.activated.connect(self.close)
         self._close_timer = QTimer(self)
@@ -474,8 +472,9 @@ class MainWindow(QMainWindow):
             if self.app.active is not None:
                 self.home.run.setEnabled(False)
             if self.production:
-                self.navigation.item(4).setHidden(self.snapshot.installed)
-                if self.snapshot.installed and self.navigation.currentRow() == 4:
+                self.install.load_destination(self.snapshot)
+                self.navigation.item(self.install_page_index).setHidden(self.snapshot.installed)
+                if self.snapshot.installed and self.navigation.currentRow() == self.install_page_index:
                     self.navigation.setCurrentRow(0)
                 if not self.snapshot.selected:
                     self.home.run.setText("Set up Logos")
@@ -483,7 +482,7 @@ class MainWindow(QMainWindow):
                 show_activity = bool(self.home.activity.toPlainText())
                 self.home.activity.setVisible(show_activity)
                 self.home.activity_title.setVisible(show_activity)
-                self.maintenance.summary.setText(
+                self.home.updates.summary.setText(
                     self.snapshot.product_update)
                 self.diagnostics.summary.setText(self.snapshot.health)
                 report = self.services.doctor_report
@@ -506,10 +505,11 @@ class MainWindow(QMainWindow):
                 self.profile_settings.runtime.setText(self.snapshot.runtime)
                 self.profile_settings.wine_status.setText(self.snapshot.wine_status)
                 self.maintenance.wine_status.setText(self.snapshot.wine_status)
-                self.maintenance.controller.detail.setText(self.snapshot.controller_message)
-                for page in (self.maintenance, self.diagnostics):
+                self.maintenance.index_status.setText(f"Indexer: {self.snapshot.indexing}")
+                self.home.updates.controller.detail.setText(self.snapshot.controller_message)
+                for page in (self.home.updates, self.maintenance, self.diagnostics):
                     for name, button in page.buttons.items():
-                        allowed = name in ("check", "refresh", "open_log", "support", "edit_config", "dependencies",
+                        allowed = name in ("refresh", "open_log", "support", "edit_config", "dependencies",
                                             "controller_check", "controller_update", "doctor", "open_logs")
                         allowed = allowed or (name == "repair" and self.snapshot.selected)
                         button.setEnabled(self.app.active is None and (allowed or self.snapshot.installed))
@@ -518,16 +518,13 @@ class MainWindow(QMainWindow):
                 running_states = ("Starting", "Running", "Stopping")
                 process_busy = self.snapshot.state in running_states or self.snapshot.indexing in running_states
                 self.profile_settings.choose_profile.setEnabled(self.app.active is None and not process_busy)
-                for button in self.profile_settings.migration_buttons:
-                    button.setEnabled(self.app.active is None and not process_busy)
-                self.existing_installation.setVisible(not self.snapshot.selected)
-                self.existing_installation.setEnabled(self.app.active is None and not process_busy)
+                self.profile_settings.undo_desktop.setEnabled(self.app.active is None and not process_busy)
                 self.profile_settings.choose_runtime.setEnabled(
                     self.app.active is None and self.snapshot.selected and not process_busy)
                 idle_actions = ("backup", "restore", "product_update", "runtime_update",
                                 "repair", "dependencies", "icu", "catalog", "indexes", "uninstall")
                 for name in idle_actions:
-                    button = self.maintenance.buttons.get(name)
+                    button = self.home.updates.buttons.get(name) or self.maintenance.buttons.get(name)
                     if button is not None and process_busy:
                         button.setEnabled(False)
                         button.setToolTip("Close Logos and its indexer before this operation")
@@ -535,18 +532,18 @@ class MainWindow(QMainWindow):
                     self.maintenance.buttons["index"].setEnabled(False)
                 else:
                     self.maintenance.buttons["stop_index"].setEnabled(False)
-                update = self.maintenance.buttons["product_update"]
+                update = self.home.updates.buttons["product_update"]
                 update.setVisible(self.snapshot.product_update.startswith("Update available"))
                 managed = self.snapshot.controller_owner in ("venv", "aur")
-                controller_update = self.maintenance.buttons["controller_update"]
+                controller_update = self.home.updates.buttons["controller_update"]
                 controller_update.setVisible(managed or self.snapshot.controller_standalone)
                 controller_update.setText("Update via AUR…" if self.snapshot.controller_owner == "aur"
                                           else "Update environment…" if managed else "Update LogosDesktop…")
                 controller_update.setEnabled(self.app.active is None and (
                     self.snapshot.controller_status == "available" if managed else self.snapshot.controller_standalone))
-                self.maintenance.buttons["controller_check"].setEnabled(
+                self.home.updates.buttons["controller_check"].setEnabled(
                     self.app.active is None and (managed or self.snapshot.controller_standalone))
-                self.maintenance.buttons["controller_check"].setText(
+                self.home.updates.buttons["controller_check"].setText(
                     "Check controller updates" if self.snapshot.controller_status == "unchecked" else "Check again")
 
     def start(self, operation):
@@ -563,9 +560,14 @@ class MainWindow(QMainWindow):
 
     def _home_action(self):
         if self.production and not self.snapshot.selected:
-            self.navigation.setCurrentRow(4)
+            self.navigation.setCurrentRow(self.install_page_index)
         else:
             self.start(self.services.toggle)
+
+    def _navigate_visible_page(self, index):
+        rows = [row for row in range(self.navigation.count()) if not self.navigation.item(row).isHidden()]
+        if index < len(rows):
+            self.navigation.setCurrentRow(rows[index])
 
     def _preview(self):
         draft = self.install.draft()
@@ -578,7 +580,7 @@ class MainWindow(QMainWindow):
 
     def _action(self, name):
         if name == "check" and self.app.active is None:
-            self.maintenance.summary.setText("Checking stable Logos releases…")
+            self.home.updates.summary.setText("Checking stable Logos releases…")
         operation = (getattr(self.services, name) if name in ("refresh", "open_log")
                      else self.services.operation(name))
         self.start(operation)
@@ -608,50 +610,17 @@ class MainWindow(QMainWindow):
                 self.start(self.services.select_runtime(path))
         self.dialogs.picker("Select a Wine AppImage", PROMPT_OPTION_FILE, chosen)
 
-    def _adopt_profile(self, directory):
-        def chosen(path):
-            self._adopt_path(path, directory=directory)
-        self.dialogs.picker("Select existing installation" if directory else "Select legacy configuration",
-                            PROMPT_OPTION_DIRECTORY if directory else PROMPT_OPTION_FILE, chosen)
-
-    def _adopt_path(self, path, *, directory):
-        if not path or self._closing or self.app.active is not None:
-            return
-
-        def destination_chosen(destination):
-            if destination and not self._closing and self.app.active is None:
-                self.start(self.services.adopt_profile(path, directory=directory, destination=destination))
-
-        self.dialogs.picker("Choose new durable configuration", PROMPT_OPTION_NEW_FILE,
-                            destination_chosen, str(constants.DEFAULT_CONFIG_PATH))
-
-    def _discover_profiles(self):
-        if self._closing or self.app.active is not None:
-            return
-        result = adoption.discover()
-        self.profile_candidates.clear()
-        for candidate in result.candidates:
-            self.profile_candidates.addItem(f"{candidate.source} ({candidate.install})", str(candidate.source))
-        self.profile_candidates.setCurrentIndex(-1)
-        self.adopt_candidate.setEnabled(False)
-        details = "Choose a discovered configuration explicitly, then review its adoption."
-        if not result.candidates:
-            details = "No legacy configurations found. Choose a configuration or installation directory."
-        if result.issues:
-            details += "\n" + "\n".join(result.issues)
-        self.existing_installation.detail.setText(details)
-
-    def _rollback_migration(self, integration):
+    def _rollback_desktop(self):
         def chosen(path):
             if path and not self._closing and self.app.active is None:
-                self.start(self.services.rollback_migration(path, integration=integration))
-        self.dialogs.picker("Select desktop journal" if integration else "Select adoption journal",
-                            PROMPT_OPTION_FILE, chosen)
+                self.start(self.services.rollback_desktop(path))
+        self.dialogs.picker("Select desktop journal", PROMPT_OPTION_FILE, chosen)
 
     def _browse(self):
         def chosen(path):
             if path is not None and not self._closing:
                 self.install.destination.setText(path)
+                self.install.destination.setModified(True)
                 self.install.destination.setFocus()
         self.dialogs.picker("Choose installation location", PROMPT_OPTION_DIRECTORY, chosen,
                             self.install.destination.text())
@@ -690,9 +659,9 @@ class MainWindow(QMainWindow):
         if not self.app._cancel.is_set():
             self.status.setText(progress.message)
         if self.production and progress.message == "Checking stable Logos releases…":
-            self.maintenance.summary.setText(progress.message)
+            self.home.updates.summary.setText(progress.message)
         if self.production and progress.message == "Checking the controller installation provider":
-            self.maintenance.controller.detail.setText(self.services.snapshot().controller_message)
+            self.home.updates.controller.detail.setText(self.services.snapshot().controller_message)
         if progress.percent is None:
             self.progress.setRange(0, 0)
         else:

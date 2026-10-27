@@ -1,5 +1,5 @@
-include ARCHITECTURE.md BACKUPS.md CONFIGURATION.md SUPPORT.md COMPATIBILITY.md
-include PACKAGING.md CONTRIBUTING.md INSTALL.md CHANGELOG.md ROADMAP.md
+include CONTRIBUTING.md CHANGELOG.md
+recursive-include docs *.md
 recursive-include docs/media *.png *.svg
 include scripts/install-wheel.py
 recursive-include tests *.py *.json *.AppImage

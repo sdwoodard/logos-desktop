@@ -4,7 +4,6 @@ from dataclasses import replace
 from functools import partial
 import logging
 from pathlib import Path
-import json
 import hashlib
 import os
 import shutil
@@ -12,7 +11,7 @@ import shlex
 import threading
 
 from logos_desktop import backup, backup_store, constants, control, installer, maintenance
-from logos_desktop import adoption, desktop, doctor, network, processes, support
+from logos_desktop import desktop, doctor, network, processes, support
 from logos_desktop import config_store, releases, repair, runtime, updates, utils, wine
 from logos_desktop import controller_install
 from logos_desktop.app import UserExitedFromAsk
@@ -55,7 +54,7 @@ class Services:
             str(selected_runtime or "Not selected"), conf._overrides.install_dir or raw.install_dir or "",
             installed=False, running=app.logos.logos_state == State.RUNNING,
             state=app.logos.logos_state.name.title(), indexing=app.logos.indexing_state.name.title(),
-            health="Choose Install or use an existing installation profile.", profile=profile,
+            health="Set up Logos to get started.", profile=profile,
             backup=str(doctor.selected_paths(conf)[2] or ""), product_channel=conf.faithlife_product_release_channel,
             controller_channel=conf.app_release_channel, logging=conf.faithlife_product_logging,
             selected=bool(raw.install_dir and raw.faithlife_product == "Logos"),
@@ -69,7 +68,7 @@ class Services:
         try:
             executable = conf.logos_exe
             installed = bool(snapshot.selected and executable and Path(executable).is_file())
-            health = "Choose Install or use an existing installation profile."
+            health = "Set up Logos to get started."
             if snapshot.selected:
                 context = maintenance.Context.from_app(app, prompt=False)
                 health = "Installation is ready" if installed else "Product executable was not found"
@@ -108,10 +107,11 @@ class Services:
         identity = self.controller_identity
         owner = "standalone" if self.controller_standalone else identity.owner
         if self.controller_result is None:
-            return (f"{owner}: Not checked. {identity.message}" if owner == "unsupported"
-                    else f"{owner}: Installation provider has not been checked.")
+            return (f"In-app updates are unavailable for this installation. {identity.message}"
+                    if owner == "unsupported" else "Check for a new LogosDesktop release.")
         result = self.controller_result
-        text = f"{owner}: {result.status}: {result.message}"
+        state = result.status.replace("-", " ").capitalize()
+        text = f"{state}: {result.message}"
         if result.status == "manual":
             text += "\nClose this controller before running the command in a terminal."
         if result.command:
@@ -163,7 +163,7 @@ class Services:
     @staticmethod
     def _product_update(conf, installed):
         if not installed:
-            return "Install a product first"
+            return "Set up Logos to check for updates."
         lookup = conf._network.product_release("Logos", conf.faithlife_product_version, "stable", refresh=False)
         state = network.product_update_state(conf.installed_faithlife_product_release, lookup)
         return f"Update available: {state.message}" if state.actionable else f"{state.status}: {state.message}"
@@ -371,64 +371,17 @@ class Services:
             return Result("succeeded", "Existing installation selected without reinstalling")
         return self._settled(run)
 
-    def adopt_profile(self, path, *, directory=False, destination=None):
+    def rollback_desktop(self, journal):
         def run(app, cancel):
-            discovery = (adoption.discover([], installation=path) if directory
-                         else adoption.discover([path]))
-            if discovery.issues:
-                raise ValueError("\n".join(discovery.issues))
-            if len(discovery.candidates) != 1:
-                raise ValueError("Choose one configuration file. The selection did not identify one installation")
-            selected = discovery.candidates[0]
-            if selected.product != "Logos":
-                raise ValueError("Choose a Logos installation")
-            plan = adoption.preview(selected, destination)
-            candidate = self._candidate(app, json.loads(plan.content), plan.destination)
-            description = (f"Original: {selected.source or 'No configuration, reconstruct from directory'}\n"
-                           f"New durable configuration: {plan.destination}\nInstallation: {selected.install}\n"
-                           f"Prefix: {selected.prefix}\nJournal: {plan.journal}\n"
-                           "The original and library stay in place. No installation or download is performed.")
-            if not app.approve("Adopt this existing installation?", description):
-                return Result("cancelled", "Adoption was not started")
-            app.checkpoint()
-            with self._selection(app, candidate):
-                result = adoption.adopt(plan)
-                try:
-                    if adoption._read(plan.destination) != plan.content:
-                        raise adoption.AdoptionError("Published configuration no longer matches the adoption preview")
-                except (OSError, ValueError, maintenance.MaintenanceError) as error:
-                    raise maintenance.MaintenanceError(
-                        "Adoption was published, but its configuration changed or could not be verified. "
-                        f"Later edits were preserved. Review the adoption journal: {result.journal}") from error
-                raw = PersistentConfiguration.from_document(json.loads(plan.content), candidate._overrides.environment)
-                raw._file_path = str(plan.destination)
-                raw._file_bytes = plan.content
-                candidate.rebind(raw)
-            return Result("succeeded", f"Installation adopted. Journal: {result.journal}")
-        return self._settled(run)
-
-    def rollback_migration(self, journal, *, integration=False):
-        def run(app, cancel):
-            if not app.approve("Roll back this migration?", f"Journal: {journal}\n"
+            if not app.approve("Undo desktop integration?", f"Journal: {journal}\n"
                                "Restore controller-owned files only. Later edits and library data are preserved."):
                 return Result("cancelled", "Rollback was not started")
             app.checkpoint()
-            if integration:
-                profile = hashlib.sha256(os.fsencode(Path(app.conf.config_file_path).resolve())).hexdigest()[:24]
-                expected = Path(constants.COORDINATION_DIR) / "desktop" / f"{profile}.json"
-                if Path(journal).resolve() != expected.resolve():
-                    raise ValueError("Choose the desktop journal for the selected profile")
-                result = desktop.rollback(journal)
-            else:
-                selected = Path(app.conf.config_file_path)
-                if Path(journal).resolve() != adoption._journal_path(selected).resolve():
-                    raise ValueError("Choose the adoption journal for the selected profile")
-                candidate = self._candidate(app, {}, selected)
-                with self._selection(app, candidate):
-                    result = adoption.rollback(journal)
-                    if result.conflicts:
-                        raise maintenance.MaintenanceError(
-                            "Rollback preserved later edits: " + ", ".join(result.conflicts))
+            profile = hashlib.sha256(os.fsencode(Path(app.conf.config_file_path).resolve())).hexdigest()[:24]
+            expected = Path(constants.COORDINATION_DIR) / "desktop" / f"{profile}.json"
+            if Path(journal).resolve() != expected.resolve():
+                raise ValueError("Choose the desktop journal for the selected profile")
+            result = desktop.rollback(journal)
             return Result("unknown" if result.conflicts else "succeeded",
                           f"Rollback: {result.state}", "\n".join(result.conflicts))
         return self._settled(run)
