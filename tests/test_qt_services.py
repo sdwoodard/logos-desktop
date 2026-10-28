@@ -192,7 +192,7 @@ class TestProductionServices(QtCase):
               patch("logos_desktop.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
             window = self.production_window()
             window._render()
-            self.assertIn("has not been checked", window.snapshot.wine_status)
+        self.assertIn("not checked", window.snapshot.wine_status)
         self.assertFalse(window.snapshot.installed)
         self.assertEqual(window.snapshot.profile, str(self.config))
         self.assertTrue(window.maintenance.buttons["repair"].isEnabled())
@@ -212,28 +212,24 @@ class TestProductionServices(QtCase):
         self.config.write_text(json.dumps(document))
         self.original = self.config.read_bytes()
         now = time.time()
-        target = releases.WineTarget("11.20", "devel", "a" * 40)
-        source = releases.WineTargetLookup(target, "ok", checked=now)
         asset = releases.SoftwareReleaseInfo("11.20", "https://example.invalid/current.AppImage")
         available = releases.ReleaseLookup(asset, "ok", checked=now)
         cases = (
-            (source, available, "available", True),
-            (source, releases.ReleaseLookup(status="unavailable", checked=now), "unavailable", True),
-            (source, replace(available, stale=True), "stale, availability unverified", True),
-            (source, replace(available, checked=None), "not checked", True),
-            (source, replace(available, release=replace(asset, version="11.21")), "unknown for this target", True),
-            (replace(source, status="offline", stale=True), available, "offline, stale", False),
-            (replace(source, checked=None), available, "not checked", False),
-            (releases.WineTargetLookup(), available, "unchecked", False),
+            (available, "Wine development 11.20 available"),
+            (releases.ReleaseLookup(status="unavailable", checked=now), "unavailable"),
+            (replace(available, stale=True), "stale, availability unverified"),
+            (replace(available, checked=None), "not checked"),
+            (replace(available, release=replace(asset, version="11.21")), "Wine development 11.21 available"),
+            (releases.ReleaseLookup(), "not checked"),
         )
         with (patch("logos_desktop.metadata.request", side_effect=AssertionError("Unexpected network")),
               patch("logos_desktop.wine.get_wine_release", side_effect=AssertionError("Unexpected Wine probe"))):
             window = self.production_window()
             client = window.app.conf._network
-            for cached_source, cached_provider, expected, provider_checked in cases:
+            for cached_provider, expected in cases:
                 with (
-                    self.subTest(source=cached_source, provider=cached_provider),
-                    patch.object(client, "wine_release_target", return_value=cached_source) as read_source,
+                    self.subTest(provider=cached_provider),
+                    patch.object(client, "wine_release_target", side_effect=AssertionError("Source is not a gate")),
                     patch.object(client, "wine_appimage_release", return_value=cached_provider) as read_provider,
                 ):
                     window.start(window.services.refresh)
@@ -242,16 +238,8 @@ class TestProductionServices(QtCase):
                     self.assertEqual(snapshot.runtime, native)
                     self.assertIn("version not checked", snapshot.wine_status)
                     self.assertIn(expected, snapshot.wine_status)
-                    if cached_source.target is not None:
-                        self.assertIn("Wine development 11.20", snapshot.wine_status)
-                    if provider_checked:
-                        self.assertIn(f"AppImage provider {releases.WINE_REPOSITORY}: {expected}.",
-                                      snapshot.wine_status)
-                        read_provider.assert_called_once_with(refresh=False)
-                    else:
-                        read_provider.assert_not_called()
-                    read_source.assert_called_once_with(refresh=False)
-                    read_source.side_effect = AssertionError("Rendering must use the frozen snapshot")
+                    self.assertIn(f"AppImage provider {releases.WINE_REPOSITORY}: {expected}.", snapshot.wine_status)
+                    read_provider.assert_called_once_with(refresh=False)
                     read_provider.side_effect = AssertionError("Rendering must not read release state")
                     window._render()
                     self.assertEqual(window.profile_settings.wine_status.text(), snapshot.wine_status)
@@ -281,14 +269,14 @@ class TestProductionServices(QtCase):
 
         def change_profile(**kwargs):
             app.conf = other
-            return releases.WineTargetLookup()
+            return releases.ReleaseLookup()
 
-        client.wine_release_target.side_effect = change_profile
+        client.wine_appimage_release.side_effect = change_profile
         services.refresh(app, threading.Event())
         self.assertIs(services.snapshot(), previous)
         app.conf = conf
-        client.wine_release_target.side_effect = None
-        client.wine_release_target.return_value = releases.WineTargetLookup()
+        client.wine_appimage_release.side_effect = None
+        client.wine_appimage_release.return_value = releases.ReleaseLookup()
         services.refresh(app, threading.Event())
         self.assertEqual(services.snapshot().profile, conf.config_file_path)
         self.assertEqual(services.snapshot().runtimes, ())

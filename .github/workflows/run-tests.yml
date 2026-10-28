@@ -1,4 +1,4 @@
-name: Private development checks
+name: Development checks
 on:
   workflow_dispatch:
 
@@ -7,7 +7,9 @@ permissions:
 
 jobs:
   offline-tests:
-    if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'sdwoodard/logos-desktop' &&
+      (github.ref_name == 'main' || github.ref_name == 'staging')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -28,7 +30,9 @@ jobs:
           python -B -m unittest discover -s tests -t . -p 'test*.py' -v
 
   qt-tests:
-    if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'sdwoodard/logos-desktop' &&
+      (github.ref_name == 'main' || github.ref_name == 'staging')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -60,7 +64,9 @@ jobs:
 
   artifact-checks:
     needs: [offline-tests, qt-tests]
-    if: github.repository == 'sdwoodard/logos-desktop' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'sdwoodard/logos-desktop' &&
+      (github.ref_name == 'main' || github.ref_name == 'staging')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

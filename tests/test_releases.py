@@ -48,6 +48,11 @@ def wine_source_responses(channel="devel"):
     }
 
 
+def wine_provider_item(version="11.20"):
+    return release_item("continuous-devel", repository=releases.WINE_REPOSITORY,
+                        name=f"wine-devel_{version}-x86_64.AppImage")
+
+
 class TestWineSourcePolicy(unittest.TestCase):
     def test_retained_released_channels_require_pinned_documents_and_tag(self):
         for channel, version in (("devel", "11.20"), ("stable", "11.0")):
@@ -94,31 +99,37 @@ class TestWineSourcePolicy(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(artifacts.ArtifactError):
                 releases.fetch_wine_target("devel", responses.__getitem__)
 
-    def test_exact_provider_ignores_github_flags_and_refuses_older_assets(self):
-        target = releases.WineTarget("11.20", "devel", "a" * 40)
-        data = json.loads((Path(__file__).parent / "data/wine-release-metadata.json").read_text())
-        result = releases.fetch_wine_appimage(target, lambda url: json.dumps(data["provider"]).encode())
-        self.assertIsNone(result.latest)
-        self.assertIn("11.20", result.message)
-        self.assertIn(releases.WINE_REPOSITORY, result.message)
-        for prerelease in (False, True):
-            item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY, prerelease=prerelease,
-                                name="wine-devel_11.20-x86_64.AppImage")
-            result = releases.fetch_wine_appimage(target, lambda url: json.dumps([item]).encode())
-            self.assertEqual(result.latest.tag, "11.20-devel")
+    def test_available_development_provider_excludes_unrelated_channels(self):
+        devel = wine_provider_item("11.19")
+        stable = release_item("continuous-stable", repository=releases.WINE_REPOSITORY,
+                              name="wine-stable_11.0-x86_64.AppImage")
+        for items in ([devel, stable], [stable, devel]):
+            selected = releases.select(items, releases.WINE_REPOSITORY).latest
+            self.assertEqual(selected.version, "11.19")
+            self.assertEqual(selected.tag, "continuous-devel")
+            self.assertIsNotNone(selected.digest)
 
-    def test_bad_preferred_flavor_is_not_hidden_by_staging(self):
-        target = releases.WineTarget("11.20", "devel", "a" * 40)
-        upstream = release_item("11.20-devel", repository=releases.WINE_REPOSITORY,
-                                name="wine-devel_11.20-x86_64.AppImage")
-        staging = release_item("11.20-staging", repository=releases.WINE_REPOSITORY,
-                               name="wine-staging_11.20-x86_64.AppImage")
-        for broken in (dict(upstream, assets=[]),):
-            result = releases.fetch_wine_appimage(target, lambda url: json.dumps([broken, staging]).encode())
-            self.assertEqual(result.status, "unavailable")
-            self.assertIsNone(result.latest)
-        result = releases.fetch_wine_appimage(target, lambda url: json.dumps([staging]).encode())
-        self.assertEqual(result.latest.tag, "11.20-staging")
+    def test_broken_development_assets_never_fall_back_to_other_flavors(self):
+        for fault in ("missing", "duplicate", "arch", "digest", "url", "rc", "stable", "prerelease"):
+            item = wine_provider_item()
+            asset = item["assets"][0]
+            if fault == "missing":
+                item["assets"] = []
+            elif fault == "duplicate":
+                item["assets"] *= 2
+            elif fault == "arch":
+                asset["name"] = asset["name"].replace("x86_64", "aarch64")
+            elif fault == "digest":
+                asset["digest"] = None
+            elif fault == "url":
+                asset["browser_download_url"] = "https://example.invalid/unrelated.AppImage"
+            elif fault in ("rc", "stable"):
+                asset["name"] = asset["name"].replace("11.20", "12.0-rc1" if fault == "rc" else "11.0")
+            else:
+                item["prerelease"] = True
+            with self.subTest(fault=fault):
+                result = releases.fetch(releases.WINE_REPOSITORY, lambda url: json.dumps([item]).encode())
+                self.assertTrue(result.status == "unavailable" or result.latest.error)
 
 
 class TestReleasePolicy(unittest.TestCase):
@@ -178,12 +189,7 @@ class TestReleasePolicy(unittest.TestCase):
             self.assertEqual(releases.select([release_item()], constants.REPOSITORY_SLUG).status, "incompatible")
 
     def test_dependency_policies_keep_custom_tags_and_optional_digests(self):
-        wine = [release_item(tag, repository=releases.WINE_REPOSITORY, name=name, identity=index)
-                for index, (tag, name) in enumerate((
-                    ("10.8-staging", "wine-staging_10.8-x86_64.AppImage"),
-                    ("10.0-stable", "wine-stable_10.0-x86_64.AppImage")), 1)]
-        wine[0]["assets"][0]["digest"] = None
-        self.assertEqual(releases.select(wine, releases.WINE_REPOSITORY).latest.version, "10.8")
+        self.assertEqual(releases.select([wine_provider_item()], releases.WINE_REPOSITORY).latest.version, "11.20")
         icu = [release_item(tag, repository=releases.ICU_REPOSITORY, name="icu-win.tar.gz", identity=index)
                for index, tag in enumerate(("75.1", "72.1-custom+4"), 1)]
         icu[0]["updated_at"] = "2030-01-01T00:00:00Z"
@@ -247,32 +253,31 @@ class TestReleaseRefresh(unittest.TestCase):
             self.assertEqual(result.checked, 1000)
             unavailable = loaded.wine_appimage_release()
             self.assertIsNone(unavailable.release)
-            self.assertTrue(unavailable.stale)
-            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(unavailable.status, "offline")
+            self.assertEqual(fetch.call_count, 2)
 
     def test_wine_exact_provider_cache_isolated_from_old_catalog(self):
-        old = release_item("10.8-staging", repository=releases.WINE_REPOSITORY,
-                           name="wine-staging_10.8-x86_64.AppImage")
-        self.client._cache.release_entries[releases.policy_key(releases.WINE_REPOSITORY)] = {
-            "catalog": releases.serialize(releases.select([old], releases.WINE_REPOSITORY)),
+        old_repository = "FaithLife-Community/wine-appimages"
+        old = release_item("10.8-staging", repository=old_repository,
+                            name="wine-staging_10.8-x86_64.AppImage")
+        self.client._cache.release_entries[releases.policy_key(old_repository)] = {
+            "catalog": {"latest": old},
             "checked": 1000, "status": "ok",
         }
-        responses = wine_source_responses()
-        item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY, prerelease=True,
-                            name="wine-devel_11.20-x86_64.AppImage")
-        responses[f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1"] = (
-            json.dumps([old, item]).encode()
-        )
+        item = wine_provider_item("11.19")
+        responses = {f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1":
+                     json.dumps([item]).encode()}
         with patch.object(network.time, "time", return_value=1000), patch.object(
             network, "_net_get", side_effect=responses.__getitem__,
         ) as fetch:
-            self.assertEqual(self.client.wine_appimage_release().release.version, "11.20")
+            self.assertEqual(self.client.wine_appimage_release().release.version, "11.19")
             self.client.wine_appimage_release()
-            self.assertEqual(fetch.call_count, 6)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertTrue(all(releases.WINE_REPOSITORY in call.args[0] for call in fetch.call_args_list))
         loaded = network.NetworkRequests()
         with patch.object(network.time, "time", return_value=1001), patch.object(network, "_net_get") as fetch:
             result = loaded.wine_appimage_release()
-            self.assertEqual(result.release.tag, "11.20-devel")
+            self.assertEqual(result.release.tag, "continuous-devel")
             self.assertFalse(result.stale)
             fetch.assert_not_called()
 
@@ -289,7 +294,7 @@ class TestReleaseRefresh(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         self.assertFalse(result.stale)
         self.assertIsNone(result.release)
-        self.assertIn("11.20", result.message)
+        self.assertIn(releases.WINE_REPOSITORY, result.message)
 
     def test_same_instance_expires_and_force_refresh_preserves_hooks(self):
         with patch.object(network, "_get_release_data", return_value=self.catalog) as fetch:

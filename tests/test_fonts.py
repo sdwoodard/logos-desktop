@@ -358,8 +358,8 @@ class FontArchiveTests(unittest.TestCase):
             self.assertNotIn("XDG_ACTIVATION_TOKEN", kwargs["env"])
             self.assertEqual(kwargs["env"]["SYNTHETIC_WORKER_MARKER"], "preserved")
             descriptor = kwargs["pass_fds"][0]
-            seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
-            self.assertTrue(seals & fcntl.F_SEAL_WRITE)
+            seals = fcntl.fcntl(descriptor, getattr(fcntl, "F_GET_SEALS", 1034))
+            self.assertTrue(seals & 0x0008)
             with self.assertRaises(OSError):
                 os.pwrite(descriptor, b"tamper", 0)
             self.assertEqual(os.pread(descriptor, fonts.MAX_ARCHIVE_BYTES, 0), self.blobs[

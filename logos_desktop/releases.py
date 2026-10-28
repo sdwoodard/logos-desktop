@@ -14,16 +14,18 @@ from packaging.version import Version
 from . import artifacts, compatibility, constants
 
 
-WINE_REPOSITORY = "FaithLife-Community/wine-appimages"
+WINE_REPOSITORY = "mmtrt/WINE_AppImage"
 ICU_REPOSITORY = "FaithLife-Community/icu"
 SEMVER = re.compile(r"v?(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?(?:\+[0-9A-Za-z.-]+)?)\Z")
-WINE_TAG = re.compile(r"(\d+\.\d+(?:\.\d+)?(?:-rc\d+)?)-(stable|staging|devel)\Z")
+WINE_ASSET = re.compile(r"wine-devel_(\d+\.\d+(?:\.\d+)?)-x86_64\.AppImage\Z")
 ICU_TAG = re.compile(r"\d+\.\d+(?:-custom(?:\+\d+)?)?\Z")
 CACHE_SCHEMA = 1
 WINE_SOURCE_API = "https://api.github.com/repos/wine-mirror/wine"
 WINE_SOURCE_RAW = "https://raw.githubusercontent.com/wine-mirror/wine"
 WINE_SOURCE_POLICY = "wine-source-1"
-WINE_RECOMMENDATION_POLICY = "Recommended Wine follows published development releases."
+WINE_RECOMMENDATION_POLICY = (
+    "Recommended Wine uses the available development AppImage, not a Logos-tested certification."
+)
 
 
 @dataclass(frozen=True)
@@ -203,8 +205,8 @@ def _asset(item, repository, version, name):
     if type(size) is not int or size <= 0:
         raise artifacts.ArtifactError("Release asset size is missing or invalid")
     digest = release_digest(asset.get("digest"))
-    if repository == constants.REPOSITORY_SLUG and digest is None:
-        raise artifacts.ArtifactError("Controller release has no required SHA-256 digest")
+    if repository in (constants.REPOSITORY_SLUG, WINE_REPOSITORY) and digest is None:
+        raise artifacts.ArtifactError("Release has no required SHA-256 digest")
     return SoftwareReleaseInfo(version, url, digest, name, size, repository, item["tag_name"], item["prerelease"])
 
 
@@ -247,11 +249,22 @@ def select(data, repository):
             name = f"logos-desktop-{version}-linux-x86_64"
             ordering = (key,)
         elif repository == WINE_REPOSITORY:
-            match = WINE_TAG.fullmatch(tag)
-            if match is None:
+            if tag != "continuous-devel":
                 continue
-            version, branch = match.groups()
-            name = f"wine-{branch}_{version}-x86_64.AppImage"
+            assets = item.get("assets")
+            if not isinstance(assets, list):
+                raise artifacts.ArtifactError("Wine release assets are malformed")
+            names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+            matches = [(name, WINE_ASSET.fullmatch(name)) for name in names if isinstance(name, str)]
+            matches = [(name, match) for name, match in matches if match is not None]
+            if len(matches) != 1:
+                raise artifacts.ArtifactError("Wine development release needs exactly one Linux x86_64 AppImage")
+            name, match = matches[0]
+            version = match[1]
+            if compatibility.parse_wine_version(f"wine-{version}").channel.value != "devel":
+                raise artifacts.ArtifactError("Wine development asset does not identify a development release")
+            if item["prerelease"]:
+                raise artifacts.ArtifactError("Wine development provider release is marked prerelease")
             ordering = (Version(version), *_publication(item))
         elif repository == ICU_REPOSITORY:
             if ICU_TAG.fullmatch(tag) is None:
@@ -298,50 +311,6 @@ def fetch(repository, request):
         return GithubSoftwareReleasesInfo(None, None, "unavailable", str(error))
     except (ValueError, KeyError, TypeError) as error:
         raise artifacts.ArtifactError("Malformed release metadata") from error
-
-
-def fetch_wine_appimage(target, request):
-    """Resolve one published base version without treating GitHub flags as Wine channels."""
-    target.validate()
-    unavailable = f"Wine {target.channel} {target.version} is unavailable from {WINE_REPOSITORY}"
-    if platform.system() != "Linux" or platform.machine().lower() not in ("x86_64", "amd64"):
-        return GithubSoftwareReleasesInfo(None, None, "incompatible", "Only Linux x86_64 assets are supported")
-    try:
-        data = []
-        for page in range(1, 6):
-            batch = json.loads(request(
-                f"https://api.github.com/repos/{WINE_REPOSITORY}/releases?per_page=100&page={page}"
-            ))
-            if not isinstance(batch, list) or len(batch) > 100 or not all(isinstance(item, dict) for item in batch):
-                raise artifacts.ArtifactError("Malformed Wine provider releases")
-            data.extend(batch)
-            if len(batch) < 100:
-                break
-        else:
-            raise artifacts.ArtifactError("Wine provider scan exceeded its page budget")
-
-        for flavor in (target.channel, "staging"):
-            tag = f"{target.version}-{flavor}"
-            matches = []
-            for item in data:
-                if item.get("tag_name") != tag:
-                    continue
-                if type(item.get("draft")) is not bool or type(item.get("prerelease")) is not bool:
-                    raise artifacts.ArtifactError("Wine provider publication flags are malformed")
-                if not item["draft"]:
-                    matches.append(item)
-            if not matches:
-                continue
-            if len(matches) != 1:
-                raise artifacts.ArtifactError("Exact Wine provider release is ambiguous")
-            name = f"wine-{flavor}_{target.version}-x86_64.AppImage"
-            selected = _asset(matches[0], WINE_REPOSITORY, target.version, name)
-            return GithubSoftwareReleasesInfo(selected, None)
-        return GithubSoftwareReleasesInfo(None, None, "empty", unavailable)
-    except artifacts.MetadataError as error:
-        return GithubSoftwareReleasesInfo(None, None, error.status, str(error), error.retry_after)
-    except (artifacts.ArtifactError, ValueError, KeyError, TypeError) as error:
-        return GithubSoftwareReleasesInfo(None, None, "unavailable", str(error))
 
 
 def serialize(catalog):
