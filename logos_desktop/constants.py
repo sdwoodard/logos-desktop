@@ -46,7 +46,7 @@ APP_SELF_UPDATE_DISABLED_MESSAGE = (
     "Standalone replacement is disabled. Use the installed controller's owner update route."
 )
 APP_RELEASE_LINEAGE = "logos-desktop"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_RELEASE_VERSION = APP_VERSION
 # A release build must explicitly identify its distribution before self-replacement.
 CONTROLLER_DISTRIBUTION = "source"

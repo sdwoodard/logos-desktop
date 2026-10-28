@@ -288,11 +288,8 @@ class TestRuntimePaths(unittest.TestCase):
                 config._download_dir = None
                 config._raw.faithlife_product_version = "10"
                 config._network = Mock()
-                filename = "wine-devel_11.20-x86_64.AppImage"
-                selected = network.SoftwareReleaseInfo("11.20", f"https://example.invalid/{filename}", name=filename)
-                config._network.wine_release_target.return_value = releases.WineTargetLookup(
-                    releases.WineTarget("11.20", "devel", "a" * 40), "ok",
-                )
+                filename = "wine-stable_11.0-x86_64.AppImage"
+                selected = network.SoftwareReleaseInfo("11.0", f"https://example.invalid/{filename}", name=filename)
                 config._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
                 config._raw.wine_binary = choice
                 app = SimpleNamespace(

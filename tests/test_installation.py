@@ -648,7 +648,7 @@ class TestInstallation(unittest.TestCase):
         candidate.write_bytes(b"fixture, version and pair probes mocked")
         candidate.chmod(0o700)
         conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(
-            releases.SoftwareReleaseInfo("11.20", "https://example.invalid/wine.AppImage"), "ok",
+            releases.SoftwareReleaseInfo("11.0", "https://example.invalid/wine.AppImage"), "ok",
         )
         with patch.object(utils, "current_native_wine", return_value=str(candidate)):
             conf.wine_binary = constants.WINE_RECOMMENDED_SIGIL
@@ -675,10 +675,7 @@ class TestInstallation(unittest.TestCase):
             self.app.conf = Config(overrides, self.app)
         self.app.ask = Mock(return_value=constants.WINE_RECOMMENDED_SIGIL)
         conf = self.app.conf
-        conf._network.wine_release_target.return_value = releases.WineTargetLookup(
-            releases.WineTarget("11.20", "devel", "a" * 40), "ok",
-        )
-        release = network.SoftwareReleaseInfo("11.20", "https://example.invalid/current.AppImage",
+        release = network.SoftwareReleaseInfo("11.0", "https://example.invalid/current.AppImage",
                                               name="current.AppImage")
         conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(release, "ok")
         return selected
@@ -763,6 +760,10 @@ class TestInstallation(unittest.TestCase):
             self.reload_and_check(first)
             conf._write(checked=True)
             self.reload_and_check(first)
+            conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(
+                releases.SoftwareReleaseInfo("11.0", "https://example.invalid/recommended.AppImage",
+                                             name="recommended.AppImage"), "ok",
+            )
             with patch.object(utils.network, "download_recommended_appimage", return_value=candidate):
                 utils.update_to_latest_recommended_appimage(self.app)
             self.assertNotEqual(first, conf.wine_binary)

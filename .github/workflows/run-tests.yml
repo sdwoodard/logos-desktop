@@ -9,7 +9,7 @@ jobs:
   offline-tests:
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
-      (github.ref_name == 'main' || github.ref_name == 'staging')
+      (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -32,7 +32,7 @@ jobs:
   qt-tests:
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
-      (github.ref_name == 'main' || github.ref_name == 'staging')
+      (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -66,7 +66,7 @@ jobs:
     needs: [offline-tests, qt-tests]
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
-      (github.ref_name == 'main' || github.ref_name == 'staging')
+      (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

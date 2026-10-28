@@ -1102,7 +1102,7 @@ class Config:
 
     @property
     def wine_appimage_recommended_url(self) -> str:
-        """Resolve the provider's available development AppImage."""
+        """Resolve the provider's available stable AppImage."""
         return self.current_wine_appimage().download_url
 
     def current_wine_appimage(self):
@@ -1113,7 +1113,7 @@ class Config:
     
     @property
     def wine_appimage_beta_url(self) -> Optional[str]:
-        """Legacy alias for the available development AppImage."""
+        """Legacy alias for the available stable AppImage."""
         return self.wine_appimage_recommended_url
     
     @property

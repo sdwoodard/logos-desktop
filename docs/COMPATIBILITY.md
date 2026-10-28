@@ -7,23 +7,17 @@ installation alone does not establish that every Logos feature will work.
 
 ## Current runtime policy
 
-Recommended Wine selects the development AppImage currently published by
-[mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage/releases/tag/continuous-devel).
-This is an independent general-purpose Wine packaging project. LogosDesktop does
-not download Wine images from FaithLife-Community. The selected Linux x86_64 asset
+Recommended Wine selects the latest stable AppImage currently published by
+[mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage/releases/tag/continuous-stable).
+This is an independent general-purpose Wine packaging project. The selected Linux x86_64 asset
 must have a SHA-256 digest and pass format and runtime compatibility checks.
 Winetricks is obtained separately from its official tagged script with a project
 SHA-256 pin. Setup does not assume it is bundled inside a Wine AppImage.
 
-The downloadable build can lag Wine's latest source announcement. Setup uses the
-available development build rather than requesting a nonexistent asset. A matching
-installed native Wine can be reused. Malformed, missing or offline provider metadata
-is reported without silently substituting stable, staging or Proton builds.
-Wine updates do not automatically upgrade system packages.
-
-Recommended is an acquisition policy, not the version most thoroughly tested with
-Logos. New Wine releases can introduce regressions. Runtime version checks enforce
-known requirements but do not certify every Logos feature.
+Setup follows the provider's stable channel and can reuse a matching installed
+native Wine. Provider metadata and cached descriptors are checked against that
+stable policy. Wine runtime updates are separate from system package updates.
+Existing saved runtime selections stay in place when the controller is updated.
 
 Installations no longer force Wine's GDI renderer. They leave an existing renderer
 selection untouched and use Wine's default when no selection exists. Updating

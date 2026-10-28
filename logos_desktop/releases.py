@@ -17,15 +17,13 @@ from . import artifacts, compatibility, constants
 WINE_REPOSITORY = "mmtrt/WINE_AppImage"
 ICU_REPOSITORY = "FaithLife-Community/icu"
 SEMVER = re.compile(r"v?(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?(?:\+[0-9A-Za-z.-]+)?)\Z")
-WINE_ASSET = re.compile(r"wine-devel_(\d+\.\d+(?:\.\d+)?)-x86_64\.AppImage\Z")
+WINE_ASSET = re.compile(r"wine-stable_(\d+\.\d+(?:\.\d+)?)-x86_64\.AppImage\Z")
 ICU_TAG = re.compile(r"\d+\.\d+(?:-custom(?:\+\d+)?)?\Z")
 CACHE_SCHEMA = 1
 WINE_SOURCE_API = "https://api.github.com/repos/wine-mirror/wine"
 WINE_SOURCE_RAW = "https://raw.githubusercontent.com/wine-mirror/wine"
 WINE_SOURCE_POLICY = "wine-source-1"
-WINE_RECOMMENDATION_POLICY = (
-    "Recommended Wine uses the available development AppImage, not a Logos-tested certification."
-)
+WINE_RECOMMENDATION_POLICY = "Recommended Wine uses the latest available stable AppImage from mmtrt/WINE_AppImage."
 
 
 @dataclass(frozen=True)
@@ -174,6 +172,8 @@ def choose(catalog, channel):
 
 def policy_key(repository):
     role = constants.APP_RELEASE_LINEAGE if repository == constants.REPOSITORY_SLUG else repository.rsplit("/", 1)[-1]
+    if repository == WINE_REPOSITORY:
+        role += ":stable"
     return f"{CACHE_SCHEMA}:{repository}:{role}:linux:x86_64"
 
 
@@ -249,7 +249,7 @@ def select(data, repository):
             name = f"logos-desktop-{version}-linux-x86_64"
             ordering = (key,)
         elif repository == WINE_REPOSITORY:
-            if tag != "continuous-devel":
+            if tag != "continuous-stable":
                 continue
             assets = item.get("assets")
             if not isinstance(assets, list):
@@ -258,13 +258,13 @@ def select(data, repository):
             matches = [(name, WINE_ASSET.fullmatch(name)) for name in names if isinstance(name, str)]
             matches = [(name, match) for name, match in matches if match is not None]
             if len(matches) != 1:
-                raise artifacts.ArtifactError("Wine development release needs exactly one Linux x86_64 AppImage")
+                raise artifacts.ArtifactError("Wine stable release needs exactly one Linux x86_64 AppImage")
             name, match = matches[0]
             version = match[1]
-            if compatibility.parse_wine_version(f"wine-{version}").channel.value != "devel":
-                raise artifacts.ArtifactError("Wine development asset does not identify a development release")
+            if compatibility.parse_wine_version(f"wine-{version}").channel.value != "stable":
+                raise artifacts.ArtifactError("Wine stable asset does not identify a stable release")
             if item["prerelease"]:
-                raise artifacts.ArtifactError("Wine development provider release is marked prerelease")
+                raise artifacts.ArtifactError("Wine stable provider release is marked prerelease")
             ordering = (Version(version), *_publication(item))
         elif repository == ICU_REPOSITORY:
             if ICU_TAG.fullmatch(tag) is None:

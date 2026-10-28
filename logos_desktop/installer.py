@@ -196,7 +196,7 @@ def check_system_compatibility(app: App):
 
 @maintenance.changes_installation
 def select_recommended_wine(app: App):
-    """Prepare an available runtime before publishing the user's new selection."""
+    """Prepare an available stable runtime before publishing the user's new selection."""
     lookup = app.conf._network.wine_appimage_release()
     if lookup.status != "ok" or lookup.stale or lookup.release is None or lookup.release.error:
         raise maintenance.MaintenanceError(lookup.message or "Recommended Wine download is unavailable")

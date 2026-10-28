@@ -163,7 +163,7 @@ def get_winebin_code_and_desc(app: App, binary) -> Tuple[str, str | None]:
     """
     # Set binary code, description, and path based on path
     codes = {
-        "Recommended": "Use the current released Wine development version from an available provider",
+        "Recommended": "Use the latest available stable Wine AppImage from mmtrt/WINE_AppImage",
         "AppImage": "AppImage of Wine64",
         "System": "Use an installed system Wine binary that meets the configured product requirements.",
         "Proton": "Install using the Steam Proton fork of WINE.",
@@ -226,7 +226,8 @@ def current_native_wine(app: App, target):
             files = (Path(selected), Path(server))
             before = [(path.resolve(strict=True), artifacts.regular_hash(path.resolve(strict=True))) for path in files]
             facts, _ = wine.get_wine_release(selected)
-            if facts is None or facts.version != Version(target.version):
+            if (facts is None or facts.version != Version(target.version)
+                    or facts.release not in ("stable", "devel")):
                 continue
             compatible, _ = wine.check_wine_version_and_branch(
                 app.conf.faithlife_product_release, selected, app.conf.faithlife_product_version, server=server,
@@ -615,7 +616,22 @@ def update_to_latest_recommended_appimage(app: App):
         return
     from . import runtime
 
-    accepted = network.download_recommended_appimage(app)
+    lookup = app.conf._network.wine_appimage_release()
+    if lookup.status != "ok" or lookup.stale or lookup.release is None or lookup.release.error:
+        raise maintenance.MaintenanceError(lookup.message or "Recommended stable Wine information is unavailable")
+
+    current, message = wine.get_wine_release(runtime.executable(app.conf.wine_binary, app))
+    if current is None:
+        raise maintenance.MaintenanceError(message)
+    if current.version > Version(lookup.release.version):
+        raise maintenance.MaintenanceError(
+            f"Keep selected Wine {current.version} for this installation. "
+            f"Recommended stable Wine {lookup.release.version} is older. "
+            "Use a separate new prefix to try the stable runtime."
+        )
+
+    app.checkpoint()
+    accepted = network.download_recommended_appimage(app, lookup.release)
     runtime.activate(app, accepted)
 
 

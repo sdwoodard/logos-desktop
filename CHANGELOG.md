@@ -1,5 +1,12 @@
 # Release notes
 
+## 1.0.2
+
+- Recommended Wine selects the latest available stable AppImage from mmtrt/WINE_AppImage.
+- Stable runtime metadata has a separate cache identity from earlier development recommendations.
+- Existing runtime selections are preserved when updating the controller.
+- Runtime updates preserve a selected Wine version newer than the stable recommendation.
+
 ## 1.0.1
 
 - Recommended Wine uses the available development AppImage from mmtrt/WINE_AppImage.

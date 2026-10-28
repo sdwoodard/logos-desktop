@@ -327,7 +327,7 @@ class NetworkRequests:
         stale = checked is not None and (not fresh or status not in ("ok", "empty"))
         if status == "empty":
             status = "unavailable"
-            message = f"No development AppImage is available from {releases.WINE_REPOSITORY}"
+            message = f"No stable AppImage is available from {releases.WINE_REPOSITORY}"
         return releases.ReleaseLookup(catalog.latest, status, message, checked, stale)
 
     def _persist(self):

@@ -266,10 +266,8 @@ class TestUninstallBoundaries(unittest.TestCase):
         config = fixture_config(self.install)
         config._overrides.config_path = str(self.config)
         config._network = Mock()
-        target = releases.WineTarget("11.20", "devel", "a" * 40)
-        filename = "wine-devel_11.20-x86_64.AppImage"
-        selected = network.SoftwareReleaseInfo("11.20", f"https://example.invalid/{filename}", name=filename)
-        config._network.wine_release_target.return_value = releases.WineTargetLookup(target, "ok")
+        filename = "wine-stable_11.0-x86_64.AppImage"
+        selected = network.SoftwareReleaseInfo("11.0", f"https://example.invalid/{filename}", name=filename)
         config._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
         config._network.wine_appimage_versions.side_effect = AssertionError(
             "Reinstallation must use the exact published target, not the old provider catalog",

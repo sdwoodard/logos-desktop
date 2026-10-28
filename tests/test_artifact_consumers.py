@@ -132,12 +132,10 @@ class TestArtifactConsumers(unittest.TestCase):
         activate.assert_called_once_with(self.app, accepted)
 
     def recommended(self):
-        target = releases.WineTarget("11.20", "devel", "a" * 40)
         selected = network.SoftwareReleaseInfo(
-            "11.20", "https://example.invalid/wine-devel_11.20-x86_64.AppImage",
-            name="wine-devel_11.20-x86_64.AppImage", size=123,
+            "11.0", "https://example.invalid/wine-stable_11.0-x86_64.AppImage",
+            name="wine-stable_11.0-x86_64.AppImage", size=123,
         )
-        self.app.conf._network.wine_release_target.return_value = releases.WineTargetLookup(target, "ok")
         self.app.conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(selected, "ok")
         self.app.conf.wine_binary_files = []
         return selected
@@ -157,6 +155,40 @@ class TestArtifactConsumers(unittest.TestCase):
                                         self.app.conf.installer_binary_dir, self.app,
                                         kind="appimage", digest=selected.digest, size=selected.size)
         self.assertEqual(Path(self.app.conf._raw.wine_binary).name, selected.name)
+
+    def test_stable_update_preserves_a_newer_selected_development_runtime(self):
+        self.app.conf.wine_binary_code = "AppImage"
+        stable = releases.SoftwareReleaseInfo("11.0", "https://example.invalid/stable.AppImage")
+        self.app.conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(stable, "ok")
+        before = self.state()
+        with (patch.object(wine, "get_wine_release", return_value=(wine.WineRelease(11, 20, "devel"), "yes")),
+              patch.object(network, "download_recommended_appimage") as acquire,
+              patch.object(runtime, "activate") as activate):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "Keep selected Wine 11.20"):
+                utils.update_to_latest_recommended_appimage(self.app)
+        acquire.assert_not_called()
+        activate.assert_not_called()
+        self.assertEqual(self.state(), before)
+
+    def test_stable_update_keeps_selection_when_provider_or_runtime_is_unverified(self):
+        self.app.conf.wine_binary_code = "AppImage"
+        stable = releases.SoftwareReleaseInfo("11.0", "https://example.invalid/stable.AppImage")
+        before = self.state()
+        for lookup, current in (
+            (releases.ReleaseLookup(stable, "offline", message="Provider offline", stale=True),
+             (wine.WineRelease(10, 8, "staging"), "yes")),
+            (releases.ReleaseLookup(stable, "ok"), (None, "Runtime version is unknown")),
+        ):
+            self.app.conf._network.wine_appimage_release.return_value = lookup
+            with (self.subTest(lookup=lookup, current=current),
+                  patch.object(wine, "get_wine_release", return_value=current),
+                  patch.object(network, "download_recommended_appimage") as acquire,
+                  patch.object(runtime, "activate") as activate):
+                with self.assertRaises(maintenance.MaintenanceError):
+                    utils.update_to_latest_recommended_appimage(self.app)
+            acquire.assert_not_called()
+            activate.assert_not_called()
+            self.assertEqual(self.state(), before)
 
     def test_recommendation_failures_keep_saved_and_effective_selection(self):
         selected = self.recommended()

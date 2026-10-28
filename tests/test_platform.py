@@ -222,6 +222,14 @@ class TestWineDiscovery(unittest.TestCase):
                   patch.object(wine, "check_wine_version_and_branch", side_effect=mutate)):
                 self.assertIsNone(utils.current_native_wine(app, target))
 
+            app.conf.wine_binary_files = [str(current)]
+            stable = releases.SoftwareReleaseInfo("11.0", "https://example.invalid/stable.AppImage")
+            for flavor, expected in (("stable", str(current)), ("staging", None)):
+                with (self.subTest(flavor=flavor),
+                      patch.object(wine, "get_wine_release", return_value=(wine.WineRelease(11, 0, flavor), "yes")),
+                      patch.object(wine, "check_wine_version_and_branch", return_value=(True, ""))):
+                    self.assertEqual(utils.current_native_wine(app, stable), expected)
+
     def test_discovery_pairs_full_patch_and_rc_identity_without_requiring_staging_label(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

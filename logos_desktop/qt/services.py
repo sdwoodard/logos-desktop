@@ -135,7 +135,7 @@ class Services:
             if provider.checked is None or provider.release is None:
                 state = "not checked"
             else:
-                state = f"Wine development {provider.release.version} available"
+                state = f"Wine stable {provider.release.version} available"
         else:
             state = "not checked" if provider.status == "unchecked" else provider.status
         parts.append(f"AppImage provider {releases.WINE_REPOSITORY}: {state}.")

@@ -116,12 +116,11 @@ does not create an installation. Review the Wine runtime and location, accept ve
 terms and sign in with your own account. Your content licenses are still required.
 See [compatibility](COMPATIBILITY.md) and keep a separate backup destination.
 
-**Recommended Wine** obtains the available development AppImage from the independent
+**Recommended Wine** obtains the latest available stable AppImage from the independent
 [mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage) project. A compatible
-installed native Wine matching that available version can be reused. A newer Wine
-source announcement does not block installation while the AppImage provider catches
-up. Recommended describes the automatic selection policy, not a guarantee that
-every Logos feature has been tested on that build.
+installed native Wine matching that available version can be reused. The recommendation
+follows the provider's stable channel. Existing saved runtime selections stay in place
+when the controller is updated.
 
 ## Use a saved profile
 

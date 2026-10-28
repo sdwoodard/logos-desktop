@@ -212,14 +212,14 @@ class TestProductionServices(QtCase):
         self.config.write_text(json.dumps(document))
         self.original = self.config.read_bytes()
         now = time.time()
-        asset = releases.SoftwareReleaseInfo("11.20", "https://example.invalid/current.AppImage")
+        asset = releases.SoftwareReleaseInfo("11.0", "https://example.invalid/current.AppImage")
         available = releases.ReleaseLookup(asset, "ok", checked=now)
         cases = (
-            (available, "Wine development 11.20 available"),
+            (available, "Wine stable 11.0 available"),
             (releases.ReleaseLookup(status="unavailable", checked=now), "unavailable"),
             (replace(available, stale=True), "stale, availability unverified"),
             (replace(available, checked=None), "not checked"),
-            (replace(available, release=replace(asset, version="11.21")), "Wine development 11.21 available"),
+            (replace(available, release=replace(asset, version="11.0.1")), "Wine stable 11.0.1 available"),
             (releases.ReleaseLookup(), "not checked"),
         )
         with (patch("logos_desktop.metadata.request", side_effect=AssertionError("Unexpected network")),

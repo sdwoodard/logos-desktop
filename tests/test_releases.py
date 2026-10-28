@@ -48,9 +48,9 @@ def wine_source_responses(channel="devel"):
     }
 
 
-def wine_provider_item(version="11.20"):
-    return release_item("continuous-devel", repository=releases.WINE_REPOSITORY,
-                        name=f"wine-devel_{version}-x86_64.AppImage")
+def wine_provider_item(version="11.0"):
+    return release_item("continuous-stable", repository=releases.WINE_REPOSITORY,
+                        name=f"wine-stable_{version}-x86_64.AppImage")
 
 
 class TestWineSourcePolicy(unittest.TestCase):
@@ -99,18 +99,18 @@ class TestWineSourcePolicy(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(artifacts.ArtifactError):
                 releases.fetch_wine_target("devel", responses.__getitem__)
 
-    def test_available_development_provider_excludes_unrelated_channels(self):
-        devel = wine_provider_item("11.19")
-        stable = release_item("continuous-stable", repository=releases.WINE_REPOSITORY,
-                              name="wine-stable_11.0-x86_64.AppImage")
+    def test_available_stable_provider_excludes_newer_development_channels(self):
+        stable = wine_provider_item("11.0.1")
+        devel = release_item("continuous-devel", repository=releases.WINE_REPOSITORY,
+                             name="wine-devel_11.20-x86_64.AppImage")
         for items in ([devel, stable], [stable, devel]):
             selected = releases.select(items, releases.WINE_REPOSITORY).latest
-            self.assertEqual(selected.version, "11.19")
-            self.assertEqual(selected.tag, "continuous-devel")
+            self.assertEqual(selected.version, "11.0.1")
+            self.assertEqual(selected.tag, "continuous-stable")
             self.assertIsNotNone(selected.digest)
 
-    def test_broken_development_assets_never_fall_back_to_other_flavors(self):
-        for fault in ("missing", "duplicate", "arch", "digest", "url", "rc", "stable", "prerelease"):
+    def test_broken_stable_assets_never_fall_back_to_other_flavors(self):
+        for fault in ("missing", "duplicate", "arch", "digest", "url", "rc", "devel", "prerelease"):
             item = wine_provider_item()
             asset = item["assets"][0]
             if fault == "missing":
@@ -123,13 +123,22 @@ class TestWineSourcePolicy(unittest.TestCase):
                 asset["digest"] = None
             elif fault == "url":
                 asset["browser_download_url"] = "https://example.invalid/unrelated.AppImage"
-            elif fault in ("rc", "stable"):
-                asset["name"] = asset["name"].replace("11.20", "12.0-rc1" if fault == "rc" else "11.0")
+            elif fault in ("rc", "devel"):
+                asset["name"] = asset["name"].replace("11.0", "12.0-rc1" if fault == "rc" else "11.20")
             else:
                 item["prerelease"] = True
             with self.subTest(fault=fault):
-                result = releases.fetch(releases.WINE_REPOSITORY, lambda url: json.dumps([item]).encode())
+                devel = release_item("continuous-devel", repository=releases.WINE_REPOSITORY,
+                                     name="wine-devel_11.20-x86_64.AppImage")
+                result = releases.fetch(releases.WINE_REPOSITORY, lambda url: json.dumps([item, devel]).encode())
                 self.assertTrue(result.status == "unavailable" or result.latest.error)
+
+    def test_development_only_provider_is_not_a_stable_recommendation(self):
+        devel = release_item("continuous-devel", repository=releases.WINE_REPOSITORY,
+                             name="wine-devel_11.20-x86_64.AppImage")
+        result = releases.select([devel], releases.WINE_REPOSITORY)
+        self.assertEqual(result.status, "empty")
+        self.assertIsNone(result.latest)
 
 
 class TestReleasePolicy(unittest.TestCase):
@@ -189,7 +198,7 @@ class TestReleasePolicy(unittest.TestCase):
             self.assertEqual(releases.select([release_item()], constants.REPOSITORY_SLUG).status, "incompatible")
 
     def test_dependency_policies_keep_custom_tags_and_optional_digests(self):
-        self.assertEqual(releases.select([wine_provider_item()], releases.WINE_REPOSITORY).latest.version, "11.20")
+        self.assertEqual(releases.select([wine_provider_item()], releases.WINE_REPOSITORY).latest.version, "11.0")
         icu = [release_item(tag, repository=releases.ICU_REPOSITORY, name="icu-win.tar.gz", identity=index)
                for index, tag in enumerate(("75.1", "72.1-custom+4"), 1)]
         icu[0]["updated_at"] = "2030-01-01T00:00:00Z"
@@ -264,22 +273,47 @@ class TestReleaseRefresh(unittest.TestCase):
             "catalog": {"latest": old},
             "checked": 1000, "status": "ok",
         }
-        item = wine_provider_item("11.19")
+        item = wine_provider_item("11.0.1")
         responses = {f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1":
                      json.dumps([item]).encode()}
         with patch.object(network.time, "time", return_value=1000), patch.object(
             network, "_net_get", side_effect=responses.__getitem__,
         ) as fetch:
-            self.assertEqual(self.client.wine_appimage_release().release.version, "11.19")
+            self.assertEqual(self.client.wine_appimage_release().release.version, "11.0.1")
             self.client.wine_appimage_release()
             self.assertEqual(fetch.call_count, 1)
             self.assertTrue(all(releases.WINE_REPOSITORY in call.args[0] for call in fetch.call_args_list))
         loaded = network.NetworkRequests()
         with patch.object(network.time, "time", return_value=1001), patch.object(network, "_net_get") as fetch:
             result = loaded.wine_appimage_release()
-            self.assertEqual(result.release.tag, "continuous-devel")
+            self.assertEqual(result.release.tag, "continuous-stable")
             self.assertFalse(result.stale)
             fetch.assert_not_called()
+
+    def test_development_cache_is_isolated_and_rejected_under_stable_identity(self):
+        repository = releases.WINE_REPOSITORY
+        old_key = f"{releases.CACHE_SCHEMA}:{repository}:WINE_AppImage:linux:x86_64"
+        current_key = releases.policy_key(repository)
+        self.assertNotEqual(old_key, current_key)
+        devel = release_item("continuous-devel", repository=repository, name="wine-devel_11.20-x86_64.AppImage")
+        asset = devel["assets"][0]
+        old_release = releases.SoftwareReleaseInfo(
+            "11.20", asset["browser_download_url"], releases.release_digest(asset["digest"]),
+            asset["name"], asset["size"], repository, "continuous-devel",
+        )
+        catalog = releases.serialize(releases.GithubSoftwareReleasesInfo(old_release, None))
+        for key in (old_key, current_key):
+            with self.subTest(key=key):
+                self.client._cache.release_entries.clear()
+                self.client._cache.release_entries[key] = {"catalog": catalog, "checked": 1000, "status": "ok"}
+                with patch.object(network.time, "time", return_value=1001), patch.object(
+                    network, "_net_get", return_value=json.dumps([wine_provider_item()]).encode(),
+                ) as fetch:
+                    self.assertIsNone(self.client.wine_appimage_release(refresh=False).release)
+                    result = self.client.wine_appimage_release()
+                    self.assertEqual(result.release.tag, "continuous-stable")
+                    self.assertEqual(result.release.version, "11.0")
+                    fetch.assert_called_once()
 
     def test_missing_current_provider_is_fresh_unavailable_not_older_recommendation(self):
         responses = wine_source_responses()
@@ -373,8 +407,7 @@ class TestReleaseRefresh(unittest.TestCase):
 
     def test_expired_wine_failure_cannot_publish_a_current_comparison(self):
         responses = wine_source_responses()
-        item = release_item("11.20-devel", repository=releases.WINE_REPOSITORY,
-                            name="wine-devel_11.20-x86_64.AppImage")
+        item = wine_provider_item()
         responses[f"https://api.github.com/repos/{releases.WINE_REPOSITORY}/releases?per_page=100&page=1"] = (
             json.dumps([item]).encode()
         )
