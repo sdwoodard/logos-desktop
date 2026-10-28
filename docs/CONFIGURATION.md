@@ -40,8 +40,7 @@ the standard home locations:
 Existing installations and external prefixes stay where they are. The portable
 configuration name is `logos-desktop.json` in the installation directory.
 Explicitly selected legacy JSON and shell-assignment files remain readable inputs.
-Use an explicit profile path when needed. Startup does not import another controller's
-installation or replace its files with the default profile.
+Choose the installation's saved profile in Settings or supply its path with `-c`.
 
 When the default is missing, Home offers **Set up Logos**. The installation form
 shows the recommended location and lets you edit it before confirmation. To reopen
@@ -71,9 +70,8 @@ override. Without it, the selected runtime supplies its companion.
 
 ## Legacy files and saves
 
-Legacy installation discovery, import and reconstruction are not supported. Existing
-data is not removed. Keep any journals from earlier development builds and use the
-controller that created an unfinished migration for recovery, or request help.
+For recovery of an unfinished migration, keep its journals and use the controller
+that created them, or request help.
 
 ### Direct legacy selection and ordinary saves
 

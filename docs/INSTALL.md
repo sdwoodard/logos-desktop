@@ -135,8 +135,8 @@ controller=logos-desktop
 ```
 
 For multiple controller environments, set `controller` to the intended root's
-absolute stable launcher instead. Choose an existing profile in Settings when needed.
-Selection does not import another installation or move its data. See [configuration](CONFIGURATION.md).
+absolute stable launcher instead. Choose the installation's saved profile in Settings
+or supply its path with `-c`, as shown above. See [configuration](CONFIGURATION.md).
 
 ## Setup and recovery
 
