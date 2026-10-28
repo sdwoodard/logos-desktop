@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 1.0.1
 
 - Recommended Wine uses the available development AppImage from mmtrt/WINE_AppImage.
   Setup no longer requests an unavailable version from the inherited provider.
