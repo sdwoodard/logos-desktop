@@ -15,6 +15,11 @@ import requests
 from . import artifacts, maintenance
 
 
+# Standalone Python can omit names from its build headers. These are the Linux x86_64 ABI values.
+ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+REQUIRED_SEALS = 0x0001 | 0x0002 | 0x0004 | 0x0008  # SEAL_SEAL, SHRINK, GROW and WRITE
+
+
 FONT_KEYS = (
     r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Fonts",
     r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Fonts",
@@ -160,8 +165,7 @@ def _sealed_archive(name, expected, checkpoint):
                     output.write(chunk)
         if digest.hexdigest() != expected:
             raise maintenance.MaintenanceError("Arial archive checksum mismatch")
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(descriptor, ADD_SEALS, REQUIRED_SEALS)
         os.lseek(descriptor, 0, os.SEEK_SET)
         checkpoint()
         yield descriptor

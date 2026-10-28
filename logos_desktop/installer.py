@@ -196,20 +196,16 @@ def check_system_compatibility(app: App):
 
 @maintenance.changes_installation
 def select_recommended_wine(app: App):
-    """Prepare an exact current runtime before publishing the user's new selection."""
-    source = app.conf._network.wine_release_target()
-    if source.status != "ok" or source.stale or source.target is None:
-        raise maintenance.MaintenanceError(source.message)
-    native = utils.current_native_wine(app, source.target)
+    """Prepare an available runtime before publishing the user's new selection."""
+    lookup = app.conf._network.wine_appimage_release()
+    if lookup.status != "ok" or lookup.stale or lookup.release is None or lookup.release.error:
+        raise maintenance.MaintenanceError(lookup.message or "Recommended Wine download is unavailable")
+    native = utils.current_native_wine(app, lookup.release)
     app.checkpoint()
     if native is not None:
         app.conf.wine_binary = native
         return
 
-    lookup = app.conf._network.wine_appimage_release()
-    if (lookup.status != "ok" or lookup.stale or lookup.release is None
-            or lookup.release.version != source.target.version):
-        raise maintenance.MaintenanceError(lookup.message or "Current Wine AppImage is unavailable")
     accepted = network.download_recommended_appimage(app, lookup.release)
     app.checkpoint()
     runtime.activate(app, accepted)

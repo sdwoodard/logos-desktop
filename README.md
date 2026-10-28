@@ -8,7 +8,6 @@
 
 <p align="center">
   <a href="docs/INSTALL.md"><img src="docs/media/linux-badge.svg" alt="For Linux"></a>
-  <a href="docs/INSTALL.md"><img src="docs/media/python-badge.svg" alt="Python 3.12 or newer"></a>
   <a href="LICENSE"><img src="docs/media/license-badge.svg" alt="MIT and ISC licensed"></a>
 </p>
 
@@ -39,8 +38,10 @@ logos-desktop
 Or search for **LogosDesktop** in your application menu. If the installer adds the
 command to PATH, open a new terminal first.
 
-**Dependencies:** Linux x86_64, Python 3.12 or newer with venv support, Bash and curl
-8.4 or newer. The installer uses your account and leaves system Python unchanged.
+**Requirements:** Linux x86_64, Bash, curl and standard archive/checksum tools.
+The installer reuses a suitable Python or downloads a private, checksum-verified
+Python runtime automatically. Qt/PySide6 is installed automatically too.
+It uses your account and leaves system Python unchanged.
 It downloads code from this project's release channel and configures updates and
 launchers. The command requires a published release.
 

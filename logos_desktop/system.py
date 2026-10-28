@@ -814,21 +814,7 @@ def ensure_winetricks(
 ):
     from . import artifacts, runtime
 
-    if (
-        app.conf.wine_binary_code in ["Recommended", "AppImage"]
-        and app.conf.wine_appimage_path is not None
-        and app.conf.wine_appimage_path.exists()
-    ):
-        binary = runtime.executable(app.conf.wine_appimage_path, app)
-        concrete = Path(binary).resolve()
-        if concrete.parent.parent.parent.name != ".artifacts":
-            accepted = artifacts.import_local(
-                concrete, Path(app.conf.installer_binary_dir),
-                artifacts.ArtifactSpec("local:" + str(concrete), concrete.name, "appimage"),
-            )
-            concrete = accepted.path
-        return str(concrete.parent / "winetricks")
-
+    # Wine AppImages do not necessarily bundle Winetricks. Use the same pinned script for every provider.
     winetricks_path = Path(app.conf.installer_binary_dir) / "winetricks"
     script_spec = artifacts.ArtifactSpec(
         f"https://github.com/Winetricks/winetricks/{version}", "winetricks", "winetricks",

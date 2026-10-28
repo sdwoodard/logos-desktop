@@ -128,33 +128,14 @@ class Services:
             provider = "AppImage" if str(selected).lower().endswith(".appimage") else "native/custom Wine"
             parts.append(f"Selected provider: {provider} (version not checked).")
 
-        source = conf._network.wine_release_target(refresh=False)
-        if source.target is None:
-            parts.append(f"Published Wine release: {source.status}. Provider availability has not been checked.")
-            return " ".join(parts)
-
-        target = source.target
-        channel = "development" if target.channel == "devel" else target.channel
-        label = f"Wine {channel} {target.version}"
-        if source.status != "ok" or source.stale or source.checked is None:
-            state = "stale" if source.stale else "not checked"
-            if source.status != "ok":
-                state = f"{source.status}, {state}"
-            parts.append(f"Last known target: {label} ({state}). "
-                         "Provider availability is unknown.")
-            return " ".join(parts)
-
-        parts.append(f"Published target: {label}.")
         provider = conf._network.wine_appimage_release(refresh=False)
         if provider.stale:
             state = "stale, availability unverified"
         elif provider.status == "ok":
-            if provider.checked is None:
+            if provider.checked is None or provider.release is None:
                 state = "not checked"
-            elif provider.release is None or provider.release.version != target.version:
-                state = "unknown for this target"
             else:
-                state = "available"
+                state = f"Wine development {provider.release.version} available"
         else:
             state = "not checked" if provider.status == "unchecked" else provider.status
         parts.append(f"AppImage provider {releases.WINE_REPOSITORY}: {state}.")

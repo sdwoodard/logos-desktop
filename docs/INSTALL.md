@@ -11,10 +11,20 @@ Open a new terminal if the installer adds the command to PATH.
 
 ### Dependencies
 
-Use Linux x86_64 with Python 3.12 or newer, venv support, Bash and curl 8.4 or newer.
-Some distributions provide venv in a separate python3-venv package. Install as your
-ordinary user, without sudo. The script reports missing prerequisites rather than
-changing system packages itself.
+Use Linux x86_64 with Bash, HTTPS-capable curl, tar and coreutils (including
+sha256sum). Install as your ordinary user, without sudo. There is no curl 8.4
+minimum and no need to install Python or PySide6 separately for quick install.
+
+The installer reuses Python 3.12 through 3.14 with venv support when available.
+Otherwise it downloads a pinned CPython 3.12 runtime from
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+checks its SHA-256 before extraction and keeps it privately in your account.
+The fallback adds about 33 MB of downloads. Python packages and Qt are installed
+inside the managed environment. System Python and distribution packages are unchanged.
+
+Native desktop libraries and Wine's system dependencies are still needed. An old
+distribution may lack libraries required by current Qt wheels. Automatic Python
+provisioning does not make every old Linux distribution supported.
 
 The command requires a [published release](https://github.com/sdwoodard/logos-desktop/releases).
 For development before a release is available, use [source setup](../CONTRIBUTING.md#source-setup).
@@ -31,6 +41,7 @@ publisher signature. The outer curl-to-Bash pipeline does not provide such a gua
 | Item | Default location |
 | --- | --- |
 | Controller environment | `~/.local/lib/logos-desktop` |
+| Python fallback, when needed | `~/.local/lib/logos-desktop-python.*` |
 | Command | `~/.local/bin/logos-desktop` |
 | Application-menu entry | `~/.local/share/applications/logos-desktop.desktop` |
 | Logos installation proposal | `~/.local/share/logos-desktop/installation` |
@@ -82,6 +93,9 @@ The verified wheel supplies the installation implementation. It creates a versio
 environment, checks dependencies/resources and publishes a stable launcher. System
 Python remains package-managed. The setup step adds the provider, command and menu entry.
 
+This direct Python command requires Python 3.12 or newer with venv support.
+Use the shell quick installer for automatic Python provisioning.
+
 ### Wheel controller updates
 
 On Home, choose **Check controller updates**, then **Update environment**.
@@ -101,6 +115,13 @@ data location. You can edit it before confirmation. Displaying a recommendation
 does not create an installation. Review the Wine runtime and location, accept vendor
 terms and sign in with your own account. Your content licenses are still required.
 See [compatibility](COMPATIBILITY.md) and keep a separate backup destination.
+
+**Recommended Wine** obtains the available development AppImage from the independent
+[mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage) project. A compatible
+installed native Wine matching that available version can be reused. A newer Wine
+source announcement does not block installation while the AppImage provider catches
+up. Recommended describes the automatic selection policy, not a guarantee that
+every Logos feature has been tested on that build.
 
 ## Use a saved profile
 
@@ -134,3 +155,6 @@ To remove the controller, close it and its helpers, then remove only its chosen 
 and its own command/menu entry after checking their paths. Keep Logos, its Wine
 prefix, configuration and backups. The generic ~/.local/bin PATH entry may remain.
 Do not delete broad XDG directories. See [support](SUPPORT.md) for help with errors.
+If a private Python fallback was installed, keep its directory while any controller
+environment refers to it in pyvenv.cfg. It can be removed after those environments
+are removed.

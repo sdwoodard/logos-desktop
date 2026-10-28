@@ -385,15 +385,21 @@ class TestArtifactConsumers(unittest.TestCase):
         self.assertEqual([runtime._snapshot(path) for path in configs], config_before)
         self.assertEqual(self.app.conf._raw._as_dict(), raw)
 
-    def test_appimage_winetricks_remains_provider_owned_without_standalone_pin(self):
+    def test_appimage_winetricks_uses_the_official_standalone_pin(self):
         accepted = self.accepted("appimage", appimage(), "wine.AppImage")
+        runtime.activate(self.app, accepted)
         self.app.conf.wine_binary_code = "AppImage"
         self.app.conf.wine_appimage_path = accepted.path
-        with (patch.object(constants, "WINETRICKS_SHA256", "0" * 64),
-              patch.object(network, "logos_reuse_download", side_effect=AssertionError("No standalone download"))):
+        script = b"#!/bin/sh\n# fixture standalone script\nexit 0\n"
+        with (patch.object(constants, "WINETRICKS_SHA256", hashlib.sha256(script).hexdigest()),
+              patch.object(artifacts.requests, "head", return_value=response()),
+              patch.object(artifacts.requests, "get", return_value=response(script))):
             selected = Path(system.ensure_winetricks(self.app))
         self.assertEqual(selected.name, "winetricks")
-        self.assertEqual(selected.resolve(), accepted.path)
+        self.assertNotEqual(selected.resolve(), accepted.path)
+        self.assertEqual(selected.read_bytes(), script)
+        self.assertEqual(artifacts.installed(selected, "winetricks").spec.kind, "winetricks")
+        self.assertEqual((Path(self.app.conf.installer_binary_dir) / "winetricks").resolve(), selected)
 
     def test_default_winetricks_rejects_wrong_script_against_the_production_pin(self):
         target = Path(self.app.conf.installer_binary_dir) / "winetricks"

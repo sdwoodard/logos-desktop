@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.0.1
+
+- Recommended Wine uses the available development AppImage from mmtrt/WINE_AppImage.
+  Setup no longer requests an unavailable version from the inherited provider.
+- Wine downloads require SHA-256 release metadata. Provider lag no longer makes a
+  newer Wine source announcement block setup.
+- Quick install provisions a private verified Python runtime when needed and
+  installs Qt dependencies automatically. curl 8.4 is no longer required.
+
 ## 1.0.0
 
 Prepared for the first LogosDesktop release. Availability is recorded on the

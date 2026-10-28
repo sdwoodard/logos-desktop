@@ -268,7 +268,7 @@ class NetworkRequests:
                              checked, checked is not None and (not fresh or status not in ("ok", "empty")))
 
     def wine_appimage_versions(self, *, refresh=True):
-        return self._repo_version("FaithLife-Community/wine-appimages", refresh=refresh)
+        return self._repo_version(releases.WINE_REPOSITORY, refresh=refresh)
 
     def wine_release_target(self, channel="devel", *, force=False, refresh=True):
         if channel not in ("stable", "devel"):
@@ -319,18 +319,15 @@ class NetworkRequests:
                                          checked is not None and (not fresh or status != "ok"))
 
     def wine_appimage_release(self, *, force=False, refresh=True):
-        source = self.wine_release_target(force=force, refresh=refresh)
-        if source.status != "ok" or source.stale or source.target is None:
-            return releases.ReleaseLookup(status=source.status, message=source.message,
-                                          checked=source.checked, stale=source.stale)
         catalog, checked, fresh, status, message = self._catalog(
-            releases.WINE_REPOSITORY, force=force, refresh=refresh, wine_target=source.target,
+            releases.WINE_REPOSITORY, force=force, refresh=refresh,
         )
         if catalog.latest is not None and catalog.latest.error:
             status, message = "incompatible", catalog.latest.error
         stale = checked is not None and (not fresh or status not in ("ok", "empty"))
         if status == "empty":
             status = "unavailable"
+            message = f"No development AppImage is available from {releases.WINE_REPOSITORY}"
         return releases.ReleaseLookup(catalog.latest, status, message, checked, stale)
 
     def _persist(self):
@@ -387,24 +384,14 @@ class NetworkRequests:
                 self._inflight.pop(key, None)
                 event.set()
 
-    def _catalog(self, repository, *, force=False, refresh=True, wine_target=None):
+    def _catalog(self, repository, *, force=False, refresh=True):
         key = releases.policy_key(repository)
-        if wine_target is not None:
-            wine_target.validate()
-            key = f"wine-appimage-2:{wine_target.channel}:{wine_target.version}:{wine_target.commit}"
         with self._lock:
             entry = self._cache.release_entries.get(key, {})
             if not isinstance(entry, dict):
                 entry = {}
             try:
                 catalog = releases.deserialize(entry.get("catalog"), repository)
-                if wine_target is not None and catalog.latest is not None:
-                    selected = catalog.latest
-                    if (selected.version != wine_target.version
-                            or selected.tag not in (f"{wine_target.version}-{wine_target.channel}",
-                                                    f"{wine_target.version}-staging")
-                            or catalog.pre_release is not None):
-                        raise ValueError("Cached Wine provider disagrees with the target")
             except (ValueError, TypeError, KeyError, artifacts.ArtifactError):
                 catalog = GithubSoftwareReleasesInfo(None, None)
                 entry = {"status": entry.get("status", "unchecked"), "message": entry.get("message", ""),
@@ -416,8 +403,6 @@ class NetworkRequests:
         if refresh and needed:
             def load():
                 try:
-                    if wine_target is not None:
-                        return releases.fetch_wine_appimage(wine_target, _net_get)
                     return _get_release_data(repository)
                 except artifacts.ArtifactError as error:
                     return GithubSoftwareReleasesInfo(None, None, "malformed", str(error))
@@ -434,7 +419,7 @@ class NetworkRequests:
                 self._cache.release_entries[key] = previous
 
             self._refresh(key, revision, load, publish)
-            return self._catalog(repository, refresh=False, wine_target=wine_target)
+            return self._catalog(repository, refresh=False)
         return catalog, checked, fresh, status, entry.get("message", "")
 
     def _repo_version(self, repository, *, refresh=True):

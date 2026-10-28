@@ -647,14 +647,15 @@ class TestInstallation(unittest.TestCase):
         candidate.parent.mkdir()
         candidate.write_bytes(b"fixture, version and pair probes mocked")
         candidate.chmod(0o700)
-        conf._network.wine_release_target.return_value = releases.WineTargetLookup(
-            releases.WineTarget("11.20", "devel", "a" * 40), "ok",
+        conf._network.wine_appimage_release.return_value = releases.ReleaseLookup(
+            releases.SoftwareReleaseInfo("11.20", "https://example.invalid/wine.AppImage"), "ok",
         )
         with patch.object(utils, "current_native_wine", return_value=str(candidate)):
             conf.wine_binary = constants.WINE_RECOMMENDED_SIGIL
         self.assertEqual(conf.wine_binary, str(candidate))
         self.assertEqual(conf.wine_binary_code, "Custom")
-        conf._network.wine_appimage_release.assert_not_called()
+        conf._network.wine_appimage_release.assert_called_once()
+        conf._network.wine_appimage_release.reset_mock()
         conf._network.wine_release_target.reset_mock()
         conf._network.wine_appimage_release.side_effect = AssertionError("No current AppImage provider")
         with (patch.object(system, "check_incompatibilities"), patch.object(utils, "install_dependencies"),
@@ -774,7 +775,7 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
-from logos_desktop import constants,system,wine
+from logos_desktop import constants,wine
 from logos_desktop.config import Config,EphemeralConfiguration
 constants.STATE_DIR=sys.argv[2]
 app=SimpleNamespace(_config_updated_event=Event())
@@ -784,7 +785,7 @@ conf=app.conf
 conf.faithlife_product_logging=not conf.faithlife_product_logging
 command,env=wine._wine_invocation(app,conf.wine_binary,None)
 print(json.dumps([conf.wine_binary,conf.wine64_binary,conf.wineserver_binary,
-                  system.ensure_winetricks(app),command[0],env['WINE'],env['WINESERVER'],
+                  command[0],env['WINE'],env['WINESERVER'],
                   conf.wine_prefix,conf.installer_binary_dir,conf._raw._legacy.DEBUG,
                   conf._overrides.install_dependencies_skip]))
 """
@@ -796,12 +797,11 @@ print(json.dumps([conf.wine_binary,conf.wine64_binary,conf.wineserver_binary,
                 )
                 values = json.loads(output)
                 self.assertEqual(values[:2], [expected, expected])
-                companions = [str(Path(expected).parent / name) for name in ("wineserver", "winetricks")]
-                self.assertEqual(values[2:4], companions)
-                self.assertEqual(values[4:6], [expected, expected])
-                self.assertEqual(values[6], values[2])
+                self.assertEqual(values[2], str(Path(expected).parent / "wineserver"))
+                self.assertEqual(values[3:5], [expected, expected])
+                self.assertEqual(values[5], values[2])
                 context = [self.app.conf.wine_prefix, self.app.conf.installer_binary_dir, False, True]
-                self.assertEqual(values[7:], context)
+                self.assertEqual(values[6:], context)
 
     def test_malformed_legacy_boolean_has_a_controlled_diagnostic(self):
         path = Path(self.app.conf._overrides.config_path)
