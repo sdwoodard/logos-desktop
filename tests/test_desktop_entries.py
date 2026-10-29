@@ -36,6 +36,8 @@ class TestDesktopEntries(unittest.TestCase):
             route = f'/usr/bin/env "--" "{launcher}" "-c" "{root / "chosen.json"}"'
             self.assertIn(f'Exec={route}\n', controller)
             self.assertIn(f'Exec={route} "--run-installed-app"\n', product)
+            self.assertIn('StartupWMClass=logos.exe\n', product)
+            self.assertNotIn('StartupWMClass=', controller)
             self.assertIn('"--wine" ', handler)
             self.assertIn(' %u\n', handler)
             self.assertIn("Terminal=false", handler)
@@ -122,9 +124,14 @@ class TestDesktopEntries(unittest.TestCase):
                 default.return_value = handler.name
                 handler.write_text(content.replace('Icon=', 'X-Retained-Icon='))
                 retained = handler.read_bytes()
-                with patch.object(installer, 'create_launcher_shortcuts', side_effect=AssertionError('Already ready')):
+                with (patch.object(installer, 'create_launcher_shortcuts', side_effect=AssertionError('Already ready')),
+                      patch.object(desktop, 'product_entry_current', return_value=True)):
                     self.assertEqual(installer.ensure_login_handler(app).state, 'committed')
                 self.assertEqual(handler.read_bytes(), retained)
+                with (patch.object(desktop, 'product_entry_current', return_value=False),
+                      patch.object(installer, 'create_launcher_shortcuts') as refresh):
+                    installer.ensure_login_handler(app)
+                refresh.assert_called_once_with(app, identity=identity)
 
     def test_atomic_desktop_replacement_preserves_symlink_target(self):
         with tempfile.TemporaryDirectory() as directory:

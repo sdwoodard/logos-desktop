@@ -28,6 +28,110 @@ class TestMimeEnvironment(unittest.TestCase):
 
 
 class TestDesktopIntegration(unittest.TestCase):
+    def test_later_attempt_does_not_claim_an_untouched_entries_historical_preimage(self):
+        from dataclasses import replace
+
+        base = self.plan()
+        desktop.adopt(base)
+        product = next(item.path for item in base.files if item.path.stem.endswith('-app'))
+        earlier = product.read_bytes()
+        first = replace(self.plan(), files=tuple(
+            replace(item, after=item.after + b'X-First-Upgrade=1\n')
+            if item.path == product else item for item in self.plan().files
+        ))
+        desktop.adopt(first)
+        current = product.read_bytes()
+        second = replace(self.plan(), files=tuple(
+            replace(item, after=current) if item.path == product else
+            replace(item, after=item.after + b'X-Second-Upgrade=1\n')
+            if item.path.suffix == '.desktop' else item for item in self.plan().files
+        ))
+        publish = config_store.Target.publish
+
+        def interrupt(target):
+            if target.path.suffix == '.desktop':
+                raise OSError('Synthetic second upgrade interruption')
+            return publish(target)
+
+        with (patch.object(config_store.Target, 'publish', autospec=True, side_effect=interrupt),
+              self.assertRaises(OSError)):
+            desktop.adopt(second)
+        product.write_bytes(earlier)
+        result = desktop.rollback(base.journal)
+        self.assertIn(str(product), result.conflicts)
+        self.assertEqual(product.read_bytes(), earlier)
+
+    def test_interrupted_owned_upgrade_recovers_unpublished_preimages_and_allows_retry(self):
+        from dataclasses import replace
+
+        publish = config_store.Target.publish
+        for failure_at in (1, 2):
+            name = f'upgrade-{failure_at}.json'
+            base = self.plan(name)
+            base = replace(base, files=tuple(
+                replace(item, after=item.after.replace(b'StartupWMClass=logos.exe\n', b''))
+                for item in base.files
+            ))
+            desktop.adopt(base)
+            proposed = self.plan(name)
+            proposed = replace(proposed, files=tuple(
+                replace(item, after=item.after + b'X-Revision=2\n')
+                if item.path.suffix == '.desktop' else item for item in proposed.files
+            ))
+            attempts = []
+
+            def interrupt(target):
+                if target.path.suffix == '.desktop':
+                    attempts.append(target.path)
+                    if len(attempts) == failure_at:
+                        raise OSError('Synthetic interrupted upgrade')
+                return publish(target)
+
+            with (self.subTest(failure_at=failure_at),
+                  patch.object(config_store.Target, 'publish', autospec=True, side_effect=interrupt),
+                  self.assertRaises(OSError)):
+                desktop.adopt(proposed)
+            self.assertEqual(desktop.rollback(base.journal).state, 'rolled-back')
+            self.assertTrue(all(not item.path.exists() for item in base.files))
+            self.assertEqual(desktop.adopt(self.plan(name)).state, 'committed')
+            self.assertEqual(desktop.rollback(base.journal).state, 'rolled-back')
+
+    def test_upgrade_owned_product_entry_preserves_original_rollback_and_later_edits(self):
+        from dataclasses import replace
+
+        base = self.plan()
+        base = replace(base, files=tuple(
+            replace(item, after=item.after.replace(b'StartupWMClass=logos.exe\n', b''))
+            for item in base.files
+        ))
+        desktop.adopt(base)
+        icon = self.root / 'logos-icon.png'
+        icon.write_bytes(b'fixture icon path')
+        revised = replace(self.plan(), files=tuple(
+            replace(item, after=item.after.replace(b'Icon=', b'X-Previous-Icon=')
+                    + f'Icon={icon}\n'.encode()) if item.path.stem.endswith('-app') else item
+            for item in self.plan().files
+        ))
+        mime = self.root / 'config/mimeapps.list'
+        original_mime = mime.read_bytes()
+        result = desktop.adopt(revised)
+        self.assertEqual(result.state, 'committed')
+        product = next(item.path for item in revised.files if item.path.stem.endswith('-app'))
+        self.assertIn(b'StartupWMClass=logos.exe', product.read_bytes())
+        self.assertEqual(mime.read_bytes(), original_mime)
+        self.assertEqual(desktop.adopt(revised).state, 'committed')
+
+        product.write_bytes(product.read_bytes() + b'X-User-Edit=preserve\n')
+        with self.assertRaisesRegex(file_transactions.FileTransactionError, 'later edit'):
+            desktop.adopt(replace(self.plan(), files=tuple(
+                replace(item, after=item.after + b'X-Next-Revision=1\n')
+                if item.path == product else item for item in self.plan().files
+            )))
+        result = desktop.rollback(base.journal)
+        self.assertIn(str(product), result.conflicts)
+        self.assertIn(b'X-User-Edit=preserve', product.read_bytes())
+        self.assertFalse(mime.exists())
+
     def test_managed_entries_use_stable_launcher_and_preserve_profile_arguments(self):
         from logos_desktop import controller_install
 

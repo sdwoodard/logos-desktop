@@ -140,6 +140,10 @@ Browser sign-in links return to the selected Logos profile through its desktop U
 handler. Managed setup creates this handler, and opening Logos checks its routing.
 If Firefox asks to open a sign-in link with LogosDesktop, approve that handoff.
 
+Setup configures WPF software rendering for Logos' startup and sign-in windows
+under Wine. The graphical controller also passes the desktop's light/dark
+preference to Wine so Logos' **System** theme starts with the expected appearance.
+
 **Recommended Wine** obtains the latest available stable AppImage from the independent
 [mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage) project. A compatible
 installed native Wine matching that available version can be reused. The recommendation

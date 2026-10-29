@@ -738,6 +738,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _theme_changed(self):
+        # Workers receive a value snapshot rather than accessing Qt objects.
+        if self.production:
+            self.app.system_dark = self.theme.system_dark
         combo = self.settings.appearance
         combo.blockSignals(True)
         combo.setCurrentText(self.theme.preference)

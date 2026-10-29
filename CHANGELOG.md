@@ -2,6 +2,9 @@
 
 ## 1.0.2
 
+- Logos' System theme follows the desktop preference during graphical setup and launch.
+- Logos taskbar entries match the Windows application and use its locally installed icon.
+- Fresh setup enables WPF software rendering for startup and sign-in windows under Wine.
 - Browser sign-in returns use the selected Logos profile and the controller's stable launcher.
 - Controller updates show progress in the app and restart automatically after the confirmation popup.
 - Wine launches preserve the installation's Windows user when changing runtimes.

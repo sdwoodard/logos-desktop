@@ -342,6 +342,8 @@ def ensure_wineprefix_config(app: App):
     # Force fontsmooth=rgb in registry.
     logging.debug("Setting fontsmoothing=rgb in wineprefix registry.")
     wine.set_fontsmoothing_to_rgb(app=app, wine64_binary=app.conf.wine64_binary)
+    wine.configure_wpf_rendering(app)
+    wine.sync_desktop_theme(app)
     return accepted
 
 
@@ -450,7 +452,10 @@ def ensure_login_handler(app: App):
         selected = app.conf._overrides
         config = selected.config_destination or selected.config_path
         launcher = desktop.controller_launcher(identity)
-        if desktop.url_handler_current(config, launcher, app.conf.logos_exe_windows_path):
+        prefix = getattr(app.conf, 'wine_prefix', None)
+        icon = Path(prefix).parent / 'logos-icon.png' if isinstance(prefix, str) else None
+        if (desktop.url_handler_current(config, launcher, app.conf.logos_exe_windows_path)
+                and desktop.product_entry_current(config, icon)):
             return desktop.Result(None, "committed")
         return create_launcher_shortcuts(app, identity=identity)
     return None
@@ -591,7 +596,7 @@ Keywords=Logos;Bible;Wine;{";".join(additional_keywords or [])}
 
 @maintenance.uses_installation
 def create_launcher_shortcuts(app: App, *, identity=None):
-    from . import controller_install, desktop
+    from . import controller_install, desktop, product_icon
 
     identity = identity or controller_install.identify()
     if identity.owner == "venv":
@@ -609,7 +614,8 @@ def create_launcher_shortcuts(app: App, *, identity=None):
     plan = None
     try:
         plan = desktop.preview(config, launcher, product=app.conf.faithlife_product,
-                               windows_executable=app.conf.logos_exe_windows_path)
+                               windows_executable=app.conf.logos_exe_windows_path,
+                               product_icon=product_icon.ensure(app))
         result = desktop.adopt(plan)
     except (OSError, ValueError, maintenance.MaintenanceError) as error:
         journal = plan.journal if plan is not None else None

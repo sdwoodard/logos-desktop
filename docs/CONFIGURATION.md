@@ -104,6 +104,11 @@ that installation's normal save destinations.
 
 ## Desktop integration and controller ownership
 
+Graphical setup and Logos launch synchronize the desktop's light/dark preference
+into Wine. Leave Logos' **Application Theme** on **System** to follow that preference
+at launch. Explicit Light or Dark choices inside Logos stay selected. LogosDesktop's
+own appearance override is independent of the desktop preference sent to Wine.
+
 The controller installer creates a generic LogosDesktop application-menu entry and
 the logos-desktop command. The generic entry opens the default selected configuration.
 Its setup journal belongs to the controller root. This is separate from the
@@ -116,6 +121,10 @@ profile, or request it with CLI `--create-shortcuts`. Entries use the controller
 stable launcher and an exact `-c` argument. URL handlers route to that profile. Existing unrelated MIME
 defaults are preserved. Uninspectable defaults or unconfirmed routing are reported
 as incomplete integration.
+
+The Logos launcher matches the running Windows application for taskbar grouping.
+Its icon is extracted locally from the installed Logos executable and stored with
+that installation's data.
 
 Desktop integration has its own journal under the account's
 `~/.local/state/logos-desktop/coordination/desktop/` directory. Qt Settings offers

@@ -10,6 +10,7 @@ dependencies = [
     "pythondialog",
     "requests",
     "olefile>=0.47,<1",
+    "pefile>=2024.8.26",
     "zstandard>=0.23,<1",
     "inotify", # Required for watching when the auto-update setting changes
     "textual",

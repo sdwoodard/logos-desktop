@@ -28,6 +28,7 @@ class TestMaintenance(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(constants, "STATE_DIR", str(self.root / "state/logos-desktop")).start()
         self.app = fixture_app(self.root)
+        self.app.checkpoint = Mock()
         self.context = maintenance.Context.from_app(self.app)
         self.app.conf.install_dir = str(self.context.install)
         self.app.conf.installer_binary_dir = str(self.context.install / "data/bin")

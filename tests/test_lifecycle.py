@@ -17,11 +17,61 @@ from unittest.mock import MagicMock, Mock, patch
 import psutil
 
 from logos_desktop import cli, constants, logos, main, maintenance, wine
+from logos_desktop.app import UserExitedFromAsk
 from tests.test_app_exit import TestApp
 from tests.test_backup import fixture_app
 
 
 class TestLifecycle(unittest.TestCase):
+    def test_cancelling_either_theme_helper_never_starts_logos_or_retains_its_lease(self):
+        self.app.system_dark = True
+        self.app.conf.wine64_binary = self.app.conf.wine_binary
+        for name in ('AppsUseLightTheme', 'SystemUsesLightTheme'):
+            for failed in (False, True):
+                entered, release, cancelled = threading.Event(), threading.Event(), threading.Event()
+                errors = []
+
+                def checkpoint():
+                    if cancelled.is_set():
+                        raise UserExitedFromAsk('cancelled')
+
+                def helper(*args, **kwargs):
+                    if kwargs['exe_args'][3] == name:
+                        entered.set()
+                        if not release.wait(5):
+                            raise RuntimeError('Test did not release the registry helper')
+                        if failed:
+                            raise maintenance.MaintenanceError('Synthetic registry failure')
+                    return SimpleNamespace(returncode=0)
+
+                def start():
+                    try:
+                        self.manager.start()
+                    except Exception as error:
+                        errors.append(error)
+
+                with (self.subTest(name=name, failed=failed),
+                      patch('logos_desktop.installer.ensure_login_handler'),
+                      patch.object(self.manager, 'start_monitoring'),
+                      patch.object(self.app, 'checkpoint', side_effect=checkpoint),
+                      patch.object(wine, 'run_wine_completed_process', side_effect=helper),
+                      patch.object(wine, 'run_wine_application') as launch):
+                    worker = threading.Thread(target=start)
+                    worker.start()
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        cancelled.set()
+                    finally:
+                        release.set()
+                        worker.join(10)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], UserExitedFromAsk)
+                    launch.assert_not_called()
+                    self.assertEqual(self.manager.logos_state, logos.State.STOPPED)
+                    lease = maintenance.Lease(self.context, role='logos')
+                    lease.close()
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

@@ -280,6 +280,7 @@ class TestArtifactConsumers(unittest.TestCase):
             patch.object(Path, "home", return_value=home),
             patch.object(wine, "disable_winemenubuilder"), patch.object(wine, "set_renderer"),
             patch.object(wine, "set_fontsmoothing_to_rgb"), patch.object(wine, "install_fonts"),
+            patch.object(wine, "configure_wpf_rendering"),
             patch.object(wine, "enforce_icu_data_files"),
             patch.object(wine, "run_wine_during_install", side_effect=consume) as run,
         ):

@@ -262,6 +262,38 @@ def wine_reg_install(app: App, name: str, reg_text: str, wine64_binary: str):
         logging.info("Registry file installed: %s", name)
 
 
+def sync_desktop_theme(app: App):
+    """Expose the host preference to Logos while its own theme remains System."""
+    dark = getattr(app, 'system_dark', None)
+    if type(dark) is not bool:
+        return
+
+    key = r'HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    for name in ('AppsUseLightTheme', 'SystemUsesLightTheme'):
+        app.checkpoint()
+        try:
+            result = run_wine_completed_process(
+                app, app.conf.wine64_binary, exe='reg.exe',
+                exe_args=['add', key, '/v', name, '/t', 'REG_DWORD', '/d', '0' if dark else '1', '/f'],
+            )
+            if result.returncode != 0:
+                raise maintenance.MaintenanceError(f'Registry helper exited with {result.returncode}')
+        except maintenance.MaintenanceError as error:
+            logging.warning('Could not synchronize the desktop theme with Wine: %s', error)
+            app.checkpoint()
+            return
+        app.checkpoint()
+
+
+def configure_wpf_rendering(app: App):
+    """Use WPF software rendering for dependable Wine startup and sign-in windows."""
+    wine_reg_install(app, 'wpf-rendering.reg', r'''REGEDIT4
+
+[HKEY_CURRENT_USER\Software\Microsoft\Avalon.Graphics]
+"DisableHWAcceleration"=dword:00000001
+''', app.conf.wine64_binary)
+
+
 def disable_winemenubuilder(app: App, wine64_binary: str):
     name='disable-winemenubuilder.reg'
     reg_text = r'''REGEDIT4

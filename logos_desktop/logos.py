@@ -607,6 +607,7 @@ class LogosManager:
                 raise ValueError("Could not find the installed program")
             target, paths = None, ()
             if role == "logos":
+                wine.sync_desktop_theme(self.app)
                 target = self._policy_target(configuration)
                 paths = self._policy_paths(target)
                 self.prevent_logos_updates(target=target)
@@ -619,6 +620,7 @@ class LogosManager:
                     or self.app.conf is not configuration
                     or maintenance.Context.from_app(self.app, prompt=False) != context):
                 raise maintenance.MaintenanceBusy("Launch cancelled because the controller is closing")
+            self.app.checkpoint()
             process = wine.run_wine_application(
                 self.app,
                 selected_runtime,

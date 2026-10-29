@@ -170,10 +170,11 @@ class TestInstallation(unittest.TestCase):
                 self.assertIs(installer.ensure_wineprefix_config(self.app), accepted)
             initialize.assert_called_once_with(app=self.app)
             set_renderer.assert_not_called()
-            self.assertEqual(execute.call_count, 2)
-            self.assertEqual(wait.call_count, 2)
+            self.assertEqual(execute.call_count, 3)
+            self.assertEqual(wait.call_count, 3)
             self.assertIn('"winemenubuilder.exe"=""', scripts[0])
             self.assertIn('"FontSmoothingType"=dword:00000002', scripts[1])
+            self.assertIn('"DisableHWAcceleration"=dword:00000001', scripts[2])
             self.assertTrue(all("Direct3D" not in script and '"renderer"' not in script for script in scripts))
             self.assertEqual(registry.read_bytes(), before)
 

@@ -417,9 +417,12 @@ class Services:
                 return Result("succeeded", "Read-only diagnostics completed")
 
             if name == "desktop":
+                from logos_desktop import product_icon
+
                 launcher = desktop.controller_launcher()
                 plan = desktop.preview(app.conf.config_file_path, launcher, product="Logos",
-                                       windows_executable=app.conf.logos_exe_windows_path)
+                                       windows_executable=app.conf.logos_exe_windows_path,
+                                       product_icon=product_icon.ensure(app))
                 details = (f"Profile: {plan.config}\nJournal: {plan.journal}\nFiles:\n"
                            + "\n".join(str(item.path) for item in plan.files)
                            + "\nCurrent URL defaults:\n"

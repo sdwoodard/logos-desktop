@@ -48,6 +48,7 @@ class Preview:
     defaults: tuple[tuple[str, str | None], ...]
     issues: tuple[str, ...]
     checks: tuple[tuple[Path, bytes], ...]
+    mime_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ def _owned(content, profile_id):
         return False
 
 
-def _entry(profile_id, name, argv, *, url=False, icon=None):
+def _entry(profile_id, name, argv, *, url=False, icon=None, wm_class=None):
     from .installer import desktop_exec
 
     lines = ['[Desktop Entry]', 'Type=Application', f'Name={name}', 'Terminal=false',
@@ -119,6 +120,8 @@ def _entry(profile_id, name, argv, *, url=False, icon=None):
     if url:
         lines.append('NoDisplay=true')
         lines.append('MimeType=' + ';'.join(SCHEMES) + ';')
+    if wm_class is not None:
+        lines.append('StartupWMClass=' + wm_class)
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
@@ -144,6 +147,24 @@ def url_handler_current(config, launcher, windows_executable):
     except (UnicodeError, configparser.Error):
         return False
     return all(_default(scheme) == handler for scheme in SCHEMES)
+
+
+def product_entry_current(config, icon):
+    """Check taskbar identity separately from browser return ownership."""
+    if icon is None or not Path(icon).is_file():
+        return False
+    profile = hashlib.sha256(os.fsencode(config_store.absolute_path(config).resolve())).hexdigest()[:24]
+    path = Path(constants.XDG_DATA_HOME) / 'applications' / f'logos-desktop-{profile}-app.desktop'
+    content = file_transactions.read_owned(path)
+    if content is None:
+        return False
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        parser.read_string(content.decode('utf-8'))
+        return (parser.get('Desktop Entry', 'StartupWMClass', fallback='') == 'logos.exe'
+                and parser.get('Desktop Entry', 'Icon', fallback='') == str(icon))
+    except (UnicodeError, configparser.Error):
+        return False
 
 
 def _historical_exec(arguments):
@@ -192,7 +213,8 @@ def _legacy_handler(previous, data, config, launcher, product, windows_executabl
     return ((config, profile_bytes), (path, content))
 
 
-def preview(config, launcher, *, product='Logos', windows_executable=None, data_home=None, config_home=None):
+def preview(config, launcher, *, product='Logos', windows_executable=None, data_home=None, config_home=None,
+            product_icon=None):
     """Inspect exact profile-bound entries and optional MIME file changes without writes."""
     if product not in constants.FAITHLIFE_PRODUCTS:
         raise ValueError('Unknown desktop product')
@@ -205,7 +227,8 @@ def preview(config, launcher, *, product='Logos', windows_executable=None, data_
     base = [*launcher, '-c', str(config)]
     icon = constants.APP_IMAGE_DIR / 'logos-desktop-icon.png'
     entries = [(f'{stem}.desktop', _entry(profile_id, constants.APP_NAME, base, icon=icon)),
-               (f'{stem}-app.desktop', _entry(profile_id, product, [*base, '--run-installed-app'], icon=icon))]
+               (f'{stem}-app.desktop', _entry(profile_id, product, [*base, '--run-installed-app'],
+                                            icon=product_icon or icon, wm_class='logos.exe'))]
     handler = f'{stem}-url.desktop'
     if windows_executable:
         entries.append((handler, _entry(profile_id, f'{product} URL Handler',
@@ -257,7 +280,7 @@ def preview(config, launcher, *, product='Logos', windows_executable=None, data_
         if len(content) > file_transactions.MAX_CONFIG_BYTES:
             raise file_transactions.FileTransactionError('MIME associations exceed the publication limit')
         files.append(FileChange(mime_path, before, content))
-    return Preview(config, profile_id, journal, tuple(files), defaults, tuple(issues), tuple(checks.items()))
+    return Preview(config, profile_id, journal, tuple(files), defaults, tuple(issues), tuple(checks.items()), mime_path)
 
 
 def adopt(plan):
@@ -268,21 +291,46 @@ def adopt(plan):
         if any(_default(scheme) != previous for scheme, previous in plan.defaults):
             raise file_transactions.FileTransactionError('MIME defaults changed after preview')
         prior = file_transactions.read_owned(plan.journal, limit=8 * file_transactions.MAX_CONFIG_BYTES)
+        previous = None
         if prior is not None:
             previous = json.loads(prior)
             if previous.get('state') == 'committed':
                 if all(file_transactions.read_owned(item.path) == item.after for item in plan.files):
                     return Result(plan.journal, 'incomplete' if plan.issues else 'committed', plan.issues)
-                raise file_transactions.FileTransactionError(
-                    'Desktop publication changed, rollback or resolve it first'
-                )
-            if previous.get('state') != 'rolled-back':
+            elif previous.get('state') != 'rolled-back':
                 raise file_transactions.FileTransactionError('Desktop integration needs rollback before retry')
         record = {'schema_version': 1, 'kind': 'desktop', 'state': 'prepared', 'profile': plan.profile_id,
                   'config': str(plan.config), 'defaults': list(plan.defaults),
                   'files': [{'path': str(item.path), 'before': file_transactions.encode_content(item.before),
                              'after': file_transactions.encode_content(item.after)} for item in plan.files]}
-        file_transactions.publish_files(plan.journal, record)
+        only = None
+        if previous is not None and previous.get('state') == 'committed':
+            if (previous.get('schema_version') != 1 or previous.get('kind') != 'desktop'
+                    or previous.get('profile') != plan.profile_id or previous.get('config') != str(plan.config)):
+                raise file_transactions.FileTransactionError('Desktop integration history does not match this profile')
+            allowed = {str(change.path) for change in plan.files}
+            if plan.mime_path is not None:
+                allowed.add(str(plan.mime_path))
+            history = {item['path']: item for item in previous['files']}
+            if not 2 <= len(history) <= 4 or not set(history).issubset(allowed):
+                raise file_transactions.FileTransactionError('Desktop integration history has unexpected targets')
+            only = set()
+            for item in history.values():
+                item.pop('publication_before', None)
+            for item in record['files']:
+                if item['before'] == item['after']:
+                    continue
+                old = history.get(item['path'])
+                if old is not None:
+                    if item['before'] != old['after']:
+                        raise file_transactions.FileTransactionError('Desktop publication has a conflicting later edit')
+                    # Retain the original rollback bytes across controller upgrades.
+                    item['publication_before'] = item['before']
+                    item['before'] = old['before']
+                history[item['path']] = item
+                only.add(item['path'])
+            record['files'] = list(history.values())
+        file_transactions.publish_files(plan.journal, record, only=only)
         issues = list(plan.issues)
         for scheme, previous in plan.defaults:
             expected = f'logos-desktop-{plan.profile_id}-url.desktop'

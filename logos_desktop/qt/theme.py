@@ -114,7 +114,7 @@ class Theme(QObject):
         self.uses_application_palette = False
         self._applying = False
         self._refresh_pending = False
-        self.desktop = DesktopAppearance(self) if application.platformName() == "wayland" else None
+        self.desktop = DesktopAppearance(self)
         if self.desktop is not None:
             self.desktop.changed.connect(self._desktop_changed)
         self._settings = QSettings(str(self.path), QSettings.Format.IniFormat)
@@ -124,6 +124,14 @@ class Theme(QObject):
         self.application.installEventFilter(self)
         self.application.styleHints().colorSchemeChanged.connect(self._schedule_refresh)
         self.set_preference(self.preference, persist=False)
+
+    @property
+    def system_dark(self):
+        """Report the desktop preference independently of our palette override."""
+        scheme = self.desktop.scheme if self.desktop is not None else Qt.ColorScheme.Unknown
+        if scheme == Qt.ColorScheme.Unknown:
+            return None
+        return scheme == Qt.ColorScheme.Dark
 
     @property
     def dark(self):

@@ -61,12 +61,13 @@ def write_record(path, record):
             raise FileTransactionError(f'Recovery journal readback changed: {path}')
 
 
-def publish_files(journal, record):
+def publish_files(journal, record, *, only=None):
     """Write intent durably before any publication, including absent-file states."""
     with ExitStack() as stack:
-        targets = [stack.enter_context(config_store.Target(item['path'])) for item in record['files']]
-        for target, item in zip(targets, record['files']):
-            if target.previous != decode_content(item['before']):
+        items = [item for item in record['files'] if only is None or item['path'] in only]
+        targets = [stack.enter_context(config_store.Target(item['path'])) for item in items]
+        for target, item in zip(targets, items):
+            if target.previous != decode_content(item.get('publication_before', item['before'])):
                 raise FileTransactionError(f'Target changed since preview: {target.path}')
             if 'before_mode' in item:
                 mode = (stat.S_IMODE(os.stat(target.path.name, dir_fd=target.fd, follow_symlinks=False).st_mode)
@@ -79,7 +80,7 @@ def publish_files(journal, record):
                 target.stage(decode_content(item['after']))
         write_record(journal, record)
 
-        for target, item in zip(targets, record['files']):
+        for target, item in zip(targets, items):
             target.publish()
             os.fsync(target.fd)
             if read_owned(target.path) != decode_content(item['after']):
@@ -113,7 +114,9 @@ def rollback_files(journal, record, *, preserve=(), dependents=None):
             same_publication = identity is None or (
                 target.identity is not None and list(target.identity[:2]) == identity
             )
-            if (target.previous != after or not same_publication
+            unpublished = (record['state'] == 'prepared' and 'publication_before' in item
+                           and target.previous == decode_content(item['publication_before']))
+            if ((target.previous != after and not unpublished) or not same_publication
                     or ('mode' in item and current_mode != item['mode'])):
                 retain(str(target.path))
                 continue

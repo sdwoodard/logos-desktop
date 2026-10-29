@@ -32,6 +32,25 @@ def fixture_config(install):
 
 
 class TestRuntimePaths(unittest.TestCase):
+    def test_desktop_preference_writes_selected_wine_values_and_skips_unknown(self):
+        app = SimpleNamespace(system_dark=None, checkpoint=Mock(),
+                              conf=SimpleNamespace(wine64_binary='/selected/wine'))
+        with patch.object(wine, 'run_wine_completed_process', return_value=SimpleNamespace(returncode=0)) as run:
+            wine.sync_desktop_theme(app)
+            run.assert_not_called()
+            for dark in (True, False):
+                app.system_dark = dark
+                run.reset_mock()
+                wine.sync_desktop_theme(app)
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual([call.kwargs['exe_args'][3] for call in run.call_args_list],
+                                 ['AppsUseLightTheme', 'SystemUsesLightTheme'])
+                for call in run.call_args_list:
+                    self.assertEqual(call.args, (app, '/selected/wine'))
+                    self.assertEqual(call.kwargs['exe_args'][-2:], ['0' if dark else '1', '/f'])
+            run.side_effect = maintenance.MaintenanceError('fixture failure')
+            wine.sync_desktop_theme(app)
+
     def test_proton_graphics_path_is_process_local_and_preserves_explicit_search_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

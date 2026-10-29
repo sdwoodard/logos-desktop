@@ -29,16 +29,19 @@ class TestQtTheme(QtCase):
             self.pump(lambda: self.theme.dark)
             self.theme.set_preference("Light")
             self.pump(lambda: not self.theme.dark)
+            self.assertTrue(self.theme.system_dark)
             self.theme._desktop_changed()
             self.application.processEvents()
             self.assertFalse(self.theme.dark)
             self.theme.set_preference("System")
             self.pump(lambda: self.theme.dark)
             DesktopAppearance._set(desktop, QDBusVariant(2))
+            self.assertFalse(self.theme.system_dark)
             self.theme._desktop_changed()
             self.pump(lambda: not self.theme.dark)
             DesktopAppearance._set(desktop, QDBusVariant(["invalid"]))
             self.assertEqual(desktop.scheme, Qt.ColorScheme.Unknown)
+            self.assertIsNone(self.theme.system_dark)
         finally:
             self.theme.desktop = None
 
