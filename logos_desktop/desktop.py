@@ -122,6 +122,30 @@ def _entry(profile_id, name, argv, *, url=False, icon=None):
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
+def url_handler_current(config, launcher, windows_executable):
+    """Check callback routing independently of retained version-specific artwork."""
+    config = config_store.absolute_path(config).resolve()
+    profile_id = hashlib.sha256(os.fsencode(config)).hexdigest()[:24]
+    handler = f'logos-desktop-{profile_id}-url.desktop'
+    path = Path(constants.XDG_DATA_HOME) / 'applications' / handler
+    content = file_transactions.read_owned(path)
+    if content is None:
+        return False
+
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    expected = configparser.ConfigParser(interpolation=None, strict=True)
+    try:
+        parser.read_string(content.decode('utf-8'))
+        expected.read_string(_entry(profile_id, 'Logos URL Handler',
+                                    [*launcher, '-c', str(config), '--wine', windows_executable], url=True).decode())
+        keys = ('Type', 'Exec', 'Terminal', 'NoDisplay', 'MimeType', 'X-LogosDesktop-Profile')
+        if any(parser.get('Desktop Entry', key, fallback=None) != expected.get('Desktop Entry', key) for key in keys):
+            return False
+    except (UnicodeError, configparser.Error):
+        return False
+    return all(_default(scheme) == handler for scheme in SCHEMES)
+
+
 def _historical_exec(arguments):
     """Reproduce M02/M12 Exec bytes for migration after current argv validation."""
     if '%' in arguments[0]:

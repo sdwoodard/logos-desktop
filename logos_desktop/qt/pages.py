@@ -66,7 +66,7 @@ class UpdateCards(QWidget):
         self.controller.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row = QHBoxLayout()
         row.addWidget(self.button("controller_check", "Check controller updates"))
-        row.addWidget(self.button("controller_update", "Update environment…"))
+        row.addWidget(self.button("controller_update", "Update LogosDesktop…"))
         self.buttons["controller_check"].setEnabled(False)
         self.buttons["controller_update"].setVisible(False)
         self.controller.content.addLayout(row)

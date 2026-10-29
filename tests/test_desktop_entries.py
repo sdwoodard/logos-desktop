@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from logos_desktop import constants, desktop, installer
+from logos_desktop import constants, controller_install, desktop, installer
 
 
 class TestDesktopEntries(unittest.TestCase):
@@ -64,7 +64,7 @@ class TestDesktopEntries(unittest.TestCase):
                 self.assertEqual(list(install.iterdir()), [])
                 self.assertFalse((root / "share").exists())
 
-    def test_script_mode_uses_current_interpreter_and_script_as_separate_arguments(self):
+    def test_source_mode_uses_the_importable_controller_module(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / "Source 文/main script.py"
@@ -80,13 +80,51 @@ class TestDesktopEntries(unittest.TestCase):
                 patch.multiple(constants, RUNMODE="script", XDG_DATA_HOME=str(root / "share")),
                 patch.object(installer.sys, "argv", [str(script)]),
                 patch.object(installer.sys, "executable", str(root / "Python Space/bin/python")),
+                patch.object(controller_install, 'identify', return_value=controller_install.Identity('unsupported')),
                 patch.object(desktop, 'preview', return_value=Mock()) as preview,
                 patch.object(desktop, 'adopt', return_value=SimpleNamespace(issues=())),
             ):
                 installer.create_launcher_shortcuts(app)
             self.assertEqual(preview.call_args.args[1], [
-                str(root / "Python Space/bin/python"), str(script),
+                str(root / "Python Space/bin/python"), '-m', 'logos_desktop.main',
             ])
+
+    def test_managed_wheel_install_and_launch_register_and_reuse_stable_callback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "install"
+            install.mkdir()
+            launcher = root / "controller/logos-desktop"
+            identity = controller_install.Identity("venv", launcher=launcher)
+            app = SimpleNamespace(installer_step=0, installer_step_count=0, status=Mock(), conf=SimpleNamespace(
+                install_dir=str(install), faithlife_product="Logos", logos_exe_windows_path=r"C:\Logos\Logos.exe",
+                _raw=SimpleNamespace(install_dir=str(install), faithlife_product="Logos"),
+                _overrides=SimpleNamespace(install_dir=None, wine_prefix=None,
+                                           config_path=str(root / 'selected.json'), config_destination=None),
+            ))
+            with (
+                patch.multiple(constants, RUNMODE="script", XDG_DATA_HOME=str(root / "share"),
+                               CONFIG_BASE=root / 'config', COORDINATION_DIR=root / 'coordination'),
+                patch.object(controller_install, 'identify', return_value=identity),
+                patch.object(installer, 'ensure_launcher_executable'),
+                patch.object(desktop, '_default', return_value='') as default,
+            ):
+                installer.ensure_launcher_shortcuts(app)
+                handler = next((root / 'share/applications').glob('*-url.desktop'))
+                content = handler.read_text()
+                self.assertIn(str(launcher), content)
+                self.assertIn('"-c"', content)
+                self.assertIn('"--wine"', content)
+                self.assertIn(' %u\n', content)
+                mime = root / 'config/mimeapps.list'
+                self.assertTrue(all(f'{scheme}={handler.name};' in mime.read_text() for scheme in desktop.SCHEMES))
+
+                default.return_value = handler.name
+                handler.write_text(content.replace('Icon=', 'X-Retained-Icon='))
+                retained = handler.read_bytes()
+                with patch.object(installer, 'create_launcher_shortcuts', side_effect=AssertionError('Already ready')):
+                    self.assertEqual(installer.ensure_login_handler(app).state, 'committed')
+                self.assertEqual(handler.read_bytes(), retained)
 
     def test_atomic_desktop_replacement_preserves_symlink_target(self):
         with tempfile.TemporaryDirectory() as directory:

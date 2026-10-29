@@ -71,24 +71,23 @@ class TestProductionServices(QtCase):
             self.assertIn("Source checkout", window.home.updates.controller.detail.text())
             check.assert_not_called()
 
-    def test_managed_handoff_closes_without_claiming_update_or_stopping_logos(self):
+    def test_graphical_update_closes_after_restart_without_terminal_or_product_stop(self):
         from unittest.mock import Mock
         from logos_desktop import controller_install
 
         controller = self.root / "controller"
         controller.mkdir(mode=0o700)
         identity = controller_install.Identity("venv", "1.0.0", "1.0.0", root=controller)
-        terminal = Mock()
-
-        def accept(*args, **kwargs):
+        def update(*args, **kwargs):
+            kwargs['progress']('Preparing the updated controller environment…')
+            kwargs['before_restart']()
             window.app.cancel_operation()
-            return terminal
+            return controller_install.Result('handed-off', 'Restarting LogosDesktop', '1.1.0')
 
         with (patch.object(controller_install, "identify", return_value=identity),
               patch.object(Path, "home", return_value=self.root),
-              patch.object(controller_install, "check", return_value=controller_install.Result("available", "B")),
-              patch.object(controller_install.shutil, "which", return_value="/fixture/konsole"),
-              patch.object(controller_install.subprocess, "Popen", side_effect=accept) as popen):
+              patch.object(controller_install, 'update_gui', side_effect=update) as backend,
+              patch.object(controller_install, 'handoff', side_effect=AssertionError('No terminal handoff'))):
             window = self.production_window()
             stop = Mock(side_effect=AssertionError("Controller close must not stop Logos"))
             window.app.logos.stop = stop
@@ -97,15 +96,15 @@ class TestProductionServices(QtCase):
             window.dialogs.failure = failure
             window.start(window.services.operation("controller_update"))
             self.pump(lambda: window._final_close)
-            popen.assert_called_once()
-            terminal.terminate.assert_not_called()
-            terminal.kill.assert_not_called()
-            self.assertIn("helper launches the new controller", window.app.approve.call_args.args[1])
+            backend.assert_called_once()
+            window.app.approve.assert_called_once()
+            self.assertEqual(window.app.approve.call_args.args[0], 'Update LogosDesktop and restart?')
+            self.assertNotIn('terminal', window.app.approve.call_args.args[1].lower())
             failure.assert_not_called()
             stop.assert_not_called()
             self.assertEqual(window.services.snapshot().controller_status, "handed-off")
 
-    def test_cancel_during_real_handoff_provider_restores_lease_without_opening_terminal(self):
+    def test_cancel_during_graphical_update_check_keeps_the_profile_lease(self):
         from logos_desktop import constants, controller_install, instance
 
         entered, finish = threading.Event(), threading.Event()
@@ -135,7 +134,7 @@ class TestProductionServices(QtCase):
             window.start(window.services.operation("controller_update"))
             try:
                 self.pump(entered.is_set)
-                self.assertIsNone(window.app._instance_session)
+                self.assertIs(window.app._instance_session, session)
                 window.app.cancel_operation()
             finally:
                 finish.set()
@@ -161,15 +160,89 @@ class TestProductionServices(QtCase):
             failure = Mock()
             window.dialogs.failure = failure
             for state in ("manual", "unknown", "offline", "provider-lag", "restart-required"):
-                with patch.object(utils, "handoff_controller", return_value=controller_install.Result(
-                        state, "Inspect the installation", command=command)):
+                with patch.object(utils, "update_controller_gui", return_value=(controller_install.Result(
+                        state, "Inspect the installation", command=command), False)):
                     window.start(window.services.operation("controller_update"))
                     self.pump(lambda: window.app.active is None)
                 self.assertEqual(window.snapshot.controller_status, state)
                 self.assertIn("'/private root/python'", window.home.updates.controller.detail.text())
                 self.assertFalse(window._closing)
                 self.assertFalse(window.home.updates.buttons["controller_update"].isEnabled())
-            failure.assert_not_called()
+            self.assertEqual(failure.call_count, 2)
+
+    def test_cancelled_prepared_update_can_be_reopened_checked_and_retried(self):
+        from unittest.mock import Mock
+        from logos_desktop import controller_install as install
+
+        controller = self.root / 'controller'
+        controller.mkdir(mode=0o700)
+        (controller / 'versions').mkdir(mode=0o700)
+        previous = 'versions/1.0.0-' + 'a' * 64
+        (controller / previous).mkdir(mode=0o700)
+        install._publish(controller, previous)
+        (controller / 'logos-desktop').write_text(install._launcher(controller))
+        (controller / 'logos-desktop').chmod(0o700)
+        payload = b'synthetic accepted wheel, installation mocked'
+        digest = hashlib.sha256(payload).hexdigest()
+        target = 'versions/1.1.0-' + digest
+        (controller / target).mkdir(mode=0o700)
+        release = {'version': '1.1.0', 'filename': 'logos_desktop-1.1.0-py3-none-any.whl',
+                   'sha256': digest, 'size': len(payload), 'url': 'https://example.invalid/wheel'}
+        provider = controller / 'provider.json'
+        install._write(provider, {'schema': 1, 'installation': str(controller),
+                                  'manifest_url': 'https://example.invalid/manifest'})
+        identity = install.Identity('venv', '1.0.0', '1.0.0', controller, controller / 'logos-desktop', provider)
+        prepared, finish = threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+        calls = 0
+
+        def download(url, config, *, limit, destination=None):
+            if destination is None:
+                return json.dumps(release).encode(), ''
+            destination.write(payload)
+            return len(payload), digest
+
+        def prepare(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                prepared.set()
+                if not finish.wait(5):
+                    raise AssertionError('Preparation fixture was not released')
+            return target
+
+        with (patch.object(Path, 'home', return_value=self.root),
+              patch.object(install, 'identify', return_value=identity),
+              patch.object(install, '_download', side_effect=download),
+              patch.object(install, '_install', side_effect=prepare),
+              patch.object(install, '_launch_gui', return_value=install.Result('handed-off', 'Restarting')) as launch,
+              patch('builtins.input', side_effect=AssertionError('No terminal authorization'))):
+            window = self.production_window()
+            window.app.approve = lambda *args: True
+            window.start(window.services.operation('controller_update'))
+            try:
+                self.pump(prepared.is_set)
+                window.cancel.click()
+            finally:
+                finish.set()
+            self.pump(lambda: window.app.active is None)
+            self.assertEqual(install._target(controller), previous)
+            self.assertEqual(install._receipt(controller)['status'], 'aborted')
+            launch.assert_not_called()
+
+            window.close()
+            self.pump(lambda: window._final_close)
+            reopened = self.production_window()
+            reopened.app.approve = Mock(return_value=True)
+            reopened.home.updates.buttons['controller_check'].click()
+            self.pump(lambda: reopened.app.active is None)
+            self.assertEqual(reopened.snapshot.controller_status, 'available')
+            self.assertTrue(reopened.home.updates.buttons['controller_update'].isEnabled())
+            reopened.home.updates.buttons['controller_update'].click()
+            self.pump(lambda: reopened._final_close)
+            self.assertEqual(install._target(controller), target)
+            launch.assert_called_once()
+            self.assertEqual(self.config.read_bytes(), self.original)
 
     def production_window(self):
         window = self.window(Services())
@@ -422,8 +495,10 @@ class TestProductionServices(QtCase):
                       patch.object(startup, "show_initial_window", side_effect=show_install_page),
                       patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "gui")}), injected):
                     configuration = EphemeralConfiguration.project({}, str(self.config), environment={})
-                    startup.start(configuration, install_only=True)
                     if failed:
+                        with self.assertRaises(SystemExit) as stopped:
+                            startup.start(configuration, install_only=True)
+                        self.assertEqual(stopped.exception.code, 1)
                         confirm.assert_not_called()
                         managed_confirm.assert_not_called()
                         self.assertEqual(updates._read_record(destination), record)
@@ -431,6 +506,7 @@ class TestProductionServices(QtCase):
                         updates._rollback(destination, record)
                         self.assertEqual(target.read_bytes(), old)
                     else:
+                        startup.start(configuration, install_only=True)
                         confirm.assert_called_once()
                         managed_confirm.assert_called_once()
                         self.assertEqual(target.read_bytes(), new)

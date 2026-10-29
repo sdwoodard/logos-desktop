@@ -32,6 +32,33 @@ def fixture_config(install):
 
 
 class TestRuntimePaths(unittest.TestCase):
+    def test_proton_graphics_path_is_process_local_and_preserves_explicit_search_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = root / 'Proton Space/files'
+            binary = files / 'bin/wine'
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            graphics = files / 'lib/vkd3d/x86_64-windows'
+            graphics.mkdir(parents=True)
+            marker = files.parent / 'proton'
+            conf = SimpleNamespace(wine_binary=str(binary), wine64_binary=str(binary),
+                                   wine_debug='err+all', wine_dll_overrides='', wine_prefix=str(root / 'prefix'),
+                                   wineserver_binary=str(binary.parent / 'wineserver'), wine_user='steamuser')
+            app = SimpleNamespace(conf=conf)
+            with patch.dict(os.environ, {'WINEPATH': r'C:\User\DLLs', 'USER': 'linux-user'}):
+                for proton in (False, True):
+                    if proton:
+                        marker.touch()
+                    with self.subTest(proton=proton):
+                        environment = wine.get_wine_env(app)
+                        expected = r'C:\User\DLLs' + (';' + str(graphics) if proton else '')
+                        self.assertEqual(environment['WINEPATH'], expected)
+                        self.assertEqual(environment['WINEDLLOVERRIDES'], '')
+                        self.assertEqual(environment['USER'], 'steamuser')
+                        self.assertEqual(os.environ['USER'], 'linux-user')
+                        self.assertEqual(os.environ['WINEPATH'], r'C:\User\DLLs')
+
     def test_helper_decodes_streams_separately_without_hiding_bad_stdout(self):
         with tempfile.TemporaryDirectory() as directory:
             config = fixture_config(Path(directory) / "install")

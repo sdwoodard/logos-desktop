@@ -588,6 +588,150 @@ class ControllerInstallTests(unittest.TestCase):
                 install._install(self.root, wheel, release)
         run.assert_not_called()
 
+    def test_gui_update_prepares_before_profile_transfer_without_terminal_authorization(self):
+        wheel, release = self.wheel()
+        self.provider({"manifest_url": "https://example.invalid/manifest"})
+        transferred = False
+
+        def download(url, config, *, limit, destination):
+            destination.write(wheel.read_bytes())
+            return release['size'], release['sha256']
+
+        def prepare(*args):
+            self.assertFalse(transferred)
+            self.assertEqual(install._target(self.root), self.a)
+            return self.b
+
+        def transfer():
+            nonlocal transferred
+            self.assertEqual(install._target(self.root), self.b)
+            transferred = True
+
+        def restart(root, record, config):
+            self.assertTrue(transferred)
+            install._write(root / 'operation.json', {**record, 'status': 'ready'})
+            return install.Result('updated', 'Ready', release['version'])
+
+        with (patch.object(install, 'identify', return_value=self.identity),
+              patch.object(install, 'check', return_value=install.Result('available', 'B', '1.1.0', release)),
+              patch.object(install, '_download', side_effect=download),
+              patch.object(install, '_install', side_effect=prepare),
+              patch.object(install, '_launch_gui', side_effect=restart),
+              patch.object(install, 'handoff', side_effect=AssertionError('No terminal')),
+              patch('builtins.input', side_effect=AssertionError('Popup already confirmed'))):
+            result = install.update_gui(self.identity, '/fixture/profile.json', checkpoint=Mock(),
+                                        progress=Mock(), before_restart=transfer)
+        self.assertEqual(result.status, 'updated')
+        self.assertEqual(install._target(self.root), self.b)
+        self.assertEqual(install._receipt(self.root)['status'], 'ready')
+        self.assertFalse(list(self.root.glob('.download-*')))
+
+    def test_gui_cancel_after_preparation_keeps_a_and_records_reusable_unpublished_b(self):
+        wheel, release = self.wheel()
+        self.provider({"manifest_url": "https://example.invalid/manifest"})
+        prepared = False
+
+        def download(url, config, *, limit, destination):
+            destination.write(wheel.read_bytes())
+            return release['size'], release['sha256']
+
+        def prepare(*args):
+            nonlocal prepared
+            prepared = True
+            return self.b
+
+        def checkpoint():
+            if prepared:
+                raise install.InstallError('Cancelled before publication')
+
+        with (patch.object(install, 'identify', return_value=self.identity),
+              patch.object(install, 'check', return_value=install.Result('available', 'B', '1.1.0', release)),
+              patch.object(install, '_download', side_effect=download),
+              patch.object(install, '_install', side_effect=prepare),
+              patch.object(install, '_launch_gui') as launch):
+            transfer = Mock()
+            with self.assertRaisesRegex(install.InstallError, 'Cancelled before publication'):
+                install.update_gui(self.identity, None, checkpoint=checkpoint,
+                                   progress=Mock(), before_restart=transfer)
+        transfer.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(install._target(self.root), self.a)
+        self.assertEqual(install._receipt(self.root)['status'], 'aborted')
+        with patch.object(install, '_download', return_value=(json.dumps(release).encode(), '')):
+            self.assertEqual(install.check(self.identity).status, 'available')
+
+    def test_gui_observer_protocol_uses_a_fresh_python_process_without_fork_or_input(self):
+        record = install._activate(self.root, self.b, '1.1.0')
+        original = subprocess.Popen
+        children = []
+
+        def start(command, **kwargs):
+            self.assertEqual(command[:4], [sys.executable, '-I', '-m', 'logos_desktop.controller_install'])
+            self.assertIn('observe-gui-update', command)
+            self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+            self.assertTrue(kwargs['start_new_session'])
+            acceptance = {'accepted': True, 'token': record['token']}
+            source = f"import json\nprint(json.dumps({acceptance!r}), flush=True)\n"
+            child = original([sys.executable, '-I', '-c', source], **kwargs)
+            children.append(child)
+            return child
+
+        with (patch.object(subprocess, 'Popen', side_effect=start),
+              patch.object(install.os, 'fork', side_effect=AssertionError('Qt must not fork')),
+              patch('builtins.input', side_effect=AssertionError('No terminal input'))):
+            self.assertEqual(install._launch_gui(self.root, record, '/fixture/profile.json').status, 'handed-off')
+        for child in children:
+            self.assertEqual(child.wait(timeout=5), 0)
+
+    def test_gui_observer_preserves_later_claims_and_restores_a_for_changed_b(self):
+        record = install._activate(self.root, self.b, '1.1.0')
+        with (patch.object(install.sys, 'prefix', str(self.root / self.a)),
+              patch.object(install, '_probe', return_value='1.0.0'),
+              patch.object(install, '_wait_for_predecessor'),
+              patch.object(install, '_supervise') as supervise,
+              patch.object(subprocess, 'Popen') as reopen):
+            with self.assertRaisesRegex(install.InstallError, 'does not match'):
+                install._observe_gui_update(json.dumps({'root': str(self.root), 'token': 'f' * 48,
+                                                        'pid': 987654, 'started': '100'}), None)
+            self.assertEqual(install._target(self.root), self.b)
+
+            with (patch.object(install, '_probe', side_effect=['1.0.0', '9.9.9', '1.0.0']),
+                  patch('sys.stdout', new_callable=io.StringIO) as accepted):
+                self.assertEqual(install._observe_gui_update(
+                    json.dumps({'root': str(self.root), 'token': record['token'],
+                                'pid': 987654, 'started': '100'}), None), 0)
+            self.assertTrue(json.loads(accepted.getvalue())['accepted'])
+            result_path = self.root / f"supervision-{record['token']}.json"
+            self.assertEqual(json.loads(result_path.read_text())['status'], 'failed')
+            self.assertEqual(install._target(self.root), self.a)
+            supervise.assert_not_called()
+            reopen.assert_called_once()
+            self.assertEqual(reopen.call_args.args[0],
+                             [str(self.root / self.a / 'bin/logos-desktop'), '--dialog', 'qt'])
+
+    def test_gui_waits_for_predecessor_identity_and_accepts_pid_reuse_as_exit(self):
+        claim = {'pid': 987654, 'started': '100'}
+        with (patch.object(install, '_process_start', side_effect=[('S', '100'), ('S', '101')]),
+              patch.object(install.time, 'sleep') as wait):
+            install._wait_for_predecessor(claim)
+        wait.assert_called_once()
+
+    def test_refused_observer_acceptance_restores_a_before_graphical_shutdown(self):
+        original = subprocess.Popen
+        for response in ({'accepted': False}, {'accepted': True, 'token': 'wrong'}, []):
+            record = install._activate(self.root, self.b, '1.1.0')
+
+            def start(command, **kwargs):
+                source = f"import json\nprint(json.dumps({response!r}), flush=True)\n"
+                return original([sys.executable, '-I', '-c', source], **kwargs)
+
+            with (self.subTest(response=response), patch.object(subprocess, 'Popen', side_effect=start),
+                  patch.object(install, '_probe', return_value='1.0.0')):
+                result = install._launch_gui(self.root, record, None)
+            self.assertEqual(result.status, 'failed')
+            self.assertEqual(install._target(self.root), self.a)
+            self.assertEqual(install._receipt(self.root)['status'], 'rolled-back')
+
     def test_pip_check_failure_and_wrong_version_never_publish(self):
         wheel, release = self.wheel()
         with patch.object(install, "_run", side_effect=["", "", install.InstallError("pip check failed")]):

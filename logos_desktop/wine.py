@@ -994,6 +994,19 @@ def get_wine_env(app: App, additional_wine_dll_overrides: Optional[str]=None) ->
     for k, v in wine_env_defaults.items():
         wine_env[k] = v
 
+    # Preserve the prefix's Windows account when changing Wine distributions.
+    windows_user = getattr(app.conf, 'wine_user', None)
+    if isinstance(windows_user, str) and windows_user:
+        wine_env['USER'] = windows_user
+
+    proton_files = winepath.resolve().parent.parent
+    graphics_dlls = proton_files / 'lib/vkd3d/x86_64-windows'
+    if (proton_files.parent / 'proton').is_file() and graphics_dlls.is_dir():
+        # Direct Proton Wine launches also need its packaged WineD3D dependencies.
+        existing = wine_env.get('WINEPATH', '')
+        if str(graphics_dlls) not in existing.split(';'):
+            wine_env['WINEPATH'] = ';'.join(value for value in (existing, str(graphics_dlls)) if value)
+
     if additional_wine_dll_overrides is not None:
         wine_env["WINEDLLOVERRIDES"] += ";" + additional_wine_dll_overrides
 

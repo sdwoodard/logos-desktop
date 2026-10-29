@@ -74,9 +74,9 @@ Wine runtime. Building from source? Start with [Contributing](CONTRIBUTING.md).
 - **Help & logs:** run diagnostics and preview a support report before sharing it.
 - **Settings:** choose your appearance, backup folder and installation profile.
 
-Controller updates use the installation's managed Python environment. Logos and
-Wine updates are separate. Follow the terminal's confirmation and restart steps
-before treating an update as complete. See [update guidance](docs/INSTALL.md#wheel-controller-updates)
+Controller updates use the installation's managed Python environment. Confirm the
+update in the app, follow its progress and let LogosDesktop restart automatically.
+Logos and Wine updates are separate. See [update guidance](docs/INSTALL.md#wheel-controller-updates)
 and [backup and recovery](docs/BACKUPS.md).
 
 ## Support

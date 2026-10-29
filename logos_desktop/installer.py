@@ -426,6 +426,8 @@ def ensure_launcher_shortcuts(app: App):
     ensure_launcher_executable(app=app)
     app.installer_step += 1
     app.status("Creating launcher shortcuts…")
+    if ensure_login_handler(app) is not None:
+        return
     if constants.RUNMODE == 'binary':
         if getattr(app, "_standalone_launcher_available", False):
             app.status("Creating launcher shortcuts…")
@@ -437,6 +439,21 @@ def ensure_launcher_shortcuts(app: App):
         app.status(
             f"Runmode is '{constants.RUNMODE}'. Won't create desktop shortcuts",
         )
+
+
+def ensure_login_handler(app: App):
+    """Keep browser returns bound to the selected managed installation."""
+    from . import controller_install, desktop
+
+    identity = controller_install.identify()
+    if identity.owner == "venv":
+        selected = app.conf._overrides
+        config = selected.config_destination or selected.config_path
+        launcher = desktop.controller_launcher(identity)
+        if desktop.url_handler_current(config, launcher, app.conf.logos_exe_windows_path):
+            return desktop.Result(None, "committed")
+        return create_launcher_shortcuts(app, identity=identity)
+    return None
 
 
 def install(app: App):
@@ -573,13 +590,16 @@ Keywords=Logos;Bible;Wine;{";".join(additional_keywords or [])}
 
 
 @maintenance.uses_installation
-def create_launcher_shortcuts(app: App):
-    from . import desktop
+def create_launcher_shortcuts(app: App, *, identity=None):
+    from . import controller_install, desktop
 
-    if constants.RUNMODE == 'binary':
+    identity = identity or controller_install.identify()
+    if identity.owner == "venv":
+        launcher = desktop.controller_launcher(identity)
+    elif constants.RUNMODE == 'binary':
         launcher = [str(Path(app.conf.install_dir) / constants.BINARY_NAME)]
     elif constants.RUNMODE == 'script':
-        launcher = [sys.executable, str(Path(sys.argv[0]).expanduser().resolve())]
+        launcher = desktop.controller_launcher(identity)
     else:
         raise ValueError(f'Unsupported desktop launcher mode: {constants.RUNMODE}')
 

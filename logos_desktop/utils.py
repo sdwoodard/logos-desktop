@@ -218,6 +218,9 @@ def current_native_wine(app: App, target):
         app.checkpoint()
         try:
             selected = wine.native_launcher(candidate)
+            package = Path(selected).resolve().parent.parent.parent
+            if (package / 'proton').is_file():
+                continue
             server = str(Path(selected).parent / "wineserver")
             override = getattr(app.conf._overrides, "wineserver_binary", None)
             if isinstance(override, str):
@@ -559,6 +562,41 @@ def handoff_controller(app, identity, frontend):
                 except Exception:
                     session.close()
                     app.exit("Controller ownership could not be restored after handoff")
+                    raise
+
+
+def update_controller_gui(app, identity):
+    """Return the update result and whether restart owns the selected profile."""
+    from . import controller_install
+
+    with app._profile_lock:
+        session = app._instance_session
+        released = False
+        transferred = False
+
+        def release_for_restart():
+            nonlocal released
+            if session is not None:
+                session.close()
+                app._instance_session = None
+            released = True
+
+        try:
+            result = controller_install.update_gui(
+                identity, app.conf.config_file_path, checkpoint=app.checkpoint,
+                progress=lambda message: app.status(message, None), before_restart=release_for_restart,
+            )
+            transferred = released and result.status in ("handed-off", "updated", "unknown")
+            return result, transferred
+        finally:
+            if released and not transferred and session is not None:
+                try:
+                    session.acquire()
+                    session.listen()
+                    app._instance_session = session
+                except Exception:
+                    session.close()
+                    app.exit("Controller ownership could not be restored after the update")
                     raise
 
 

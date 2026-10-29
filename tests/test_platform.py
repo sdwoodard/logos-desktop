@@ -230,6 +230,17 @@ class TestWineDiscovery(unittest.TestCase):
                       patch.object(wine, "check_wine_version_and_branch", return_value=(True, ""))):
                     self.assertEqual(utils.current_native_wine(app, stable), expected)
 
+            proton = root / 'Proton Space'
+            launcher = proton / 'files/bin/wine'
+            self.executable(launcher, 'fixture bytes, not executed')
+            self.executable(launcher.with_name('wineserver'), 'fixture bytes, not executed')
+            (proton / 'proton').write_text('# fixture package marker\n')
+            app.conf.wine_binary_files = [str(launcher)]
+            with patch.object(wine, 'get_wine_release',
+                              return_value=(wine.WineRelease(11, 0, 'stable'), 'yes')) as probe:
+                self.assertIsNone(utils.current_native_wine(app, stable))
+            probe.assert_not_called()
+
     def test_discovery_pairs_full_patch_and_rc_identity_without_requiring_staging_label(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

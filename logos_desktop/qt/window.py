@@ -546,7 +546,7 @@ class MainWindow(QMainWindow):
                 managed = self.snapshot.controller_owner == "venv"
                 controller_update = self.home.updates.buttons["controller_update"]
                 controller_update.setVisible(managed or self.snapshot.controller_standalone)
-                controller_update.setText("Update environment…" if managed else "Update LogosDesktop…")
+                controller_update.setText("Update LogosDesktop…")
                 controller_update.setEnabled(self.app.active is None and (
                     self.snapshot.controller_status == "available" if managed else self.snapshot.controller_standalone))
                 self.home.updates.buttons["controller_check"].setEnabled(

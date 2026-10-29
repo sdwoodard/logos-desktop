@@ -2,6 +2,9 @@
 
 ## 1.0.2
 
+- Browser sign-in returns use the selected Logos profile and the controller's stable launcher.
+- Controller updates show progress in the app and restart automatically after the confirmation popup.
+- Wine launches preserve the installation's Windows user when changing runtimes.
 - Recommended Wine selects the latest available stable AppImage from mmtrt/WINE_AppImage.
 - Stable runtime metadata has a separate cache identity from earlier development recommendations.
 - Existing runtime selections are preserved when updating the controller.

@@ -101,6 +101,8 @@ class Services:
             else:
                 self.controller_standalone = True
         self.controller_identity = identity
+        if self.controller_result is None:
+            self.controller_result = controller_install.previous_gui_update(identity)
         return identity
 
     def _controller_message(self):
@@ -448,6 +450,7 @@ class Services:
                 return Result("succeeded", f"Private support archive: {path}")
 
             if name in ("controller_check", "controller_update"):
+                self.controller_handed_off = False
                 identity = self._identify_controller()
                 if identity.owner == "venv":
                     if name == "controller_check":
@@ -458,15 +461,17 @@ class Services:
                         app.status("Checking the controller installation provider", None)
                         result = controller_install.check(identity)
                     else:
-                        restart = "The environment helper launches the new controller after installation."
-                        if not app.approve("Open controller update in a terminal?",
-                                           "The terminal owns review and authorization. " + restart
-                                           + " This controller closes after handoff. Logos is left running."):
+                        if not app.approve("Update LogosDesktop and restart?",
+                                           "Download the latest controller update and prepare its environment. "
+                                           "Logos stays running while LogosDesktop restarts."):
                             return Result("cancelled", "Controller update was not started")
                         app.checkpoint()
-                        result = utils.handoff_controller(app, identity, "qt")
+                        result, self.controller_handed_off = utils.update_controller_gui(app, identity)
                     self.controller_result = result
-                    self.controller_handed_off = result.status == "handed-off"
+                    if result.status in ("failed", "refused", "offline", "unavailable"):
+                        return Result("failed", result.message)
+                    if name == "controller_update" and result.status == "unknown" and not self.controller_handed_off:
+                        return Result("unknown", result.message)
                     return Result("succeeded", self._controller_message())
                 if not constants.APP_SELF_UPDATES_ENABLED or not self.controller_standalone:
                     self.controller_result = controller_install.Result("refused", identity.message)

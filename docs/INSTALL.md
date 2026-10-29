@@ -98,15 +98,35 @@ Use the shell quick installer for automatic Python provisioning.
 
 ### Wheel controller updates
 
-On Home, choose **Check controller updates**, then **Update environment**.
-The independent terminal asks for UPDATE, prepares a sibling environment and restarts
-the selected profile. Wait for readiness before treating the update as complete.
-Previous environments are retained for recovery. A changed or unavailable provider
-is reported separately from a current installation.
+On Home, choose **Check controller updates**, then **Update LogosDesktop**.
+Confirm the update in the popup. LogosDesktop downloads the update, prepares its
+environment and restarts the selected profile automatically. Progress stays in the
+app. Logos keeps running through the controller restart. Previous environments are
+retained for recovery. A confirmed startup failure restores and reopens the previous
+controller. For a restart needing review, open LogosDesktop from your application
+menu and use **Help & logs**.
 
 Setup preserves an existing scoped provider. Do not remove a custom provider unless
 you intend to replace it. Generic pip or contributor environments do not establish
 managed installation ownership.
+
+### Refresh a managed installation from a verified wheel
+
+To apply a maintenance build directly to an existing controller environment, download
+and verify its bootstrap and wheel. Close LogosDesktop, then run the following with
+your existing controller root, selected profile and the release's wheel metadata:
+
+```bash
+python3 ./install-wheel.py \
+  --root "$HOME/.local/lib/logos-desktop" \
+  --wheel ./logos_desktop-VERSION-py3-none-any.whl \
+  --version VERSION --sha256 VERIFIED_SHA256 --size VERIFIED_BYTES \
+  --migrate --config /absolute/path/profile.json --frontend qt
+```
+
+This verified migration prepares a sibling environment and reopens the selected
+profile. It also supports a same-version maintenance refresh. Previous environments
+and the profile's Logos data remain available.
 
 ## Set up Logos
 
@@ -116,11 +136,20 @@ does not create an installation. Review the Wine runtime and location, accept ve
 terms and sign in with your own account. Your content licenses are still required.
 See [compatibility](COMPATIBILITY.md) and keep a separate backup destination.
 
+Browser sign-in links return to the selected Logos profile through its desktop URL
+handler. Managed setup creates this handler, and opening Logos checks its routing.
+If Firefox asks to open a sign-in link with LogosDesktop, approve that handoff.
+
 **Recommended Wine** obtains the latest available stable AppImage from the independent
 [mmtrt/WINE_AppImage](https://github.com/mmtrt/WINE_AppImage) project. A compatible
 installed native Wine matching that available version can be reused. The recommendation
 follows the provider's stable channel. Existing saved runtime selections stay in place
 when the controller is updated.
+
+For an existing installation, open **Settings → Advanced installation settings →
+Change Wine AppImage** to select a downloaded stable Wine AppImage. Close Logos
+before changing its runtime. LogosDesktop preserves the installation's Windows
+user so the selected runtime opens the existing account and library.
 
 ## Use a saved profile
 

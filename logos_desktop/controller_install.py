@@ -22,8 +22,10 @@ import platform
 import pwd
 import re
 import secrets
+import select
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -540,6 +542,25 @@ def handoff(identity, config_path, frontend="qt", checkpoint=None):
     return Result("handed-off", "The terminal owns this update. Check again after it finishes.", command=tuple(command))
 
 
+def update_gui(identity, config_path, *, checkpoint, progress, before_restart):
+    """Prepare an owner-managed update in the GUI worker and restart without a terminal."""
+    checkpoint()
+    if identity.owner != "venv" or identity != identify():
+        return Result("refused", "Controller identity changed before the update")
+    recovery = recover(identity)
+    if recovery.status != "recovered":
+        return recovery
+
+    checkpoint()
+    progress("Checking for a LogosDesktop update…")
+    available = check(identity)
+    checkpoint()
+    if available.status != "available":
+        return available
+    return _wheel_update(identity, available.artifact, config_path, "qt", checkpoint=checkpoint,
+                         progress=progress, before_restart=before_restart, graphical=True)
+
+
 def _publish(root, target):
     temporary = root / (".current-" + secrets.token_hex(16))
     try:
@@ -627,7 +648,8 @@ def _install(root, wheel, data):
     target = versions / f'{data["version"]}-{data["sha256"]}'
     if target.exists() or target.is_symlink():
         record = _receipt(root) if (root / "operation.json").exists() else {}
-        if (record.get("status") != "aborted" or record.get("target") != str(target.relative_to(root))
+        if (record.get("status") not in ("aborted", "rolled-back")
+                or record.get("target") != str(target.relative_to(root))
                 or record.get("previous") != _target(root)):
             raise InstallError("The final environment path already exists. It was retained for inspection")
         _private(target, directory=True)
@@ -646,7 +668,7 @@ def _install(root, wheel, data):
     return str(target.relative_to(root))
 
 
-def _activate(root, target, version, *, expected_previous=None, previous_files=None):
+def _activate(root, target, version, *, expected_previous=None, previous_files=None, checkpoint=None):
     previous = _target(root) if (root / "current").is_symlink() else None
     if expected_previous is not None and previous != expected_previous:
         raise InstallError("The current pointer changed during preparation")
@@ -660,6 +682,8 @@ def _activate(root, target, version, *, expected_previous=None, previous_files=N
     _write(root / "operation.json", record)
     if (_target(root) if (root / "current").is_symlink() else None) != previous:
         raise InstallError("The current pointer changed before publication")
+    if checkpoint is not None:
+        checkpoint()
     _publish(root, target)
     record["status"] = "published"
     _write(root / "operation.json", record)
@@ -786,6 +810,163 @@ def _launch(root, record, config_path, frontend, *, observation_seconds=30):
     return Result(**json.loads(response))
 
 
+def _launch_gui(root, record, config_path):
+    """Use a fresh interpreter for supervision instead of forking the Qt process."""
+    predecessor = _process_start(os.getpid())
+    operation = json.dumps({"root": str(root), "token": record["token"],
+                            "pid": os.getpid(), "started": predecessor[1]})
+    command = [sys.executable, "-I", "-m", "logos_desktop.controller_install",
+               "observe-gui-update", "--operation", operation]
+    if config_path:
+        command.extend(["--config", str(Path(config_path).expanduser().absolute())])
+    try:
+        child = subprocess.Popen(command, env=_environment(), start_new_session=True, close_fds=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        with _locked(root, wait=True):
+            _recover(root, record)
+        return Result("failed", "The update observer could not start. Previous controller restored")
+
+    try:
+        with child.stdout:
+            _accept_gui_observer(child.stdout.fileno(), record['token'])
+    except (InstallError, OSError, ValueError, TypeError):
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        with _locked(root, wait=True):
+            _recover(root, record)
+        return Result('failed', 'The update observer did not accept restart. Previous controller restored')
+
+    # A closes before B acquires the profile. The independent observer owns readiness and rollback.
+    threading.Thread(target=child.wait, name="gui-update-observer", daemon=True).start()
+    return Result("handed-off", "Restarting LogosDesktop. The update observer will confirm readiness.")
+
+
+def _accept_gui_observer(descriptor, token):
+    """Read a bounded token-bound acceptance before the graphical predecessor closes."""
+    deadline = time.monotonic() + 35
+    content = b''
+    while len(content) <= 8192:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+            raise InstallError('Graphical update observer acceptance timed out')
+        block = os.read(descriptor, 8193 - len(content))
+        if not block:
+            raise InstallError('Graphical update observer exited before acceptance')
+        content += block
+        if b'\n' in content:
+            claim = json.loads(content.split(b'\n', 1)[0])
+            if not isinstance(claim, dict) or claim.get('accepted') is not True or claim.get('token') != token:
+                raise InstallError('Graphical update observer refused this activation')
+            return
+    raise InstallError('Graphical update observer acceptance exceeded its size limit')
+
+
+def _process_start(pid):
+    """Identify the predecessor without treating a reused PID as the same process."""
+    try:
+        fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        return fields[0], fields[19]
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def _gui_predecessor(claim):
+    pid, started = claim['pid'], claim['started']
+    if (type(pid) is not int or pid <= 0 or pid == os.getpid()
+            or not isinstance(started, str) or not started.isdecimal()):
+        raise InstallError("Invalid graphical update predecessor")
+    return pid, started
+
+
+def _wait_for_predecessor(claim):
+    pid, started = _gui_predecessor(claim)
+    deadline = time.monotonic() + 60
+    while True:
+        current = _process_start(pid)
+        if current is None or current[1] != started or current[0] in ('Z', 'X'):
+            return
+        if time.monotonic() >= deadline:
+            raise InstallError("The previous controller is still closing. Reopen LogosDesktop after it exits")
+        time.sleep(.05)
+
+
+def _observe_gui_update(operation, config_path):
+    """Validate the activation claim and independently observe the graphical successor."""
+    claim = json.loads(operation)
+    root = _root(Path(claim["root"]))
+    prefix = Path(sys.prefix).absolute()
+    if prefix.parent != root / 'versions' or VERSION_PATH.fullmatch('versions/' + prefix.name) is None:
+        raise InstallError("Graphical update observer belongs to another controller environment")
+    _probe(prefix)
+    _gui_predecessor(claim)
+    with _locked(root, wait=True):
+        record = _receipt(root)
+        if (record["token"] != claim["token"] or record["status"] != "published"
+                or _target(root) != record["target"]):
+            raise InstallError("Graphical update observation does not match the published activation")
+    print(json.dumps({'accepted': True, 'token': record['token']}), flush=True)
+    result_path = root / f"supervision-{record['token']}.json"
+    try:
+        _wait_for_predecessor(claim)
+        with _locked(root, wait=True):
+            current = _receipt(root)
+            if current['token'] != record['token'] or _target(root) != record['target']:
+                raise InstallError("A later controller activation was preserved")
+            if current['status'] == 'ready':
+                result = Result('updated', 'The new controller confirmed readiness', record['version'])
+                _write(result_path, result.__dict__)
+                return 0
+            if current['status'] != 'published':
+                raise InstallError("Graphical activation is no longer waiting for restart")
+            try:
+                if _probe(root / record['target']) != record['version']:
+                    raise InstallError("The prepared controller version changed before restart")
+            except (InstallError, OSError, ValueError):
+                _recover(root, record)
+                result = Result('failed', 'Prepared controller changed. Previous controller restored')
+            else:
+                result = None
+        if result is None:
+            result = _supervise(root, record, config_path, "qt", lambda value: _write(result_path, value.__dict__))
+    except Exception as error:
+        result = Result("unknown", f"Graphical update observation needs attention: {error}")
+    _write(result_path, result.__dict__)
+    if result.status == 'failed':
+        with _locked(root, wait=True):
+            current = _receipt(root)
+            if (current['token'] != record['token'] or current['status'] != 'rolled-back'
+                    or _target(root) != record['previous']):
+                return 1
+            command = [str(root / record['previous'] / 'bin/logos-desktop'), '--dialog', 'qt']
+            if config_path:
+                command.extend(['-c', str(Path(config_path).expanduser().absolute())])
+            subprocess.Popen(command, env=_environment(), start_new_session=True, close_fds=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
+def previous_gui_update(identity):
+    """Expose a verified failed restart in the restored controller's update card."""
+    if identity.owner != 'venv' or identity.root is None or not (identity.root / 'operation.json').exists():
+        return None
+    try:
+        record = _receipt(identity.root)
+        if record['status'] != 'rolled-back':
+            return None
+        result = Result(**_read(identity.root / f"supervision-{record['token']}.json"))
+        return result if result.status == 'failed' else None
+    except (InstallError, OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def confirm_startup():
     """Consume the operation token only when this exact installed successor is ready."""
     token = os.environ.pop(TOKEN, None)
@@ -805,7 +986,8 @@ def confirm_startup():
     return True
 
 
-def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch=None):
+def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch=None,
+                  checkpoint=None, progress=None, before_restart=None, graphical=False):
     if frontend == "tui":
         _tui_terminal()
     root = _root(identity.root)
@@ -819,17 +1001,44 @@ def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch
         cache.mkdir(mode=0o700)
         wheel = cache / release["filename"]
         try:
+            if checkpoint is not None:
+                checkpoint()
+            if progress is not None:
+                progress(f"Downloading LogosDesktop {release['version']}…")
             with wheel.open("xb") as output:
                 size, digest = _download(release["url"], config, limit=release["size"], destination=output)
             if size != release["size"] or digest != release["sha256"]:
                 raise InstallError("Downloaded wheel failed size or SHA-256 validation")
+            if checkpoint is not None:
+                checkpoint()
+            if progress is not None:
+                progress("Preparing the updated controller environment…")
             target = _install(root, wheel, release)
-            record = _activate(root, target, release["version"], expected_previous=previous)
+            if progress is not None:
+                progress("Restarting LogosDesktop…")
+            try:
+                if checkpoint is None:
+                    record = _activate(root, target, release["version"], expected_previous=previous)
+                else:
+                    record = _activate(root, target, release["version"], expected_previous=previous,
+                                       checkpoint=checkpoint)
+            except BaseException:
+                if _target(root) == previous:
+                    _reconcile(root)
+                raise
         finally:
             wheel.unlink(missing_ok=True)
             cache.rmdir()
     if frontend == "tui" and before_tui_launch is not None:
         before_tui_launch()
+    if graphical:
+        try:
+            before_restart()
+        except BaseException:
+            with _locked(root, wait=True):
+                _recover(root, record)
+            raise
+        return _launch_gui(root, record, config_path)
     return _launch(root, record, config_path, frontend)
 
 
@@ -1217,9 +1426,10 @@ def bootstrap(argv=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=(
-        "check", "handoff", "recover", "rollback", "bootstrap", "configure-provider", "setup",
+        "check", "handoff", "recover", "rollback", "bootstrap", "configure-provider", "setup", "observe-gui-update",
     ))
     parser.add_argument("--config")
+    parser.add_argument("--operation")
     parser.add_argument("--frontend", choices=("qt", "tui"), default="qt")
     parser.add_argument("--no-path", action="store_true", help="Leave shell startup files unchanged during setup")
     args, remaining = parser.parse_known_args(argv)
@@ -1236,6 +1446,12 @@ def main(argv=None):
             return bootstrap(remaining)
         if remaining:
             parser.error("Unexpected arguments: " + shlex.join(remaining))
+        if args.action == "observe-gui-update":
+            if not args.operation:
+                parser.error("Graphical update observation requires its activation claim")
+            return _observe_gui_update(args.operation, args.config)
+        if args.operation:
+            parser.error("Activation claims apply only to graphical update observation")
         identity = identify()
         if args.action == "setup":
             if identity.owner != "venv":

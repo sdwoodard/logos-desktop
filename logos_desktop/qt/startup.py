@@ -1,5 +1,6 @@
 """Lazy graphical entry point for production and explicit repair workflows."""
 
+import os
 import sys
 
 from PySide6.QtCore import QTimer
@@ -77,6 +78,8 @@ def _start(config, function=None, *, install_only=False):
             QTimer.singleShot(50, begin)
             return
         if window.app.initialization_error:
+            if os.environ.get(controller_install.TOKEN):
+                application.exit(1)
             return
         if window._unsubscribe is None or window.app.active is not None:
             QTimer.singleShot(50, begin)
@@ -92,7 +95,10 @@ def _start(config, function=None, *, install_only=False):
 
     QTimer.singleShot(0, begin)
     try:
-        return application.exec()
+        result = application.exec()
+        if window.app.initialization_error:
+            raise SystemExit(result or 1)
+        return result
     finally:
         activation.stop()
         window.app.request_close()

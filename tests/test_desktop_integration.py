@@ -103,6 +103,17 @@ class TestDesktopIntegration(unittest.TestCase):
         with self.assertRaises(file_transactions.FileTransactionError):
             self.plan('another.json', url=False)
 
+    def test_callback_readiness_checks_the_exact_profile_and_executable_binding(self):
+        plan = self.plan()
+        desktop.adopt(plan)
+        launcher = ['/fixture/100% controller', 'literal%u']
+        with patch.object(constants, 'XDG_DATA_HOME', self.root / 'share'):
+            self.assertTrue(desktop.url_handler_current(plan.config, launcher, r'C:\Logos Space\Logos.exe'))
+            self.assertFalse(desktop.url_handler_current(plan.config, launcher, r'C:\Other\Logos.exe'))
+            self.assertFalse(desktop.url_handler_current(
+                self.root / 'other.json', launcher, r'C:\Logos Space\Logos.exe',
+            ))
+
     def test_mime_change_after_preview_and_after_commit_preserved(self):
         plan = self.plan()
         self.defaults[desktop.SCHEMES[0]] = 'other.desktop'
@@ -232,7 +243,10 @@ with desktop.integration_lock():
                     stream.close()
 
     def test_real_gio_launch_preserves_profile_unicode_percent_and_url_arguments(self):
-        probe = subprocess.run(['/usr/bin/python', '-c', 'from gi.repository import Gio'], capture_output=True)
+        system_python = next((path for path in ('/usr/bin/python', '/usr/bin/python3') if Path(path).is_file()), None)
+        if system_python is None:
+            self.skipTest('System Python GIO bindings are unavailable')
+        probe = subprocess.run([system_python, '-c', 'from gi.repository import Gio'], capture_output=True)
         if probe.returncode:
             self.skipTest('System Python GIO bindings are unavailable')
         script = self.root / 'capture Space 文.py'
@@ -253,7 +267,7 @@ entry=Gio.DesktopAppInfo.new_from_filename(sys.argv[1])
 assert entry is not None
 entry.launch_uris(['logos4:fixture-only'],None)
 """
-        subprocess.run(['/usr/bin/python', '-c', program, str(handler)], capture_output=True, check=True)
+        subprocess.run([system_python, '-c', program, str(handler)], capture_output=True, check=True)
         deadline = time.monotonic() + 5
         while not output.exists() and time.monotonic() < deadline:
             time.sleep(0.02)

@@ -109,10 +109,11 @@ the logos-desktop command. The generic entry opens the default selected configur
 Its setup journal belongs to the controller root. This is separate from the
 profile-specific launchers below. See [installation setup](INSTALL.md#installed-locations-and-path).
 
-Use **Backups & tools → Repair & shortcuts** to add desktop launchers after reviewing
-the selected profile. CLI `--create-shortcuts` also requests integration, which runs
-as part of installation. These paths create profile-specific desktop IDs with
-an exact `-c` argument. URL handlers route to that profile. Existing unrelated MIME
+Managed Logos setup creates profile-specific desktop launchers and the browser
+sign-in return handler. Opening Logos checks that handler before launch. Use
+**Backups & tools → Repair & shortcuts** to review desktop integration for a selected
+profile, or request it with CLI `--create-shortcuts`. Entries use the controller's
+stable launcher and an exact `-c` argument. URL handlers route to that profile. Existing unrelated MIME
 defaults are preserved. Uninspectable defaults or unconfirmed routing are reported
 as incomplete integration.
 

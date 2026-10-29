@@ -555,6 +555,9 @@ class LogosManager:
 
     @maintenance.uses_owner
     def start(self):
+        from . import installer
+
+        installer.ensure_login_handler(self.app)
         return self._start("logos")
 
     def _start(self, role):
