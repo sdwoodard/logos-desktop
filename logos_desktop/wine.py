@@ -732,18 +732,24 @@ def run_wine_process(
 
     def release():
         try:
-            closing = getattr(app, "_closing", None)
-            while process.poll() is None:
-                if detach_on_close and isinstance(closing, threading.Event) and closing.wait(0.1):
-                    return
+            try:
+                closing = getattr(app, "_closing", None)
+                while process.poll() is None:
+                    if detach_on_close and isinstance(closing, threading.Event) and closing.wait(0.1):
+                        return
+                    try:
+                        process.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        pass
+            finally:
                 try:
-                    process.wait(timeout=0.1)
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            if prefix_lease is not None:
-                prefix_lease.close()
-            lease.__exit__(None, None, None)
+                    if prefix_lease is not None:
+                        prefix_lease.close()
+                finally:
+                    lease.__exit__(None, None, None)
+        except BaseException as error:
+            process._logos_resource_error = error
+            raise
 
     try:
         process = system.popen_command(
@@ -753,9 +759,11 @@ def run_wine_process(
         if process is None:
             return None
         if isinstance(app, App):
-            app.start_thread(release, daemon_bool=detach_on_close)
+            resource_thread = app.start_thread(release, daemon_bool=detach_on_close)
         else:
-            threading.Thread(target=release, name="Artifact process lifetime", daemon=detach_on_close).start()
+            resource_thread = threading.Thread(target=release, name="Artifact process lifetime", daemon=detach_on_close)
+            resource_thread.start()
+        process._logos_resource_thread = resource_thread
         transferred = True
         return process
     except BaseException:
@@ -830,6 +838,14 @@ def run_wine_during_install(
             process.wait()
             raise maintenance.MaintenanceError(f"Wine command timed out: {command!r}") from error
         finally:
+            resource_thread = vars(process).get("_logos_resource_thread")
+            if resource_thread is not None:
+                resource_thread.join(timeout=5)
+                if resource_thread.is_alive():
+                    raise maintenance.MaintenanceError("Wine helper resource settlement timed out")
+                release_error = vars(process).get("_logos_resource_error")
+                if release_error is not None:
+                    raise maintenance.MaintenanceError("Wine helper resource release failed") from release_error
             temp_file.seek(0)
             for line in temp_file:
                 logging.debug("> %s", line.rstrip())

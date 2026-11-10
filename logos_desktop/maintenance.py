@@ -482,11 +482,19 @@ def hold_process(app, process, on_exit):
         raise
 
 
-def assert_quiescent(context: Context):
+def assert_quiescent(context: Context, *, controller=None):
     """Inspect metadata only, without Wine queries or cached process handles."""
     for process in psutil.process_iter(["pid", "name", "cmdline", "uids"]):
         if process.pid == os.getpid():
             continue
+        if controller is not None and process.pid == controller["pid"]:
+            try:
+                fields = Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                if int(fields[19]) == controller["start_ticks"] and boot == controller["boot_id"]:
+                    continue
+            except FileNotFoundError:
+                continue
         info = process.info
         name = (info.get("name") or "").lower()
         command = info.get("cmdline") or []

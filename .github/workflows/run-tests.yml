@@ -24,7 +24,7 @@ jobs:
       - name: Install reviewed runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y desktop-file-utils
+          sudo apt-get install --no-install-recommends -y desktop-file-utils bubblewrap xvfb libx11-6
           python -m pip install .
       - name: Run the full inexpensive offline suite
         run: >-

@@ -101,7 +101,12 @@ class FontPrerequisiteTests(unittest.TestCase):
                 self.assertEqual(self.register.call_count, 2)
                 for call in self.register.call_args_list:
                     self.assertEqual(call.kwargs["exe_args"][3], "Arial (TrueType)")
-        self.assertEqual(original, (self.directory / "arial.ttf").stat())
+        current = (self.directory / "arial.ttf").stat()
+        preserved = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_nlink",
+                     "st_mtime_ns", "st_ctime_ns")
+        self.assertEqual(tuple(getattr(original, key) for key in preserved),
+                         tuple(getattr(current, key) for key in preserved))
+        self.assertEqual((self.directory / "arial.ttf").read_bytes(), REGULAR)
         self.acquire.assert_not_called()
         self.app.approve_or_exit.assert_not_called()
 

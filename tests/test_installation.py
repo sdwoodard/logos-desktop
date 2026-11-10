@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -534,6 +534,110 @@ class TestInstallation(unittest.TestCase):
         with maintenance.use(context):
             with self.assertRaises(maintenance.MaintenanceBusy), maintenance.installing(self.app):
                 pass
+
+    def test_synchronous_wine_helper_waits_for_delayed_resource_release(self):
+        binary = self.root / "completed-runtime"
+        binary.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+        binary.chmod(0o755)
+        entered = Event()
+        release_allowed = Event()
+        completed = Event()
+        failures = []
+        spawned = []
+        original_spawn = wine.system.popen_command
+
+        def spawn(*args, **kwargs):
+            process = original_spawn(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        def delayed_monitor(*args, **kwargs):
+            target = kwargs.pop("target")
+
+            def run():
+                entered.set()
+                release_allowed.wait(5)
+                target()
+
+            return Thread(*args, target=run, **kwargs)
+
+        def invoke():
+            try:
+                wine.run_wine_during_install(self.app, binary, exe="regedit.exe")
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                completed.set()
+
+        with (patch.object(wine, "get_wine_env", return_value=dict(os.environ)),
+              patch.object(wine.system, "popen_command", side_effect=spawn),
+              patch.object(wine.threading, "Thread", side_effect=delayed_monitor)):
+            caller = Thread(target=invoke)
+            caller.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                spawned[0].wait(timeout=2)
+                self.assertFalse(completed.wait(0.2))
+            finally:
+                release_allowed.set()
+                caller.join(timeout=5)
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(failures, [])
+        with maintenance.installing(self.app):
+            pass
+
+    def test_synchronous_wine_helper_reports_monitor_timeout_and_retains_admission(self):
+        binary = self.root / "completed-runtime"
+        binary.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+        binary.chmod(0o755)
+        release_allowed = Event()
+        monitors = []
+
+        def blocked_monitor(*args, **kwargs):
+            target = kwargs.pop("target")
+
+            def run():
+                release_allowed.wait(10)
+                target()
+
+            thread = Thread(*args, target=run, **kwargs)
+            monitors.append(thread)
+            return thread
+
+        try:
+            with (patch.object(wine, "get_wine_env", return_value=dict(os.environ)),
+                  patch.object(wine.threading, "Thread", side_effect=blocked_monitor)):
+                with self.assertRaisesRegex(maintenance.MaintenanceError, "resource settlement timed out"):
+                    wine.run_wine_during_install(self.app, binary)
+                with self.assertRaises(maintenance.MaintenanceBusy):
+                    maintenance.Lease(maintenance.Context.from_app(self.app), exclusive=True)
+        finally:
+            release_allowed.set()
+            for thread in monitors:
+                thread.join(timeout=5)
+        with maintenance.installing(self.app):
+            pass
+
+    def test_synchronous_wine_helper_surfaces_resource_release_failure(self):
+        binary = self.root / "completed-runtime"
+        binary.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+        binary.chmod(0o755)
+        close = maintenance.Lease.close
+        prefix = maintenance.Context.from_app(self.app).prefix
+
+        def failed_monitor_close(lease):
+            close(lease)
+            if current_thread().name == "Artifact process lifetime" and lease.context.prefix == prefix:
+                raise RuntimeError("injected resource release failure")
+
+        with (patch.object(wine, "get_wine_env", return_value=dict(os.environ)),
+              patch.object(maintenance.Lease, "close", failed_monitor_close),
+              patch.object(wine.threading, "excepthook") as thread_failure):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "resource release failed"):
+                wine.run_wine_during_install(self.app, binary)
+            self.assertEqual(thread_failure.call_count, 1)
+        with maintenance.installing(self.app):
+            pass
 
     def test_busy_update_and_switch_do_not_touch_target_or_download(self):
         busy = maintenance.MaintenanceBusy("Close Logos then retry")

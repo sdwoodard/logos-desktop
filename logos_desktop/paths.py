@@ -40,7 +40,7 @@ def disjoint(first: Path, second: Path) -> bool:
     return not first.is_relative_to(second) and not second.is_relative_to(first)
 
 
-def rename_no_replace(source: Path, destination: Path) -> None:
+def rename_no_replace(source: Path, destination: Path, *, source_dir_fd=-100, destination_dir_fd=-100) -> None:
     """Preserve an unexpected destination entry during publication or recovery."""
     import ctypes
 
@@ -49,7 +49,7 @@ def rename_no_replace(source: Path, destination: Path) -> None:
         raise RuntimeError("No-replace rename is unavailable")
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+    if rename(source_dir_fd, os.fsencode(source), destination_dir_fd, os.fsencode(destination), 1) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), str(destination))
 
