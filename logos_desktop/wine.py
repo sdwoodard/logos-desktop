@@ -850,7 +850,12 @@ def run_wine_during_install(
 # all users use the latest and greatest.
 # Sort of like an update, but for wine and all of the bits underneath "Logos" itself
 @maintenance.uses_installation
-def enforce_icu_data_files(app: App):
+def enforce_icu_data_files(app: App, *, prepared=None):
+    if prepared is not None:
+        from . import runtime_recipes
+
+        runtime_recipes.install_icu(prepared, app.conf.wine_prefix, checkpoint=app.checkpoint)
+        return
     app.status("Downloading ICU files…")
     release = app.conf._network.icu_latest_version()
     icu_filename = f"icu-win-{release.version}.tar.gz"
@@ -987,6 +992,20 @@ def _get_registry_value(reg_path, name, app: App):
 
 
 def _wine_invocation(app, binary, overrides):
+    prepared = runtime.current_prepared()
+    if prepared is not None:
+        executable = runtime.executable(binary, app)
+        context = maintenance.current_context()
+        env = {key: value for key, value in os.environ.items() if key not in (
+            "WINE", "WINELOADER", "WINESERVER", "WINEPREFIX", "WINEDLLOVERRIDES", "WINEPATH",
+        )}
+        env.update(WINE=str(prepared.runner.path), WINELOADER=str(prepared.runner.path),
+                   WINESERVER=str(prepared.runner.path.parent / "wineserver"), WINEPREFIX=str(context.prefix),
+                   WINEDLLOVERRIDES="mscoree=;mshtml=;winemenubuilder.exe=", WINEDEBUG="err+all")
+        # The existing wineboot helper requests this same code-owned addon denial.
+        if overrides not in (None, "mscoree="):
+            raise maintenance.MaintenanceError("Unmodeled DLL overrides cannot enter a prepared invocation")
+        return [executable], system.fix_ld_library_path(env)
     with runtime.activation_guard(app):
         executable = runtime.executable(binary, app)
         env = get_wine_env(app, overrides)

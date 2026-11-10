@@ -10,7 +10,7 @@ jobs:
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
       (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable' ||
-       github.ref_name == 'fix-auth-and-gui-updates')
+        github.ref_name == 'fix-auth-and-gui-updates' || github.ref_name == 'staging-runtime-stacks')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -34,7 +34,7 @@ jobs:
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
       (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable' ||
-       github.ref_name == 'fix-auth-and-gui-updates')
+        github.ref_name == 'fix-auth-and-gui-updates' || github.ref_name == 'staging-runtime-stacks')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -69,7 +69,7 @@ jobs:
     if: >-
       github.repository == 'sdwoodard/logos-desktop' &&
       (github.ref_name == 'main' || github.ref_name == 'staging' || github.ref_name == 'stable' ||
-       github.ref_name == 'fix-auth-and-gui-updates')
+        github.ref_name == 'fix-auth-and-gui-updates' || github.ref_name == 'staging-runtime-stacks')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -94,6 +94,9 @@ jobs:
           from importlib.metadata import version
           from pathlib import Path
           from logos_desktop import constants
+          from logos_desktop.runtime_stacks import bundled
+          catalog = bundled()
+          assert len(catalog.runners) >= 2 and catalog.recipes
           assert version('logos-desktop') == constants.APP_VERSION
           assert constants.APP_SELF_UPDATES_ENABLED is False
           assert (constants.APP_ASSETS_DIR / 'LogosStubFailOK.mst').stat().st_size > 0

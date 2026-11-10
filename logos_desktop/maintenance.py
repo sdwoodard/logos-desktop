@@ -298,7 +298,9 @@ def _known_recovery_locations(directory, context):
 
 
 class Lease:
-    def __init__(self, context: Context, *, exclusive=False, recovery=False, role=None):
+    def __init__(self, context: Context, *, exclusive=False, recovery=False, role=None, prefix_only=False):
+        if prefix_only and role is not None:
+            raise ValueError("Acquire roles after reference and artifact admission")
         self.context = context
         self.exclusive = exclusive
         self.descriptor = None
@@ -315,14 +317,15 @@ class Lease:
                 # Stable prefix admission comes before state-local compatibility
                 # locks. Every flock here is nonblocking, including role locks.
                 self.stable_descriptor = _operation_lock(directory, 'usage.lock', exclusive=exclusive)
-                self._acquire_local(context, exclusive=exclusive, recovery=recovery, role=role, directory=directory)
+                self._acquire_local(context, exclusive=exclusive, recovery=recovery, role=role, directory=directory,
+                                    prefix_only=prefix_only)
             except BaseException:
                 self.close()
                 raise
             finally:
                 os.close(directory)
 
-    def _acquire_local(self, context, *, exclusive, recovery, role, directory):
+    def _acquire_local(self, context, *, exclusive, recovery, role, directory, prefix_only=False):
         lock = context.state / "usage.lock"
         descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
@@ -346,7 +349,7 @@ class Lease:
             os.close(descriptor)
             raise
         self.descriptor = descriptor
-        if not exclusive:
+        if not exclusive and not prefix_only:
             self.artifacts = artifact_use()
             try:
                 self.artifacts.__enter__()

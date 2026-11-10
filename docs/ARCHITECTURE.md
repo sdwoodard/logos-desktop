@@ -47,6 +47,8 @@ contrast, with explicit disabled and focus states.
 | `logos.py`, `processes.py` | Selected process identity, observations and bounded helper execution |
 | `installer.py`, `wine.py`, `runtime.py` | Checked installation, Wine commands and recoverable runtime selection |
 | `artifacts.py`, `network.py`, `metadata.py`, `releases.py`, `updates.py` | Accepted artifacts, bounded metadata and controller updates |
+| `runtime_stacks.py`, `runtime_recipes.py` | Bundled exact stack facts, evidence policy and pinned preparation |
+| `runtime_runners.py`, `runtime_filesystem.py` | Managed runner bytes, durable reservations and supported storage identities |
 | `backup.py`, `backup_store.py` | Verified snapshots and recoverable user-data replacement |
 | `control.py`, `repair.py`, `database.py` | Maintenance, explicit recovery and owned database policies |
 
@@ -54,6 +56,44 @@ Configuration writes reload and patch the selected file. Operation-scoped valida
 inspect the merged document before publication. Runtime activation adopts the exact
 document it validated and published rather than rereading a mutable file. Recovery
 preserves unexpected changes instead of guessing which data may be overwritten.
+
+### Runtime-stack backend on staging
+
+The bundled `assets/runtime-stacks.json` contains unqualified candidate inputs.
+Evidence, version eligibility, availability and current selection are separate
+facts. Known-affected content digests veto new ordinary setup, including imported
+copies. Missing facts cannot erase a potentially applicable failure. Positive
+evidence requires exact product, recipe, dependency and host observations. Local
+trials never change bundled evidence. Catalog updates use controller distribution.
+
+Runner downloads prepare verified bytes without executing Wine, touching a prefix
+or changing a profile. Accepted runner copies live below XDG data in
+`logos-desktop/runners`. Stable account coordination binds every known store,
+inventory, owner preimage and pin through a journaled checkpoint. Uncertain records
+block writers. Reconciliation uses preimage hashes and intended documents for
+forward replay, with the previous registry retained to validate owner transitions.
+It preserves conflicting later bytes.
+
+Reservation owners declare exact generations and keep pins through interrupted
+work. Explicit terminal settlement can reconcile several owners while preserving
+uncertain owners' pins. Ordinary removal remains disabled until profile, trial and
+recovery adapters cover every participating writer. The low-level removal path
+validates bytes and filesystem/subvolume identity through owned tombstones and
+no-follow directory descriptors. It never selects a fallback or deletes external
+runtimes, prefixes or shared dependencies.
+
+Prepared recipe consumers use exact accepted Wine, ICU and standalone winetricks
+inputs. The new-prefix installer seam refuses existing-prefix mutation, which needs
+the later full-recovery apply service. Custom settings and companion overrides are
+checked before writes. Code-owned initialization suppresses automatic Mono/Gecko
+installers. Required addon handlers currently refuse preparation pending exact MSI
+attestation. This establishes no supported Logos or addon-absence combination.
+
+To exercise actual transfers and unused-fixture deletion on disposable supported
+storage, run `scripts/check-runtime-store.py --parent /absolute/test/parent` with
+the candidate package installed. This downloads the catalog inputs, checks offline
+reuse and removes only its own temporary runner store. It executes no Wine. Native
+evidence applies to the actual tested layout, with other coverage recorded separately.
 
 ## Configuration and admission
 

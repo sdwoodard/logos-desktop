@@ -810,9 +810,15 @@ def install_dependencies(app: App, target_version=10):
 def ensure_winetricks(
     app: App,
     version=constants.WINETRICKS_VERSION,
-    status_messages: bool = True
+    status_messages: bool = True,
+    *, prepared=None,
 ):
     from . import artifacts, runtime
+
+    if prepared is not None:
+        if prepared.dependency.role != "winetricks" or prepared.artifact.sha256 != prepared.dependency.sha256:
+            raise maintenance.MaintenanceError("Prepared winetricks identity does not match")
+        return str(prepared.artifact.check(checkpoint=app.checkpoint))
 
     # Wine AppImages do not necessarily bundle Winetricks. Use the same pinned script for every provider.
     winetricks_path = Path(app.conf.installer_binary_dir) / "winetricks"

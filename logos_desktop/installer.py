@@ -307,6 +307,54 @@ def ensure_product_installer_download(app: App):
     return ProductInstaller(release, accepted)
 
 
+def configure_prepared_stack(app: App, prepared, *, observed_settings, host_facts, advanced=False):
+    """Configure a new empty prefix from accepted inputs under caller-owned admission.
+
+    M4 owns existing-prefix apply and recovery. Setup integration consumes this seam
+    after its product target and explicit runtime choice have been resolved.
+    """
+    from . import compatibility, runtime_recipes, runtime_stacks
+
+    if not maintenance.installation_owned():
+        raise maintenance.MaintenanceError("Prepared setup needs owned installation admission")
+    context = maintenance.Context.from_app(app, prompt=False)
+    if context.prefix.exists() and any(context.prefix.iterdir()):
+        raise maintenance.MaintenanceError("Existing prefixes require complete recovery before recipe application")
+    raw = app.conf._raw
+    if (raw.faithlife_product != "Logos" or raw.faithlife_product_release != prepared.stack.product_build
+            or not runtime_stacks.matches(prepared.recipe.host, host_facts)):
+        raise maintenance.MaintenanceError("Prepared product or host facts do not match")
+    if any(key not in prepared.recipe.settings or prepared.recipe.settings[key] != value
+           for key, value in observed_settings.items()):
+        raise maintenance.MaintenanceError("Custom settings need a separately authorized recipe change")
+    inputs = {item.dependency.role: item for item in prepared.dependencies}
+    if set(inputs) != {"icu", "winetricks"}:
+        raise maintenance.MaintenanceError("This prepared setup handler requires ICU and winetricks inputs")
+    prepared.check()
+    assessment = runtime_stacks.assess(
+        prepared.catalog, prepared.stack, product=raw.faithlife_product,
+        product_build=raw.faithlife_product_release, host=host_facts,
+        settings=dict(prepared.recipe.settings),
+        dependencies={item.dependency.role: item.artifact.sha256 for item in prepared.dependencies},
+        availability="cached", runner_sha256=prepared.runner.sha256,
+    )
+    if assessment.evidence == "known-affected" or not (
+        assessment.selectable or advanced and assessment.evidence == "experimental"
+    ):
+        raise maintenance.MaintenanceError("Prepared setup refused: " + assessment.reason)
+    runner = prepared.catalog.runners[prepared.stack.runner_id]
+    version = compatibility.parse_wine_version(dict(runner.companions)["wine"])
+    eligible, reason = wine.check_wine_rules(version, raw.faithlife_product_release, "10")
+    if not eligible or version.channel.value != "stable" and not advanced:
+        raise maintenance.MaintenanceError("Prepared setup needs an eligible explicit runtime choice: " + reason)
+    with runtime.prepared_inputs(app, prepared):
+        helper = system.ensure_winetricks(app, prepared=inputs["winetricks"])
+        wine.initializeWineBottle(str(prepared.runner.path), app)
+        runtime_recipes.apply_settings(app, prepared, observed_settings)
+        wine.enforce_icu_data_files(app, prepared=inputs["icu"])
+    return helper
+
+
 def ensure_wineprefix_init(app: App):
     app.installer_step_count += 1
     accepted = ensure_product_installer_download(app=app)

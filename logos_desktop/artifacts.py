@@ -40,6 +40,10 @@ logging.getLogger("urllib3").setLevel(logging.ERROR)
 class ArtifactError(RuntimeError):
     """The operation did not produce bytes acceptable to its consumer."""
 
+    def __init__(self, message, *, reason="artifact-invalid"):
+        super().__init__(message)
+        self.reason = reason
+
 
 class MetadataError(ArtifactError):
     """Metadata is unavailable without implying a successfully empty feed."""
@@ -167,7 +171,7 @@ def response_metadata(headers):
 
 def require_response(response, url):
     if response.status_code != 200:
-        raise ArtifactError(f"HTTP {response.status_code} from {safe_url(url)}")
+        raise ArtifactError(f"HTTP {response.status_code} from {safe_url(url)}", reason="transport-unavailable")
     if not _secure_response(response):
         raise ArtifactError("Download redirect left HTTPS")
 
@@ -515,12 +519,12 @@ def validate_format(path, kind, checkpoint=None, *, msi_expectation=None):
 def _verify(path, spec, size=None, digest=None, checkpoint=None):
     actual_size = path.stat().st_size
     if any(expected is not None and actual_size != expected for expected in (spec.size, size)):
-        raise ArtifactError("Artifact length mismatch")
+        raise ArtifactError("Artifact length mismatch", reason="identity-mismatch")
     for expected in (spec.digest, digest):
         if expected is not None:
             expected.validate()
             if regular_hash(path, expected.algorithm, checkpoint).lower() != expected.value.lower():
-                raise ArtifactError("Artifact digest mismatch")
+                raise ArtifactError("Artifact digest mismatch", reason="identity-mismatch")
     validate_format(path, spec.kind, checkpoint, msi_expectation=spec.msi_expectation)
 
 
@@ -670,6 +674,8 @@ def acquire(spec, root, candidates=(), status=None, *, checkpoint=None):
                             continue
                         output.write(chunk)
                         received += len(chunk)
+                        if spec.size is not None and received > spec.size:
+                            raise ArtifactError("Artifact exceeds pinned size", reason="identity-mismatch")
                         if status:
                             status(f"Downloading {spec.name}…", min(received / size, 1) if size else None)
                     output.flush()
@@ -682,9 +688,11 @@ def acquire(spec, root, candidates=(), status=None, *, checkpoint=None):
                 status(f"Publishing accepted {spec.name}…", None)
             return _publish(staging, store, spec, evidence, checkpoint)
     except requests.RequestException as error:
-        raise ArtifactError(f"Transfer failed for {safe_url(spec.url)} ({type(error).__name__})") from None
+        raise ArtifactError(f"Transfer failed for {safe_url(spec.url)} ({type(error).__name__})",
+                            reason="transport-unavailable") from None
     except OSError as error:
-        raise ArtifactError(f"Could not stage artifact ({type(error).__name__})") from None
+        raise ArtifactError(f"Could not stage artifact ({type(error).__name__})",
+                            reason="insufficient-space" if error.errno == 28 else "storage-unavailable") from None
 
 
 def installed(path, kind):

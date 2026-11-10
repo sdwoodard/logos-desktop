@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "runners": [
+    {
+      "schema": 1,
+      "record": "runner",
+      "id": "mmtrt-stable-11.0-697401628",
+      "revision": 1,
+      "provider": "mmtrt",
+      "family": "wine",
+      "version_display": "11.0 stable",
+      "architecture": "x86_64",
+      "format": "appimage2",
+      "size": 99710432,
+      "sha256": "091585982684a7d68b52a4ba2418eebddc4188784711e16383d40067243bec8c",
+      "url": "https://github.com/mmtrt/WINE_AppImage/releases/download/continuous-stable/wine-stable_11.0-x86_64.AppImage",
+      "source_url": "https://github.com/mmtrt/WINE_AppImage",
+      "source_revision": null,
+      "packaging_revision": "github-asset-697401628",
+      "companions": [
+        {"role": "wine", "alias": "wine", "parser": "wine-numeric-v1", "expected_output": "wine-11.0"},
+        {"role": "wine64", "alias": "wine64", "parser": "wine-numeric-v1", "expected_output": "wine-11.0"},
+        {"role": "wineserver", "alias": "wineserver", "parser": "wineserver-numeric-v1", "expected_output": "Wine 11.0"}
+      ]
+    },
+    {
+      "schema": 1,
+      "record": "runner",
+      "id": "mmtrt-staging-11.21-697402869",
+      "revision": 1,
+      "provider": "mmtrt",
+      "family": "wine-staging",
+      "version_display": "11.21 staging",
+      "architecture": "x86_64",
+      "format": "appimage2",
+      "size": 125281760,
+      "sha256": "6829246c1d7289880236ad72fc235ed4e24fa22c4b65ba63474f326c93f60390",
+      "url": "https://github.com/mmtrt/WINE_AppImage/releases/download/continuous-staging/wine-staging_11.21-x86_64.AppImage",
+      "source_url": "https://github.com/mmtrt/WINE_AppImage",
+      "source_revision": null,
+      "packaging_revision": "github-asset-697402869",
+      "companions": [
+        {"role": "wine", "alias": "wine", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (staging)"},
+        {"role": "wine64", "alias": "wine64", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (staging)"},
+        {"role": "wineserver", "alias": "wineserver", "parser": "wineserver-numeric-v1", "expected_output": "Wine 11.21"}
+      ]
+    }
+  ],
+  "recipes": [
+    {
+      "schema": 1,
+      "record": "recipe",
+      "id": "logos-wpf-candidate",
+      "revision": 1,
+      "controller_min": "1.0.3",
+      "settings": [
+        {"key": "windows-version", "value": "win10"},
+        {"key": "wpf-software", "value": true},
+        {"key": "menu-builder-disabled", "value": true},
+        {"key": "renderer", "value": "absent"},
+        {"key": "font-smoothing", "value": "rgb"}
+      ],
+      "dependencies": [
+        {
+          "id": "icu-72.1-custom-4",
+          "role": "icu",
+          "version": "72.1-custom+4",
+          "url": "https://github.com/FaithLife-Community/icu/releases/download/72.1-custom%2B4/icu-win.tar.gz",
+          "sha256": "2813ea1205fcf9d9a7930339dae181dc3e299b2391f2f4879c5e542be43f3a7f",
+          "size": 16643352,
+          "layout": "icu-win-v1"
+        },
+        {
+          "id": "winetricks-20260125",
+          "role": "winetricks",
+          "version": "20260125",
+          "url": "https://raw.githubusercontent.com/Winetricks/winetricks/20260125/src/winetricks",
+          "sha256": "431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b",
+          "size": 830687,
+          "layout": "winetricks-script-v1"
+        }
+      ],
+      "required_host_facts": [
+        {"fact": "architecture", "equals": "x86_64"},
+        {"fact": "font-arial", "equals": "present"}
+      ]
+    }
+  ],
+  "stacks": [
+    {
+      "schema": 1,
+      "record": "stack",
+      "id": "logos-54.3-mmtrt-11.0-candidate",
+      "revision": 1,
+      "runner_id": "mmtrt-stable-11.0-697401628",
+      "recipe_id": "logos-wpf-candidate",
+      "recipe_revision": 1,
+      "product": "Logos",
+      "product_build": "54.3.0.0005",
+      "controller_schema": 1,
+      "evidence_ids": []
+    },
+    {
+      "schema": 1,
+      "record": "stack",
+      "id": "logos-54.3-mmtrt-11.21-candidate",
+      "revision": 1,
+      "runner_id": "mmtrt-staging-11.21-697402869",
+      "recipe_id": "logos-wpf-candidate",
+      "recipe_revision": 1,
+      "product": "Logos",
+      "product_build": "54.3.0.0005",
+      "controller_schema": 1,
+      "evidence_ids": []
+    }
+  ],
+  "evidence": []
+}

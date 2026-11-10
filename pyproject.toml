@@ -54,6 +54,7 @@ namespaces = false
 [tool.setuptools.package-data]
 logos_desktop = [
     "assets/LogosStubFailOK.mst",
+    "assets/runtime-stacks.json",
     "img/logos-desktop-icon.png",
     "img/logos-desktop.svg",
     "img/lucide-LICENSE.txt",

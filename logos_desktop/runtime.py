@@ -20,6 +20,31 @@ _local = threading.local()
 
 
 @contextmanager
+def prepared_inputs(app, prepared):
+    """Bind one worker to accepted inputs without publishing a profile selection."""
+    if not maintenance.installation_owned() or getattr(_local, "prepared", None) is not None:
+        raise maintenance.MaintenanceError("Prepared execution needs one owned installation transaction")
+    context = maintenance.current_context()
+    if context is None or context != maintenance.Context.from_app(app, prompt=False):
+        raise maintenance.MaintenanceError("Prepared execution context changed")
+    overrides = app.conf._overrides
+    if getattr(overrides, "wineserver_binary", None) is not None:
+        raise maintenance.MaintenanceError("Explicit wineserver override is a custom runtime")
+    if getattr(overrides, "wine_dll_overrides", None) is not None:
+        raise maintenance.MaintenanceError("Explicit DLL overrides are a custom runtime")
+    prepared.check()
+    _local.prepared = prepared
+    try:
+        yield
+    finally:
+        _local.prepared = None
+
+
+def current_prepared():
+    return getattr(_local, "prepared", None)
+
+
+@contextmanager
 def configuration_lock():
     """Serialize existing writes with activation snapshots and rollback."""
     with _writers:
@@ -352,6 +377,19 @@ def activate(app, accepted):
 
 def executable(binary, app=None, *, destination=None):
     """Pin accepted generations while preserving native wrapper invocation paths."""
+    prepared = current_prepared()
+    if prepared is not None:
+        requested = Path(binary)
+        allowed = {prepared.runner.path, *(prepared.runner.path.parent / name
+                                           for name in ("wine", "wine64", "wineserver"))}
+        allowed.update(item.artifact.path for item in prepared.dependencies if item.dependency.role == "winetricks")
+        if requested not in allowed:
+            raise artifacts.ArtifactError("Executable is outside the prepared stack")
+        prepared.check()
+        if requested != prepared.runner.path and requested.name in ("wine", "wine64", "wineserver"):
+            if not requested.is_symlink() or requested.resolve() != prepared.runner.path:
+                raise artifacts.ArtifactError("Prepared companion identity changed")
+        return str(requested)
     if app is not None:
         with activation_guard(app):
             return executable(binary, destination=Path(app.conf.install_dir) / "data/bin")
