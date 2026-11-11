@@ -6,6 +6,14 @@ uninstall against a personal library during development.
 
 ## Source setup
 
+The repository maintains two branches:
+
+- `main` contains integrated release history.
+- `staging` contains ongoing development and reviewed changes awaiting integration.
+
+Use `staging` for development and target it when proposing changes. Releases are
+identified by version tags. Integration into `main` follows maintainer acceptance.
+
 Use an installed Python 3.12 or newer and a virtual environment. Install the `gui`
 extra for the default Qt frontend. Do not replace the system Python to follow
 these instructions.
@@ -13,6 +21,7 @@ these instructions.
 ```bash
 git clone https://github.com/sdwoodard/logos-desktop.git
 cd logos-desktop
+git switch staging
 python3 -m venv .venv
 .venv/bin/python -m pip install '.[dev,gui]'
 ```
