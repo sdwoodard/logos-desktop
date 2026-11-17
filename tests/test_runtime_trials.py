@@ -34,10 +34,8 @@ class TrialTests(unittest.TestCase):
             self.addCleanup(setting.stop)
 
         def filesystem(path):
-            info = Path(path).stat()
-            return {"canonical_path": str(path), "filesystem_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                    "filesystem_root": str(path), "inode": info.st_ino, "owner_uid": info.st_uid,
-                    "boot_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "device": info.st_dev, "mount_id": 1}
+            return dict(trials.runtime_copies.runtime_filesystem.live_identity(path),
+                        filesystem_uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', filesystem_root=str(path))
 
         setting = patch.object(trials.runtime_copies.runtime_filesystem, "identity", side_effect=filesystem)
         setting.start()
@@ -118,6 +116,42 @@ class TrialTests(unittest.TestCase):
         self.assertFalse(maintenance.Context(prefix).pending.exists())
         self.assertEqual((prefix / "database").read_text(), "source")
         self.assertFalse(store._registry()["references"])
+
+    def test_fresh_process_stops_selected_preparation_from_another_state_root(self):
+        directory, prefix, store = self.supervised_fixture()
+        client = None
+
+        def interrupt_copy(*args, checkpoint, **kwargs):
+            nonlocal client
+            client = subprocess.Popen([sys.executable, '-c', '''
+import sys
+from pathlib import Path
+from logos_desktop import constants, maintenance, runtime_trials
+constants.COORDINATION_DIR = Path(sys.argv[1])
+constants.STATE_DIR = sys.argv[2]
+record = runtime_trials.selected_operation(maintenance.Context(Path(sys.argv[3])), action='stop')
+assert record['cancel_requested']
+''', str(constants.COORDINATION_DIR), str(self.root / 'other-state'), str(prefix)])
+            try:
+                import time
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    checkpoint()
+                    time.sleep(.01)
+                self.fail('Fresh controller did not stop preparation')
+            finally:
+                self.assertEqual(client.wait(timeout=5), 0)
+
+        with (patch.object(boundary, 'inspect', return_value=Mock()),
+              patch.object(trials.os, 'getppid', return_value=os.getpid()),
+              patch.object(trials.runtime_copies, 'copy', side_effect=interrupt_copy)):
+            trials.supervise(directory, 'test-capability')
+        self.assertIsNotNone(client)
+        self.assertEqual(client.returncode, 0)
+        context = maintenance.Context(prefix)
+        self.assertEqual(trials.selected_operation(context, directory.name, action='stop')['result'], 'cancelled')
+        self.assertFalse(context.pending.exists())
+        self.assertFalse(store._registry()['references'])
 
     def test_busy_admission_becomes_durable_failure(self):
         directory, prefix, store = self.supervised_fixture()
@@ -239,6 +273,42 @@ class TrialTests(unittest.TestCase):
         ])
         self.assertEqual(result["result"], "failed")
         self.assertEqual(result["failure_reason"], "display-lost")
+
+    def test_apply_checklist_is_bound_to_settled_trial_and_unchanged_source(self):
+        record, _ = self.supervise_events([('prepared', ''), ('running', ''), ('running', 'restart-1'),
+                                           ('ended', 'processes-settled')])
+        directory = self.root / record['id']
+        job = trials.read(directory / 'job.json')
+        prepared = SimpleNamespace(stack=SimpleNamespace(id=job['accepted']['stack']),
+                                   catalog_sha256=job['accepted']['catalog'],
+                                   recipe=SimpleNamespace(sha256=job['accepted']['recipe']),
+                                   runner=SimpleNamespace(sha256=job['sha256']))
+        prefix = Path(record['source'])
+        profile = Path(job['profile']['path'])
+        observations = dict.fromkeys(('library', 'search', 'typing', 'scrolling', 'restart'), True)
+
+        def check():
+            trials.require_successful_trial(maintenance.Context(prefix), prepared, job['generation'], profile,
+                                            trials.runtime_copies.manifest(prefix), record['id'], observations)
+
+        check()
+        for result in ('cancelled', 'failed', 'unknown', 'unavailable'):
+            with self.subTest(result=result), patch.object(trials, 'selected_operation', return_value=dict(
+                    record, result=result)), self.assertRaises(maintenance.RecoveryRequired):
+                check()
+        with patch.dict(observations, search=False), self.assertRaises(maintenance.RecoveryRequired):
+            check()
+        for target in (prepared.recipe, prepared.runner):
+            with patch.object(target, 'sha256', '0' * 64), self.assertRaises(maintenance.RecoveryRequired):
+                check()
+        before = profile.read_bytes()
+        profile.write_bytes(before + b'\n')
+        with self.assertRaises(maintenance.RecoveryRequired):
+            check()
+        profile.write_bytes(before)
+        (prefix / 'database').write_bytes(b'changed')
+        with self.assertRaises(maintenance.RecoveryRequired):
+            check()
 
     def test_worker_descendant_inventory_excludes_namespace_infrastructure(self):
         child = subprocess.Popen([sys.executable, "-c", "import time\ntime.sleep(30)"], close_fds=True)

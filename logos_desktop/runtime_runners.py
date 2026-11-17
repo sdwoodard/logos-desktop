@@ -1,10 +1,11 @@
 """Managed runner bytes, durable reservations and conservative removal admission."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import fcntl
 import hashlib
 import os
+import pwd
 from pathlib import Path
 import shutil
 import stat
@@ -17,8 +18,7 @@ from . import artifacts, constants, maintenance, paths, runtime_filesystem, runt
 REFERENCE_KINDS = frozenset((
     "profile-selection", "trial", "helper", "apply", "return-point", "pending-journal", "retained-generation",
 ))
-# M4/M5 must integrate every writer before ordinary removal becomes available.
-INTEGRATED_REFERENCE_KINDS = frozenset()
+INTEGRATED_REFERENCE_KINDS = REFERENCE_KINDS
 MAX_STATE_BYTES = 4 * 1024 * 1024
 
 
@@ -167,6 +167,11 @@ class RunnerStore:
 
     def initialize(self):
         """Create a private store and durable account checkpoint together."""
+        self._initialize_store()
+        if 'profile_roots' in self._registry():
+            self.discover_profiles()
+
+    def _initialize_store(self):
         with self._admission():
             if (self.coordination / "transaction.json").exists():
                 raise RunnerError("Runner checkpoint transaction needs reconciliation")
@@ -192,8 +197,8 @@ class RunnerStore:
                     account = {"schema": "runtime-runner-account-2", "id": str(uuid.uuid4()),
                                "initial_root": str(self.root), "initial_store": store_id, "initialized": False}
                     _write(account_path, account)
-                registry = {"schema": "runtime-runner-registry-2", "stores": {}, "references": {}, "profiles": {},
-                            "owners": {}}
+                registry = {"schema": "runtime-runner-registry-3", "stores": {}, "references": {}, "profiles": {},
+                            "owners": {}, "profile_roots": {}}
                 _safe_directory(self.root, create=True)
                 inventory = {"schema": "runtime-runner-inventory-1", "id": store_id,
                              "copies": {}, "operations": {}}
@@ -235,14 +240,34 @@ class RunnerStore:
         return registry
 
     def _validate_registry_document(self, registry, *, inventories=None, observe_owners=False):
-        runtime_stacks.fields(registry, "schema stores references profiles owners")
-        if registry["schema"] != "runtime-runner-registry-2":
+        current = registry.get('schema') == 'runtime-runner-registry-3'
+        keys = 'schema stores references profiles owners'
+        runtime_stacks.fields(registry, keys + (' profile_roots' if current else ''))
+        if not current and registry["schema"] != "runtime-runner-registry-2":
             raise RunnerError("Unsupported runner registry")
+        if current:
+            roots = registry['profile_roots']
+            if type(roots) is not dict or len(roots) > 64:
+                raise RunnerError('Invalid known profile roots')
+            for path, identity in roots.items():
+                if not Path(path).is_absolute() or Path(path).name != 'logos-desktop':
+                    raise RunnerError('Invalid managed profile root')
+                if identity is not None:
+                    _directory_identity(identity)
+                    if identity['canonical_path'] != path:
+                        raise RunnerError('Known profile root changed')
         for key in ("stores", "references", "profiles", "owners"):
             if type(registry[key]) is not dict or len(registry[key]) > 4096:
                 raise RunnerError("Invalid runner registry collection")
-        if registry["profiles"]:
-            raise RunnerError("Profile registrations require reference-integration reconciliation")
+        for path, binding in registry['profiles'].items():
+            if not Path(path).is_absolute() or str(Path(path)) != path:
+                raise RunnerError('Invalid profile registration location')
+            runtime_stacks.fields(binding, 'state bytes digests')
+            if binding['state'] not in ('reserved', 'published') or not isinstance(binding['digests'], list):
+                raise RunnerError('Unknown profile reference state')
+            runtime_stacks.digest(binding['bytes'])
+            for digest in binding['digests']:
+                runtime_stacks.digest(digest)
         store_ids = set()
         for root, registration in registry["stores"].items():
             runtime_stacks.fields(registration, "id root")
@@ -333,6 +358,12 @@ class RunnerStore:
         ]:
             raise RunnerError("Registry preimage does not match its previous binding")
         old_stores = previous_registry["stores"] if previous_registry is not None else {}
+        if previous_registry and previous_registry['profiles'].keys() - registry['profiles'].keys():
+            raise RunnerError('Checkpoint cannot discard known profiles')
+        for path, identity in (previous_registry or {}).get('profile_roots', {}).items():
+            roots = registry.get('profile_roots', {})
+            if path not in roots or (identity is not None and roots[path] != identity):
+                raise RunnerError('Checkpoint cannot discard or replace a known profile root')
         if any(registry["stores"].get(root) != registration for root, registration in old_stores.items()):
             raise RunnerError("Checkpoint cannot discard or replace registered stores")
         if set(registry["stores"]) - old_stores.keys() - {str(self.root)}:
@@ -598,6 +629,17 @@ class RunnerStore:
         registry = self._registry()
         return dict(self._inventory(registry)["operations"][operation_id])
 
+    def cancel_download(self, operation_id):
+        """Serialize cancellation with the transfer's final publication checkpoint."""
+        with self._admission():
+            operation = self.operation(operation_id)
+            if operation['kind'] != 'download':
+                raise RunnerError('The selected operation is not a download')
+            if operation['result'] != 'pending' or operation['generation'] is not None:
+                return operation['result']
+            _write(self.root / ('cancel-' + operation_id + '.json'), {'operation': operation_id})
+            return 'cancel-requested'
+
     def _operation_phase(self, operation_id, phase, result="pending", generation=None, reason=""):
         with self._admission():
             inventory = self._inventory(self._registry())
@@ -626,9 +668,18 @@ class RunnerStore:
         self.initialize()
         with self._worker():
             return self._download(runner, operation_id=operation_id, cancel=cancel, status=status,
-                                  candidates=candidates)
+                                   candidates=candidates)
 
-    def _download(self, runner, *, operation_id=None, cancel=None, status=None, candidates=()):
+    def import_file(self, source, catalog):
+        digest = artifacts.regular_hash(source)
+        matches = [runner for runner in catalog.runners.values() if runner.sha256 == digest]
+        if len(matches) != 1:
+            raise RunnerError('Import needs one exact bundled runner identity. Keep this file as an external runtime')
+        self.initialize()
+        with self._worker():
+            return self._download(matches[0], local_source=source)
+
+    def _download(self, runner, *, operation_id=None, cancel=None, status=None, candidates=(), local_source=None):
         operation_id = str(uuid.uuid4()) if operation_id is None else _uuid(operation_id)
         with self._admission():
             inventory = self._inventory(self._registry())
@@ -654,7 +705,8 @@ class RunnerStore:
             self._save(inventory)
 
         def checkpoint():
-            if cancel is not None and cancel.is_set():
+            if ((cancel is not None and cancel.is_set())
+                    or os.path.lexists(self.root / ('cancel-' + operation_id + '.json'))):
                 raise Cancelled("Runner download cancelled")
 
         def progress(message, fraction):
@@ -668,7 +720,12 @@ class RunnerStore:
                 raise RunnerError("Insufficient space for staged runner publication", reason="insufficient-space")
             _safe_directory(staging, create=True)
             self._operation_phase(operation_id, "receiving")
-            accepted = artifacts.acquire(runner.spec(), staging, candidates, checkpoint=checkpoint, status=progress)
+            if local_source is None:
+                accepted = artifacts.acquire(runner.spec(), staging, candidates, checkpoint=checkpoint, status=progress)
+            else:
+                accepted = artifacts.import_local(local_source, staging, runner.spec())
+                if accepted.sha256 != runner.sha256 or accepted.size != runner.size:
+                    raise RunnerError('Local runner changed during import')
             # The transport publication is private staging, not manager publication.
             checkpoint()
             self._operation_phase(operation_id, "verifying")
@@ -714,15 +771,16 @@ class RunnerStore:
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+            (self.root / ('cancel-' + operation_id + '.json')).unlink(missing_ok=True)
 
-    def retry(self, operation_id, runner, **kwargs):
+    def retry(self, operation_id, runner, *, new_operation_id=None, **kwargs):
         previous = self.operation(operation_id)
         if (previous["kind"] != "download" or previous["result"] not in ("failed", "cancelled")
                 or (previous["runner"], previous["provider"], previous["sha256"]) != (
                     runner.id, runner.provider, runner.sha256,
                 )):
             raise RunnerError("Retry requires a settled failed transfer with the same exact identity")
-        return self.download(runner, **kwargs)
+        return self.download(runner, operation_id=new_operation_id, **kwargs)
 
     def reconcile(self, catalog):
         """Settle interrupted owned work after proving that no transfer worker remains."""
@@ -875,7 +933,7 @@ class RunnerStore:
         runtime_stacks.digest(sha256)
         registry = self._registry()
         reasons = []
-        if INTEGRATED_REFERENCE_KINDS != REFERENCE_KINDS:
+        if INTEGRATED_REFERENCE_KINDS != REFERENCE_KINDS or not registry.get('profile_roots'):
             reasons.append("reference-integration-incomplete")
         for root in registry["stores"]:
             inventory = self._inventory(registry, root)
@@ -891,14 +949,208 @@ class RunnerStore:
                 raise RunnerError("Unsupported reference")
             if reference["sha256"] == sha256:
                 reasons.append(reference["kind"])
-        # Registration integration owns profile reconciliation in M5.
-        if registry["profiles"]:
-            reasons.append("profile-reconciliation-required")
+        for path, binding in registry['profiles'].items():
+            from . import config_store
+
+            if sha256 in binding['digests']:
+                reasons.append('profile-selection')
+            if not os.path.lexists(path) or binding['state'] != 'published':
+                reasons.append('profile-reconciliation-required')
+                continue
+            with config_store.Target(Path(path)) as target:
+                if target.previous is None:
+                    reasons.append('profile-reconciliation-required')
+                    continue
+                observed = self._selection_digests(registry, target.path, target.previous)
+                changed = (hashlib.sha256(target.previous).hexdigest() != binding['bytes']
+                           or observed != set(binding['digests']))
+                target.validate()
+            if changed:
+                reasons.append('profile-reconciliation-required')
+            if sha256 in observed:
+                reasons.append('profile-selection')
         return tuple(sorted(set(reasons)))
+
+    def discover_profiles(self, selected=None):
+        """Checkpoint managed profile directories, explicit selections and portable profiles together."""
+        self._discover_profiles(selected, self._admission())
+
+    def _discover_profiles(self, selected, admission):
+        from . import config_store
+
+        with admission:
+            registry = self._registry()
+            if 'profile_roots' not in registry:
+                raise RunnerError('Earlier runner registry lacks a complete profile checkpoint. Keep its downloads')
+            old = runtime_stacks.fingerprint(registry)
+            roots = registry['profile_roots']
+            paths_to_read = {Path(p) for p in registry['profiles']}
+            if selected is not None:
+                paths_to_read.add(config_store.absolute_path(selected))
+            if self.coordination == Path(constants.COORDINATION_DIR) / 'runners':
+                legacy = self.coordination.parent / 'trials/profiles.json'
+                if os.path.lexists(legacy):
+                    from . import runtime_trials
+
+                    saved = runtime_trials.read(legacy)
+                    runtime_stacks.fields(saved, 'schema profiles')
+                    if saved['schema'] != 1 or type(saved['profiles']) is not list or len(saved['profiles']) > 64:
+                        raise RunnerError('Cannot establish the registered trial profiles')
+                    for name in saved['profiles']:
+                        if not isinstance(name, str) or not Path(name).is_absolute():
+                            raise RunnerError('Invalid registered trial profile')
+                        paths_to_read.add(Path(name))
+            for root in {Path(p) for p in roots} | {Path(constants.CONFIG_DIR),
+                    Path(pwd.getpwuid(os.getuid()).pw_dir) / '.config/logos-desktop'}:
+                if root.name != 'logos-desktop' or not root.is_absolute():
+                    raise RunnerError('Unrecognized managed configuration directory')
+                previous = roots.setdefault(str(root), None)
+                if not os.path.lexists(root):
+                    if previous is not None:
+                        raise RunnerError('A known profile directory is unavailable')
+                    continue
+                from . import runtime_copies
+
+                runtime_copies.checked_directory(root)
+                observed = runtime_filesystem.identity(root)
+                if previous is None:
+                    roots[str(root)] = observed
+                elif not runtime_filesystem.same_retained_root(previous, observed):
+                    raise RunnerError('A known profile directory was replaced')
+                for index, entry in enumerate(root.iterdir()):
+                    if index >= 4096:
+                        raise RunnerError('Managed profile directory exceeds the discovery limit')
+                    if entry.suffix == '.json':
+                        paths_to_read.add(entry)
+            visited = set()
+            while paths_to_read:
+                path = paths_to_read.pop()
+                if path in visited:
+                    continue
+                visited.add(path)
+                if len(visited) > 4096 or not os.path.lexists(path):
+                    raise RunnerError('A known profile cannot be verified')
+                with config_store.Target(path) as target:
+                    content = target.previous
+                    if content is None:
+                        raise RunnerError('A known profile disappeared')
+                    previous = registry['profiles'].get(str(path))
+                    desired = {'bytes': hashlib.sha256(content).hexdigest(), 'state': 'published',
+                               'digests': sorted(self._selection_digests(registry, path, content))}
+                    if previous is not None and previous != desired:
+                        raise RunnerError('Profile references changed. Reconcile the owning publication first')
+                    registry['profiles'][str(path)] = desired
+                    document = config_store.canonical(config_store.decode(content, path), path)
+                    context = config_store.context(document)
+                    if context and os.path.lexists(context.install / constants.PORTABLE_CONFIG_NAME):
+                        paths_to_read.add(context.install / constants.PORTABLE_CONFIG_NAME)
+                    target.validate()
+            if runtime_stacks.fingerprint(registry) != old:
+                self._commit(registry)
+
+    def _selection_digests(self, registry, path, content):
+        from . import config_store
+
+        if content is None:
+            return set()
+        document = config_store.canonical(config_store.decode(content, path), path)
+        base = document.get('install_dir') or path.parent
+        binaries = [document.get(key) for key in ('wine_binary', 'WINESERVER_EXE', 'SELECTED_APPIMAGE_FILENAME')]
+        for key in ('CUSTOMBINPATH', 'APPDIR_BINDIR'):
+            if document.get(key):
+                binaries.extend(Path(document[key]) / role for role in artifacts.COMPANIONS)
+        result = set()
+        for binary in filter(None, binaries):
+            selected = config_store.absolute_path(binary, base=base).resolve()
+            for root in registry['stores']:
+                if not selected.is_relative_to(root):
+                    continue
+                inventory = self._inventory(registry, root)
+                for key, copy in inventory['copies'].items():
+                    owned = RunnerStore(root, self.coordination)._copy_path(key, copy)
+                    if copy['state'] == 'published' and selected == owned:
+                        result.add(copy['sha256'])
+                        break
+                else:
+                    raise RunnerError('Profile selects an unrecognized managed runner')
+            if selected.suffix.lower() == '.appimage' and selected.is_file():
+                result.add(artifacts.regular_hash(selected))
+        return result
+
+    @contextmanager
+    def profile_publication(self, targets):
+        """Keep both selections pinned across multi-file publication and directory sync."""
+        if not (os.path.lexists(self.coordination) or os.path.lexists(self.root)):
+            yield
+            return
+        with self._admission():
+            registry = self._registry()
+            for path, previous, proposed in targets:
+                before = self._selection_digests(registry, path, previous)
+                after = self._selection_digests(registry, path, proposed)
+                known = registry['profiles'].get(str(path))
+                if known:
+                    before.update(known['digests'])
+                registry['profiles'][str(path)] = {'state': 'reserved', 'digests': sorted(before | after),
+                                                   'bytes': hashlib.sha256(proposed).hexdigest()}
+            self._commit(registry)
+
+        yield
+        with self._admission():
+            registry = self._registry()
+            for path, _, proposed in targets:
+                binding = registry['profiles'][str(path)]
+                digest = hashlib.sha256(proposed).hexdigest()
+                if binding['bytes'] != digest or artifacts.regular_hash(path) != digest:
+                    raise RunnerError('Profile publication changed. Preserve both runner references')
+                _sync(path.parent)
+                binding.update(state='published', digests=sorted(self._selection_digests(registry, path, proposed)))
+            self._commit(registry)
+
+    def register_existing_profile(self, path, invocation=None):
+        """Observe a selected profile before launch, without rebasing uncertain registrations."""
+        if not (os.path.lexists(self.coordination) or os.path.lexists(self.root)):
+            return
+        from . import config_store
+
+        path = config_store.absolute_path(path)
+        with self._admission():
+            registry = self._registry()
+            with config_store.Target(path) as target:
+                content = target.previous
+                known = registry['profiles'].get(str(path))
+                if content is None:
+                    if known is not None:
+                        raise RunnerError('A registered profile is missing. Preserve its runner references')
+                    return
+                desired = {'state': 'published', 'bytes': hashlib.sha256(content).hexdigest(),
+                           'digests': sorted(self._selection_digests(registry, path, content))}
+                if invocation is not None:
+                    document = config_store.canonical(config_store.decode(content, path), path)
+                    for overlay in (invocation.environment, invocation.runtime_selection):
+                        document = config_store.apply_changes(document, overlay or {}, path)
+                    for attr, field in (('wine_appimage_path', 'SELECTED_APPIMAGE_FILENAME'),
+                                        ('wineserver_binary', 'WINESERVER_EXE'),
+                                        ('custom_binary_path', 'CUSTOMBINPATH'),
+                                        ('installer_binary_dir', 'APPDIR_BINDIR')):
+                        value = getattr(invocation, attr, None)
+                        if value:
+                            document[field] = str(value)
+                    effective = self._selection_digests(registry, path, config_store.encode(document))
+                    if effective - set(desired['digests']):
+                        raise RunnerError('Use guarded apply instead of a one-time managed runner override')
+                if known == desired:
+                    return
+                if known is not None:
+                    raise RunnerError('Registered profile changed. Reconcile its runner references before launch')
+                target.validate()
+                registry['profiles'][str(path)] = desired
+                self._commit(registry)
 
     def remove(self, generation):
         _uuid(generation)
         with self._admission(), maintenance.artifact_use(exclusive=True):
+            self._discover_profiles(None, nullcontext())
             inventory = self._inventory(self._registry())
             copy = inventory["copies"][generation]
             reasons = self.removal_reasons(copy["sha256"])

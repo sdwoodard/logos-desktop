@@ -85,6 +85,58 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(self.store.root.exists())
         self.assertFalse(self.store.coordination.exists())
 
+    def test_profile_replacement_reserves_both_generations_on_interruption(self):
+        self.download()
+        old = self.store.inventory()[0]
+        path = self.root / 'profile.json'
+        previous = json.dumps({'wine_binary': str(old.path)}).encode()
+        path.write_bytes(previous)
+        self.store.register_existing_profile(path)
+        proposed = b'{"wine_binary":"/usr/bin/wine"}'
+        with self.assertRaises(InterruptedError):
+            with self.store.profile_publication([(path, previous, proposed)]):
+                path.write_bytes(proposed)
+                raise InterruptedError
+        reopened = runners.RunnerStore(self.store.root, self.store.coordination)
+        self.assertIn('profile-selection', reopened.removal_reasons(old.sha256))
+        self.assertIn('profile-reconciliation-required', reopened.removal_reasons(old.sha256))
+        with self.assertRaises(runners.RunnerError):
+            reopened.register_existing_profile(path)
+
+    def test_retargeted_runtime_link_blocks_removal_with_unchanged_profile_bytes(self):
+        self.download()
+        copy = self.store.inventory()[0]
+        external = self.root / 'external'
+        external.write_bytes(b'external runtime')
+        link = self.root / 'selected.AppImage'
+        link.symlink_to(external)
+        profile = self.root / 'other-profile.json'
+        profile.write_text(json.dumps({'wine_binary': str(link)}))
+        self.store.register_existing_profile(profile)
+        link.unlink()
+        link.symlink_to(copy.path)
+        with patch.object(runners, 'INTEGRATED_REFERENCE_KINDS', runners.REFERENCE_KINDS):
+            with self.assertRaisesRegex(runners.RunnerError, 'Profile references changed'):
+                self.store.remove(copy.generation)
+        self.assertEqual(self.store.inventory(), (copy,))
+
+    def test_external_cancel_wins_before_publication(self):
+        operation = str(uuid.uuid4())
+        other = runners.RunnerStore(self.store.root, self.store.coordination)
+
+        def acquire(spec, staging, candidates, *, checkpoint, status):
+            process = multiprocessing.get_context('fork').Process(target=other.cancel_download, args=(operation,))
+            process.start()
+            process.join(timeout=5)
+            self.assertEqual(process.exitcode, 0)
+            checkpoint()
+            self.fail('Cancellation was lost')
+
+        with patch.object(artifacts, 'acquire', side_effect=acquire), self.assertRaises(runners.Cancelled):
+            self.store.download(self.runner, operation_id=operation)
+        self.assertEqual(other.operation(operation)['result'], 'cancelled')
+        self.assertEqual(other.inventory(), ())
+
     def test_tamper_and_provider_replacement_never_publish(self):
         with patch.object(artifacts.requests, "get", return_value=response(self.content + b"replacement")):
             with self.assertRaises(artifacts.ArtifactError):
@@ -110,6 +162,8 @@ class RunnerTests(unittest.TestCase):
             retried = self.store.retry(operation, self.runner)
         self.assertEqual(self.store.operation(retried)["result"], "succeeded")
 
+        self.assertEqual(self.store.cancel_download(retried), 'succeeded')
+
         previous = runners.paths.rename_no_replace
 
         def publish(source, target):
@@ -131,10 +185,17 @@ class RunnerTests(unittest.TestCase):
                 self.download()
         self.assertFalse(self.store.inventory())
 
-    def test_removal_disabled_until_all_routes_integrate(self):
+    def test_remove_discovers_other_saved_profile_before_deleting(self):
         self.download()
         copy = self.store.inventory()[0]
-        with self.assertRaisesRegex(runners.RunnerError, "reference-integration-incomplete"):
+        root = self.root / 'config/logos-desktop'
+        root.mkdir(parents=True)
+        (root / 'second.json').write_text(json.dumps({'WINESERVER_EXE': str(copy.path.parent / 'wineserver')}))
+        with patch.object(constants, 'CONFIG_DIR', str(root)):
+            with self.assertRaisesRegex(runners.RunnerError, 'profile-selection'):
+                self.store.remove(copy.generation)
+        root.rename(root.with_name('missing-config'))
+        with self.assertRaisesRegex(runners.RunnerError, 'unavailable'):
             self.store.remove(copy.generation)
         self.assertTrue(copy.path.exists())
 
@@ -143,12 +204,71 @@ class RunnerTests(unittest.TestCase):
         copy = self.store.inventory()[0]
         external = self.root / "external.AppImage"
         external.write_bytes(self.content)
-        with patch.object(runners, "INTEGRATED_REFERENCE_KINDS", runners.REFERENCE_KINDS):
-            operation = self.store.remove(copy.generation)
+        operation = self.store.remove(copy.generation)
         self.assertEqual(self.store.operation(operation)["result"], "succeeded")
         self.assertFalse(copy.path.exists())
         self.assertEqual(external.read_bytes(), self.content)
         self.assertFalse(self.store.inventory())
+
+    def test_legacy_registry_keeps_downloads_until_completeness_is_known(self):
+        commit = self.store._commit
+
+        def legacy_document(registry, *args):
+            registry.pop('profile_roots', None)
+            registry['schema'] = 'runtime-runner-registry-2'
+            commit(registry, *args)
+
+        with patch.object(self.store, '_commit', side_effect=legacy_document):
+            self.download()
+        copy = self.store.inventory()[0]
+        before = (self.store.coordination / 'checkpoint.json').read_bytes()
+        with self.assertRaisesRegex(runners.RunnerError, 'Earlier runner registry'):
+            self.store.remove(copy.generation)
+        self.assertEqual((self.store.coordination / 'checkpoint.json').read_bytes(), before)
+        self.assertEqual(copy.path.read_bytes(), self.content)
+
+    def test_config_publication_and_cross_state_removal_orders(self):
+        from logos_desktop import config_store
+
+        self.enterContext(patch.object(constants, 'DATA_HOME', self.root / 'data'))
+        self.enterContext(patch.object(constants, 'COORDINATION_DIR', self.root / 'stable'))
+        self.store = runners.RunnerStore()
+        self.download()
+        copy = self.store.inventory()[0]
+        profile = self.root / 'profile.json'
+        config_store.save(profile, {'wine_binary': '/usr/bin/wine'})
+
+        def competing_removal():
+            with patch.object(constants, 'STATE_DIR', str(self.root / 'other-state')):
+                try:
+                    self.store.remove(copy.generation)
+                except (runners.RunnerError, maintenance.MaintenanceBusy):
+                    return
+                raise AssertionError('Concurrent removal passed the pending publication')
+
+        def check_competitor():
+            child = multiprocessing.get_context('fork').Process(target=competing_removal)
+            child.start()
+            child.join(timeout=10)
+            self.assertEqual(child.exitcode, 0)
+
+        publish = config_store.Target.publish
+
+        def during_publish(target):
+            if target.path == profile:
+                check_competitor()
+            publish(target)
+
+        with patch.object(config_store.Target, 'publish', during_publish):
+            config_store.save(profile, {'wine_binary': str(copy.path)})
+        self.assertIn('profile-selection', self.store.removal_reasons(copy.sha256))
+        config_store.save(profile, {'wine_binary': '/usr/bin/wine'})
+        with maintenance.artifact_use():
+            check_competitor()
+        self.store.remove(copy.generation)
+        with self.assertRaises(config_store.ConfigurationError):
+            config_store.save(profile, {'wine_binary': str(copy.path)})
+        self.assertEqual(config_store.read_document(profile)[0]['wine_binary'], '/usr/bin/wine')
 
     def test_cross_store_digest_pins_and_changed_owner_block_removal(self):
         self.download()

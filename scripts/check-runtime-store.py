@@ -41,12 +41,10 @@ def main():
             {"role": item.dependency.role, "sha256": item.artifact.sha256, "size": item.artifact.size,
              "file_observations": len(item.files)} for item in prepared.dependencies
         ]
-        assert "reference-integration-incomplete" in store.removal_reasons(copies[0].sha256)
-        # Only this empty, owned fixture models all uses. Application removal remains disabled.
-        with patch.object(runtime_runners, "INTEGRATED_REFERENCE_KINDS", runtime_runners.REFERENCE_KINDS):
-            for copy in copies:
-                store.remove(copy.generation)
-                assert not copy.path.exists()
+        assert not store.removal_reasons(copies[0].sha256)
+        for copy in copies:
+            store.remove(copy.generation)
+            assert not copy.path.exists()
         assert not store.inventory()
         result["unused_fixture_bytes_removed"] = sum(item.size for item in copies)
         content = json.dumps(result, indent=2) + "\n"

@@ -383,6 +383,10 @@ def restored_snapshot(saved, published, current):
     raise maintenance.RecoveryRequired("Later runtime link conflicts with complete return")
 
 
+RETURN_PHASES = ('return-staging', 'return-ready', 'resume-pending', 'withdraw-intent', 'withdrawn',
+                 'publish-intent', 'published', 'config-pending')
+
+
 def publish_snapshot(expected, proposed):
     path = Path(expected["path"])
     if proposed["path"] != expected["path"] or snapshot(path) != expected:
@@ -758,7 +762,7 @@ class Recovery:
         }
 
     def apply(self, app, prepared, *, store, generation, host, capability=None,
-              without_successful_trial=False, experimental=False):
+              without_successful_trial=False, experimental=False, trial_id=None, observations=None):
         """Apply accepted inputs to the original only after fresh old-stack proof."""
         from . import compatibility, runtime, runtime_recipes
 
@@ -806,9 +810,11 @@ class Recovery:
                 raise maintenance.RecoveryRequired("Inspect an unmodified old-prefix copy before applying")
             self.verify_capability(proof, point)
             if without_successful_trial is not True:
-                raise maintenance.RecoveryRequired(
-                    "This apply service requires the explicit apply-without-successful-trial choice"
-                )
+                if trial_id is None:
+                    raise maintenance.RecoveryRequired(
+                        'Confirm the trial checklist or make the explicit apply-without-successful-trial choice')
+                runtime_trials.require_successful_trial(
+                    self.context, prepared, generation, point['preimages'][0]['path'], current, trial_id, observations)
             observed = runtime_recipes.observe_prefix_settings(self.context.prefix)
             prospective_settings = dict(observed)
             # Initialize only a missing global version. Existing overrides must match.
@@ -1193,14 +1199,25 @@ class Recovery:
                 raise maintenance.RecoveryRequired("Published prefix bytes changed before configuration settlement")
             sync(prefix.parent)
             self.phase(journal, "config-pending")
+            profiles = {entry['path'] for entry in point['preimages'][:2]}
+            reservations = []
             for publication in journal["configs"]:
-                current = snapshot(publication["previous"]["path"])
-                if current == publication["next"]:
-                    sync(Path(publication["next"]["path"]).parent)
-                    continue
-                self.checkpoint("before-config:" + publication["previous"]["path"])
-                publish_snapshot(publication["previous"], publication["next"])
-                self.checkpoint("after-config:" + publication["previous"]["path"])
+                before, after = publication['previous'], publication['next']
+                current = snapshot(before['path'])
+                if current not in (before, after):
+                    raise maintenance.RecoveryRequired('Later configuration preserved. Recheck complete return')
+                if before['path'] in profiles:
+                    reservations.append((Path(before['path']), base64.b64decode(before['content'], validate=True),
+                                         base64.b64decode(after['content'], validate=True)))
+            with runtime_runners.RunnerStore().profile_publication(reservations):
+                for publication in journal['configs']:
+                    before, after = publication['previous'], publication['next']
+                    if snapshot(before['path']) == after:
+                        sync(Path(after['path']).parent)
+                        continue
+                    self.checkpoint('before-config:' + before['path'])
+                    publish_snapshot(before, after)
+                    self.checkpoint('after-config:' + before['path'])
             from . import runtime
 
             activation = journal["activation"]
@@ -1221,20 +1238,26 @@ class Recovery:
                 raise maintenance.RecoveryRequired("Complete return configuration did not settle coherently")
             self.phase(journal, "returned", result="succeeded", reason="offline-inspection-required")
 
-    def reconcile_return(self):
+    def reconcile_return(self, confirmation=None):
         with self.admitted():
             journal = self.status()
-            if journal["phase"] not in ("return-staging", "return-ready", "resume-pending",
-                                         "withdraw-intent", "withdrawn", "publish-intent",
-                                         "published", "config-pending"):
+            if confirmation is not None and confirmation != self.return_confirmation():
+                raise maintenance.RecoveryRequired('Return confirmation no longer matches this recovery point')
+            if journal["phase"] not in RETURN_PHASES:
                 raise maintenance.RecoveryRequired("No admitted return publication can be reconciled")
             self._finish_return(journal, self.verify_point(journal["point"]))
 
-    def keep_current(self):
+    def keep_current(self, *, expected_revision=None):
         with self.admitted():
             journal = self.status()
             if journal["phase"] not in ("preparing", "point-verified"):
                 raise maintenance.RecoveryRequired("Original mutation may have started. Use complete return")
+            if expected_revision is not None and expected_revision != journal['revision']:
+                raise maintenance.RecoveryRequired('Recovery changed after confirmation')
+            for directory in self.root.glob('inspection-*'):
+                inspection = self.inspection_record(directory.name.removeprefix('inspection-'))
+                if inspection['result'] != 'succeeded':
+                    raise maintenance.RecoveryRequired('Inspection ownership is uncertain. Preserve its guard and pins')
             if journal["point"] is not None:
                 point = self.verify_point(journal["point"])
                 current = runtime_copies.manifest(self.context.prefix)

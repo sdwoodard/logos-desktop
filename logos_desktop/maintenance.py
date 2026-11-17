@@ -100,6 +100,22 @@ _configuration_users: dict[int, int] = {}
 @contextmanager
 def artifact_use(*, exclusive=False):
     """Protect immutable stores from removal, including shared cross-prefix cache."""
+    from .instance import _directory
+
+    directory = _directory(Path(constants.COORDINATION_DIR) / 'artifact-locks')
+    try:
+        stable = _operation_lock(directory, 'usage.lock', exclusive=exclusive)
+    finally:
+        os.close(directory)
+    try:
+        with _local_artifact_use(exclusive=exclusive):
+            yield
+    finally:
+        os.close(stable)
+
+
+@contextmanager
+def _local_artifact_use(*, exclusive):
     root = private_directory(Path(constants.STATE_DIR).expanduser().parent / "logos-desktop/artifact-locks")
     descriptor = os.open(root / "usage.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:

@@ -58,8 +58,15 @@ def normal_graphical_start(args):
 
 def dispatch(args):
     """Return an exit status, or None when normal startup should continue."""
+    from . import runtime_commands
+
+    runtime_action = runtime_commands.selected(args)
+    if getattr(args, 'without_successful_trial', False) and runtime_action != 'apply':
+        raise maintenance.MaintenanceError('--without-successful-trial requires --runtime-apply')
+    if getattr(args, 'json', False) and not runtime_action:
+        raise maintenance.MaintenanceError('--json requires a read-only runtime command')
     selected = any((args.doctor, args.update_status, args.list_backups,
-                    args.restore_snapshot, args.support_preview, args.support_export))
+                    args.restore_snapshot, args.support_preview, args.support_export, runtime_action))
     if (args.confirm_export or args.overwrite_export) and not args.support_export:
         raise maintenance.MaintenanceError("Export confirmation options require --support-export PATH")
     if not selected:
@@ -77,6 +84,8 @@ def dispatch(args):
             "Configuration is missing. Set up Logos or select a saved profile with --config"
         )
     conf = configuration(path)
+    if runtime_action:
+        return runtime_commands.dispatch(runtime_action, args, conf)
     app = SimpleNamespace(conf=conf)
     if args.doctor:
         report = doctor.inspect(conf)

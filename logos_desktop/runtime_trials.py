@@ -215,7 +215,7 @@ def worker_status(private, child, logical_prefix, copied, receipt, operation_id)
 
 
 def request(directory, action):
-    if action not in ("status", "cancel", "stop"):
+    if action not in ("status", "cancel", "stop", "restart"):
         raise ValueError("Unknown trial command")
     directory = runtime_copies.checked_directory(directory)
     record = status(directory)
@@ -235,6 +235,88 @@ def request(directory, action):
         peer.sendall(runtime_stacks.canonical({"action": action, "capability": capability}) + b"\n")
         response = peer.makefile("rb").readline(MAX_RECORD + 1)
     return runtime_stacks.decode(response, MAX_RECORD)
+
+
+def _lookup_root(context):
+    key = hashlib.sha256(os.fsencode(context.prefix.resolve())).hexdigest()
+    return Path(constants.COORDINATION_DIR) / 'trials' / key
+
+
+def register_operation(context, directory, job_hash):
+    root = maintenance.private_directory(_lookup_root(context))
+    registration = {'id': directory.name, 'directory': str(directory), 'job_sha256': job_hash}
+    write(root / (directory.name + '.json'), registration)
+    write(root / 'latest.json', registration)
+
+
+def selected_operation(context, operation_id=None, *, action='status'):
+    """Locate the selected source's trial without acquiring its supervisor's lease."""
+    if action not in ('status', 'stop', 'restart'):
+        raise ValueError('Unsupported reconnect action')
+    if operation_id is not None:
+        endpoint(operation_id)
+    root = runtime_copies.checked_directory(_lookup_root(context))
+    registration = read(root / ((operation_id or 'latest') + '.json'))
+    runtime_stacks.fields(registration, 'id directory job_sha256')
+    directory = runtime_copies.checked_directory(registration['directory'])
+    record = status(directory)
+    if (registration['id'] != record['id'] or directory.name != record['id']
+            or (operation_id is not None and operation_id != record['id'])
+            or registration['job_sha256'] != record['job_sha256'] or record['source'] != str(context.prefix)):
+        raise maintenance.RecoveryRequired('Trial registration does not match the selected source')
+    if record['phase'] == 'ended' or (record['phase'] == 'conflict' and (
+            action == 'status' or record['reason'] == 'supervisor-unavailable')):
+        return record
+    if record['copy'] and not runtime_copies.runtime_filesystem.same_live_root(
+            record['copy']['source'], context.prefix):
+        raise maintenance.RecoveryRequired('Selected trial source was replaced. Preserve the reservation')
+    try:
+        reply = request(directory, action)
+    except (OSError, maintenance.RecoveryRequired):
+        record = status(directory)
+        if record['phase'] in ('ended', 'conflict'):
+            return record
+        raise maintenance.RecoveryRequired(
+            'Trial owner did not acknowledge. Preserve the reservation and retry') from None
+    if (reply['id'], reply['supervisor'], reply['job_sha256']) != (
+            record['id'], record['supervisor'], record['job_sha256']):
+        raise maintenance.RecoveryRequired('Trial owner returned a different operation')
+    return reply
+
+
+def startup_status(prefix):
+    if prefix is None:
+        return None
+    context = maintenance.Context(Path(prefix))
+    if not os.path.lexists(_lookup_root(context) / 'latest.json'):
+        return None
+    return selected_operation(context)
+
+
+def require_successful_trial(context, prepared, generation, profile, current, operation, observations):
+    """Validate the latest trial and the user's observations under apply admission."""
+    record = selected_operation(context)
+    if record['result'] != 'succeeded' or record['id'] != operation:
+        raise maintenance.RecoveryRequired('The latest trial did not pass for this installation')
+    registration = read(_lookup_root(context) / (record['id'] + '.json'))
+    directory = runtime_copies.checked_directory(registration['directory'])
+    job = read(directory / 'job.json')
+    if (directory.name != record['id'] or job['id'] != operation
+            or hashlib.sha256(runtime_stacks.canonical(job)).hexdigest() != record['job_sha256']
+            or job['profile'] != profile_snapshot(profile) or job['generation'] != generation
+            or job['sha256'] != prepared.runner.sha256 or job['accepted']['stack'] != prepared.stack.id
+            or job['accepted']['catalog'] != prepared.catalog_sha256
+            or job['accepted']['recipe'] != prepared.recipe.sha256
+            or record['copy']['manifest']['sha256'] != current.sha256
+            or record['copy']['manifest']['observation_sha256'] != current.observation_sha256
+            or not runtime_copies.runtime_filesystem.same_live_root(record['copy']['source'], context.prefix)):
+        raise maintenance.RecoveryRequired('Trial inputs or original installation changed. Run a fresh trial')
+    restart = read(directory / 'restart.json')
+    if restart != {'id': operation, 'job_sha256': record['job_sha256']}:
+        raise maintenance.RecoveryRequired('No verified offline restart for this trial')
+    runtime_stacks.fields(observations, 'library search typing scrolling restart')
+    if not all(value is True for value in observations.values()):
+        raise maintenance.RecoveryRequired('Trial checklist is incomplete')
 
 
 def endpoint(operation_id):
@@ -639,12 +721,14 @@ def supervise(directory, capability):
                     record["cancel_requested"] = True
                     write(directory / "private/request.json", {"action": "stop"})
                     publish("ending")
+                elif command.get("action") == "restart" and record["phase"] == "running":
+                    write(directory / "private/request.json", {"action": "restart"})
                 elif command.get("action") == "stop" and child is not None:
                     if not record["running_acknowledged"]:
                         namespace_cancelled = True
                         record["cancel_requested"] = True
                     write(directory / "private/request.json", {"action": "stop"})
-                    if record["worker"] is not None:
+                    if record["worker"] is not None and record["phase"] != "conflict":
                         publish("ending")
                 if command.get("action") in ("cancel", "stop"):
                     publish(record["phase"], record["result"], record["reason"])
@@ -659,6 +743,7 @@ def supervise(directory, capability):
     baseline_identity = None
     with listener, maintenance.Lease(context, exclusive=True, prefix_only=True).entered():
         try:
+            register_operation(context, directory, record['job_sha256'])
             publish("resolved", reason="owned-inspection")
             maintenance.assert_quiescent(context, controller=job["controller"])
             boundary = runtime_boundary.inspect((context.install, Path(job["profile"]["path"])), checkpoint=checkpoint)
@@ -706,6 +791,7 @@ def supervise(directory, capability):
                     if artifacts.regular_hash(item["path"]) != item["sha256"]:
                         raise maintenance.RecoveryRequired("Trial dependency changed")
                 write(private / "job.json", {"id": job["id"], "executable": job["executable"],
+                                             "allow_restart": True,
                                              "resource_uri": job["resource_uri"],
                                              "registry": registry_plan(job["settings"]),
                                              "dependencies": job["accepted"]["dependencies"]})
@@ -776,6 +862,9 @@ def supervise(directory, capability):
                     while child.poll() is None:
                         checkpoint()
                         value = worker_status(private, child, context.prefix, directory / "prefix", receipt, job["id"])
+                        if (value['phase'] == 'running' and re.fullmatch(r'restart-[1-9][0-9]*', value['reason'])
+                                and not (directory / 'restart.json').exists()):
+                            write(directory / 'restart.json', {'id': job['id'], 'job_sha256': record['job_sha256']})
                         if value["phase"] == "ended":
                             record["worker"] = value
                             write(private / "request.json", {"action": "settle"})

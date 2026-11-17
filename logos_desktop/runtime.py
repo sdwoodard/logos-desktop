@@ -309,6 +309,13 @@ def activate(app, accepted, *, managed=False, before_publish=None):
     if not managed:
         wine.require_compatible(app, accepted.path)
     with activation_guard(app, exclusive=True) as context, configuration_lock():
+        if not managed:
+            from . import utils
+
+            if utils.find_installed_product(context.product, str(context.prefix)):
+                selected = Path(conf.install_dir) / 'data/bin/selected_wine.AppImage'
+                if selected.resolve() != accepted.path:
+                    raise maintenance.RecoveryRequired('Changing an installed runtime requires guarded runtime apply')
         _recover_locked(app, context)
         links, configs = _targets(app)
         for path in (*links, *configs):
@@ -330,7 +337,7 @@ def activate(app, accepted, *, managed=False, before_publish=None):
         with config_store.prepare(
             destination, changes, source_path=source, source_bytes=getattr(conf._raw, "_file_bytes", None),
             expected=getattr(conf._raw, "_saved", None),
-            validator=getattr(conf, "write_validator", None),
+            validator=getattr(conf, "write_validator", None), identical_profiles=True,
         ) as prepared:
             auxiliary = {target.path for target, _, _ in prepared.backups}
             if auxiliary.intersection(links):

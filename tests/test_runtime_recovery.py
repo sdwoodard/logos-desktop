@@ -148,7 +148,9 @@ class RecoveryTests(unittest.TestCase):
         self.assert_blocked()
 
     def test_interruption_after_prefix_withdrawal_recovers_both_generations(self):
-        self.capture()
+        from logos_desktop import commands, runtime_commands
+
+        point = self.capture()
         (self.prefix / "database").write_text("new work")
         fired = False
 
@@ -164,7 +166,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.prefix.exists())
         self.assert_blocked()
         reopened = recovery.Recovery(self.context)
-        reopened.reconcile_return()
+        conf = commands.configuration(self.profile, environment={})
+        with patch.object(constants, 'STATE_DIR', str(self.root / 'other-state')):
+            status = runtime_commands.execute('recovery_status', point, conf)
+            self.assertIn('return', status['next_actions'])
+            runtime_commands.execute('return', point, conf, confirm=lambda _: 'return ' + point)
         self.assertEqual((self.prefix / "database").read_text(), "old complete bytes")
         self.assertEqual((Path(reopened.status()["newer"]) / "database").read_text(), "new work")
         self.assert_blocked()
@@ -328,6 +334,76 @@ class RecoveryTests(unittest.TestCase):
             "[" + section + "] 123\n" + "\n".join(values) for section, values in sections.items()
         ) + "\n"
         (prefix / "user.reg").write_text(content)
+
+    def test_default_store_rebinds_both_profiles_after_interrupted_cli_return(self):
+        self.enterContext(patch.object(constants, 'DATA_HOME', self.root / 'shared-data'))
+        original = self.runner
+        old_runner = replace(next(iter(runtime_stacks.bundled().runners.values())),
+                             sha256=original.sha256, size=original.size)
+        self.store = runtime_runners.RunnerStore()
+        self.store.download(old_runner, candidates=(original.path,))
+        self.runner = self.store.inventory()[0]
+        self.document['wine_binary'] = str(self.runner.path)
+        self.links[0].unlink()
+        self.links[0].symlink_to(self.runner.path)
+        prepared, target = self.distinct_prepared_fixture()
+        service = self.case_service('default-return', product_build='54.3.0.5', settings=dict(prepared.recipe.settings))
+        profile = service.root.parent / 'profile.json'
+        portable = service.context.install / constants.PORTABLE_CONFIG_NAME
+        self.store.discover_profiles(profile)
+        journal = service.status()
+        point = journal['point']
+        journal['capability'] = {'id': '00000000-0000-0000-0000-000000000001', 'sha256': 'a' * 64}
+        service.phase(journal, 'point-verified', result='succeeded')
+        with patch.object(service, 'verify_capability'), patch.object(service, '_run_recipe'):
+            service.apply(self.app_fixture(service), prepared, store=self.store, generation=target.generation,
+                          host={'architecture': 'x86_64', 'font-arial': 'present'}, without_successful_trial=True)
+        for path in (profile, portable):
+            self.assertIn(target.sha256, self.store._registry()['profiles'][str(path)]['digests'])
+        (service.context.prefix / 'newer-work').write_text('preserve')
+
+        def interrupt(boundary):
+            if boundary == 'after-config:' + str(profile):
+                raise InterruptedError
+
+        service.checkpoint = interrupt
+        with self.assertRaises(InterruptedError):
+            service.return_prefix(service.return_confirmation())
+        for path in (profile, portable):
+            binding = self.store._registry()['profiles'][str(path)]
+            self.assertEqual(binding['state'], 'reserved')
+            self.assertEqual(set(binding['digests']), {target.sha256, self.runner.sha256})
+
+        program = '''import os, sys
+from pathlib import Path
+from logos_desktop import constants, main, runtime_filesystem
+root, profile, point = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+constants.COORDINATION_DIR = root / 'coordination'
+constants.DATA_HOME = root / 'shared-data'
+def filesystem(path):
+    return dict(runtime_filesystem.live_identity(path), filesystem_uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                filesystem_root=str(path))
+runtime_filesystem.identity = filesystem
+sys.argv = ['logos-desktop', '-c', profile, '--runtime-return', point]
+try:
+    main.main()
+finally:
+    assert not any(module.startswith('PySide') for module in sys.modules)
+'''
+        env = dict(os.environ, XDG_STATE_HOME=str(self.root / 'other-state'))
+        env.pop('DISPLAY', None)
+        env.pop('WAYLAND_DISPLAY', None)
+        result = subprocess.run([sys.executable, '-B', '-c', program, str(self.root), str(profile), point],
+                                input=f'return {point}\n', env=env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in (profile, portable):
+            self.store.register_existing_profile(path)
+            binding = self.store._registry()['profiles'][str(path)]
+            self.assertEqual(binding['state'], 'published')
+            self.assertEqual(binding['bytes'], artifacts.regular_hash(path))
+            self.assertEqual(binding['digests'], [self.runner.sha256])
+        self.assertEqual(service.status()['gate'], 'online-resume-pending')
+        self.assertEqual((Path(service.status()['newer']) / 'newer-work').read_text(), 'preserve')
 
     def prepared_fixture(self):
         catalog = runtime_stacks.bundled()
@@ -556,6 +632,26 @@ class RecoveryTests(unittest.TestCase):
                 boundary, source=self.prefix, copied=self.prefix, private=self.root / "private",
                 runner=self.runner.path, worker=Path(recovery.runtime_trials.__file__), mode="apply",
             )
+
+    def test_explicit_skip_cannot_bypass_capability_or_known_affected_decision(self):
+        prepared, target = self.distinct_prepared_fixture()
+        service = self.case_service('skip-policy', product_build='54.3.0.5', settings=dict(prepared.recipe.settings))
+        host = {'architecture': 'x86_64', 'font-arial': 'present'}
+        inputs = dict(store=self.store, generation=target.generation, host=host, without_successful_trial=True)
+        with patch.object(runtime, 'activate') as activate:
+            with self.assertRaisesRegex(maintenance.RecoveryRequired, 'Inspect an unmodified'):
+                service.apply(self.app_fixture(service), prepared, **inputs)
+            journal = service.status()
+            journal['capability'] = {'id': '00000000-0000-0000-0000-000000000001', 'sha256': 'a' * 64}
+            service.phase(journal, 'point-verified', result='succeeded')
+            denied = runtime_stacks.Assessment('known-affected', 'cached', 'known-affected', False)
+            with (patch.object(service, 'verify_capability') as verify,
+                  patch.object(runtime_stacks, 'assess', return_value=denied),
+                  self.assertRaisesRegex(maintenance.RecoveryRequired, 'known-affected')):
+                service.apply(self.app_fixture(service), prepared, experimental=True, **inputs)
+            verify.assert_called_once()
+            activate.assert_not_called()
+            self.assertEqual(service.status()['phase'], 'point-verified')
 
     def test_replaced_original_root_refuses_apply_even_when_complete_bytes_match(self):
         prepared, target = self.distinct_prepared_fixture()

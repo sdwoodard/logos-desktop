@@ -331,7 +331,7 @@ def _restore_fields(stored, previous, published):
 
 @contextmanager
 def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None,
-            restoration=None):
+            restoration=None, identical_profiles=False):
     """Share input validation and destination ownership with runtime activation."""
     path = absolute_path(path)
     source_path = absolute_path(source_path) if source_path is not None else path
@@ -370,6 +370,17 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
             if portable != path:
                 targets.append(stack.enter_context(Target(portable)))
 
+            if restoration is None:
+                from . import runtime_recovery, utils
+
+                destination, selection = selection_identity(resolved)
+                established = [canonical(decode(t.previous, t.path), t.path) for t in targets if t.previous]
+                previous = [selection_identity(doc)[1] for doc in established if context(doc) == destination]
+                if (not previous or any(identity != selection for identity in previous)) and (
+                        not runtime_recovery.operation_owned(destination)
+                        and utils.find_installed_product('Logos', str(destination.prefix))):
+                    raise maintenance.RecoveryRequired('Changing an installed runtime requires guarded runtime apply')
+
         # Reserve every pathname before publishing even an auxiliary snapshot.
         roles = [target.path for target in targets]
         if source is not None:
@@ -389,6 +400,7 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
             raise ConfigurationError("Configuration destinations conflict with source or recovery-copy paths")
         backups = [(stack.enter_context(Target(path)), value, immutable) for path, value, immutable in backup_specs]
         prepared = Prepared(document, content, targets, backups, source, stored, conflicts)
+        publications = []
         for target in targets:
             target_content = content
             if target is not primary:
@@ -400,7 +412,11 @@ def prepare(path, changes, *, source_path=None, source_bytes=None, overrides=Non
                         portable_document[name] = str(absolute_path(value, base=path.parent))
                 target_content = encode(portable_document)
             target.stage(target_content)
-        yield prepared
+            publications.append((target.path, target.previous, content if identical_profiles else target_content))
+        from . import runtime_runners
+
+        with runtime_runners.RunnerStore().profile_publication(publications):
+            yield prepared
 
 
 def save(path, changes, *, source_path=None, source_bytes=None, overrides=None, expected=None, validator=None,

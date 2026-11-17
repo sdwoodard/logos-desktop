@@ -12,6 +12,7 @@ from logos_desktop.config import (
 import logging
 import os
 import sys
+from pathlib import Path
 import threading
 
 from . import cli
@@ -114,6 +115,9 @@ def get_parser():
         ),
     )
     cmd = grp.add_mutually_exclusive_group()
+    from . import runtime_commands
+
+    runtime_commands.arguments(cmd, cfg)
     cmd.add_argument('--doctor', action='store_true', help='inspect stored configuration without repairs')
     cmd.add_argument('--update-status', action='store_true', help='inspect stable product update availability')
     cmd.add_argument('--check-controller-updates', action='store_true',
@@ -592,6 +596,9 @@ def main():
     session = None
     try:
         if is_url_request(args.wine):
+            from . import runtime_runners
+
+            runtime_runners.RunnerStore().register_existing_profile(ephemeral_config.config_path, ephemeral_config)
             run_url_request(ephemeral_config)
             return
         if not diagnostic:
@@ -608,6 +615,17 @@ def main():
                     return
                 raise
             ephemeral_config._instance_session = session
+            from . import runtime_runners
+
+            if isinstance(ephemeral_config.config_path, (str, Path)):
+                runtime_runners.RunnerStore().register_existing_profile(ephemeral_config.config_path, ephemeral_config)
+            if action is run_control_panel and isinstance(session.prefix, Path):
+                from . import runtime_trials
+
+                connected = runtime_trials.startup_status(session.prefix)
+                if connected and connected['phase'] != 'ended':
+                    print(f"Offline trial {connected['id']}: {connected['phase']}. "
+                          "Use --runtime-trial-status to inspect it.", file=sys.stderr)
             if args.update_self:
                 session.close()
                 run_controller_update(args)
