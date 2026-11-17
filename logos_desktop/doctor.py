@@ -135,11 +135,21 @@ def inspect(conf):
     if install is not None and prefix is not None and install.is_absolute() and prefix.is_absolute():
         try:
             context = maintenance.Context(prefix.resolve(), install.resolve())
-            recovery = "pending" if context.needs_recovery() or runtime.pending(install) else "clear"
+            recovery = "pending" if context.needs_recovery() or runtime.pending(install) else "unknown"
+            from . import runtime_recovery
+
+            try:
+                runtime_recovery.check_admission(context)
+            except maintenance.RecoveryRequired:
+                recovery = "pending"
+            else:
+                if recovery != "pending":
+                    recovery = "clear"
         except (OSError, ValueError, RuntimeError):
             pass
     add("recovery", "warning" if recovery == "pending" else "ok" if recovery == "clear" else "unknown",
-        "Pending recovery. Use explicit repair before mutation." if recovery == "pending" else
+        "Pending recovery. Inspect recovery status with a matching controller before mutation."
+        if recovery == "pending" else
         "No pending recovery record found." if recovery == "clear" else "Recovery state is unknown.")
 
     # Process environments are inspected only for prefix equality and never retained.

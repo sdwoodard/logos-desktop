@@ -40,8 +40,8 @@
       "source_revision": null,
       "packaging_revision": "github-asset-697402869",
       "companions": [
-        {"role": "wine", "alias": "wine", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (staging)"},
-        {"role": "wine64", "alias": "wine64", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (staging)"},
+        {"role": "wine", "alias": "wine", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (Staging)"},
+        {"role": "wine64", "alias": "wine64", "parser": "wine-numeric-v1", "expected_output": "wine-11.21 (Staging)"},
         {"role": "wineserver", "alias": "wineserver", "parser": "wineserver-numeric-v1", "expected_output": "Wine 11.21"}
       ]
     }

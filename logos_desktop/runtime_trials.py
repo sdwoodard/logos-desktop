@@ -260,6 +260,8 @@ def profile_snapshot(path):
     document = config_store.canonical(config_store.decode(content, path), path)
     install = document.get("install_dir")
     prefix = document.get("WINEPREFIX") or (str(Path(install) / "data/wine64_bottle") if install else None)
+    if prefix is not None:
+        prefix = str(config_store.absolute_path(prefix, base=install or path.parent))
     return {"path": str(path), "sha256": hashlib.sha256(content).hexdigest(),
             "install": install, "prefix": prefix, "product": document.get("faithlife_product")}
 

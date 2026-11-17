@@ -34,21 +34,26 @@ def cancelled():
     return _stopping.is_set() or (cancel is not None and cancel.is_set())
 
 
-def capture(arguments, *, env, timeout, limit, label):
+def capture(arguments, *, env, timeout, limit, label, separate=False):
     deadline = time.monotonic() + timeout
     with _admission:
         if cancelled():
             raise CaptureError(f"{label} cancelled")
         try:
             process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, env=env, start_new_session=True)
+                                       stderr=subprocess.PIPE if separate else subprocess.STDOUT,
+                                       env=env, close_fds=True, start_new_session=True)
         except OSError as error:
             raise CaptureError(f"Could not start {label} ({type(error).__name__})") from None
         done = _active[process] = threading.Event()
     output = bytearray()
+    errors = bytearray()
+    total = 0
     try:
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stdout, selectors.EVENT_READ, output)
+            if separate:
+                selector.register(process.stderr, selectors.EVENT_READ, errors)
             while selector.get_map():
                 if cancelled():
                     raise CaptureError(f"{label} cancelled")
@@ -60,8 +65,9 @@ def capture(arguments, *, env, timeout, limit, label):
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
-                    output.extend(chunk)
-                    if len(output) > limit:
+                    key.data.extend(chunk)
+                    total += len(chunk)
+                    if total > limit:
                         raise CaptureError(f"{label} exceeded its output limit")
         while process.poll() is None:
             if cancelled():
@@ -73,6 +79,8 @@ def capture(arguments, *, env, timeout, limit, label):
                 process.wait(timeout=min(0.1, remaining))
             except subprocess.TimeoutExpired:
                 continue
+        if separate:
+            return bytes(output), bytes(errors), process.returncode
         return bytes(output), process.returncode
     except subprocess.SubprocessError as error:
         raise CaptureError(f"{label} did not complete ({type(error).__name__})") from None
@@ -83,6 +91,8 @@ def capture(arguments, *, env, timeout, limit, label):
             pass
         process.wait()
         process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
         with _admission:
             _active.pop(process, None)
             done.set()

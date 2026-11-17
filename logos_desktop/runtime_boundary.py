@@ -182,10 +182,24 @@ def prepare_private(directory, *, wine_user=None):
     )
 
 
-def command(boundary, *, source, copied, private, runner, worker, dependencies=(), wine_user=None, check=False):
+def command(boundary, *, source, copied, private, runner, worker, dependencies=(), wine_user=None, check=False,
+            mode="trial"):
     source, copied, private, runner, worker = map(Path, (source, copied, private, runner, worker))
+    if mode not in ("trial", "apply"):
+        raise Unavailable("Unknown offline execution purpose")
+    if mode == "apply":
+        from . import maintenance, runtime_recovery
+
+        context = maintenance.current_context()
+        if (context is None or not maintenance.installation_owned() or context.prefix != source or copied != source
+                or not runtime_recovery.operation_owned(context)
+                or runtime_recovery.Recovery(context).status()["phase"] != "recipe-pending"):
+            raise Unavailable("Original-prefix recipe execution needs its complete recovery owner")
+        runtime_recovery.Recovery(context).original_prefix_identity()
     for original in (source,):
-        for exposed in (copied, private, runner, worker):
+        for position, exposed in enumerate((copied, private, runner, worker)):
+            if mode == "apply" and position == 0:
+                continue
             if not paths.disjoint(original, exposed):
                 raise Unavailable("Trial mount overlaps original data", "unsupported-system-overlap")
     for path, digest in boundary.dependencies:
@@ -239,6 +253,8 @@ def command(boundary, *, source, copied, private, runner, worker, dependencies=(
     arguments.extend(["--chdir", "/trial", "--", "/usr/bin/python3", "-I", "/worker.py"])
     if check:
         arguments.append("--check")
+    elif mode == "apply":
+        arguments.append("--apply")
     return arguments
 
 

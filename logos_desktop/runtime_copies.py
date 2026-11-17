@@ -245,7 +245,8 @@ def _restore_metadata(descriptor, item):
     os.utime(descriptor, ns=(item["mtime_ns"], item["mtime_ns"]))
 
 
-def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: None, reflink=True):
+def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: None, reflink=True,
+         logical_root=None):
     """Publish only a verified independent copy, preserving failures for owned cleanup."""
     source = checked_directory(source)
     if not Path(destination).is_absolute() or ".." in Path(destination).parts:
@@ -260,7 +261,8 @@ def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: N
                        filesystem_root=str(Path(parent_identity["filesystem_root"]) / destination.name))
     if not physical_disjoint(source_identity, prospective):
         raise CopyError("Physical copy paths overlap through a filesystem alias")
-    before = manifest(source, checkpoint=checkpoint)
+    logical_root = source if logical_root is None else Path(logical_root)
+    before = manifest(source, checkpoint=checkpoint, logical_root=logical_root)
     require_capacity(parent, before.logical_bytes, before.entries)
     manifest_staging = destination.with_name(destination.name + ".manifest.partial")
     staging = destination.with_name(destination.name + ".partial")
@@ -276,7 +278,7 @@ def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: N
         manifest_fd = os.open(manifest_staging.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                               0o600, dir_fd=publication_fd)
         with os.fdopen(manifest_fd, "wb") as output:
-            recorded = manifest(source, output, checkpoint=checkpoint)
+            recorded = manifest(source, output, checkpoint=checkpoint, logical_root=logical_root)
             output.flush()
             os.fsync(output.fileno())
         if recorded != before or recorded.observation_sha256 != before.observation_sha256:
@@ -287,7 +289,7 @@ def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: N
         target_info = os.fstat(target_fd)
         source_fd = _open_root(source)
         owned.callback(os.close, source_fd)
-        for item in entries(source, checkpoint=checkpoint, observe=True):
+        for item in entries(source, checkpoint=checkpoint, logical_root=logical_root, observe=True):
             expected = item.pop("observation")
             item.pop("allocated")
             checkpoint()
@@ -373,8 +375,8 @@ def copy(source, destination, *, checkpoint=lambda: None, status=lambda value: N
                 or (parent_info.st_dev, parent_info.st_ino) != (publication_info.st_dev, publication_info.st_ino)):
             raise CopyError("Copy destination identity changed", "destination-changed")
         status({"phase": "verifying", "bytes": copied_bytes, "total": before.logical_bytes})
-        copied = manifest(staging, checkpoint=checkpoint, logical_root=source)
-        after = manifest(source, checkpoint=checkpoint)
+        copied = manifest(staging, checkpoint=checkpoint, logical_root=logical_root)
+        after = manifest(source, checkpoint=checkpoint, logical_root=logical_root)
         if (before != copied or before != after or before.observation_sha256 != after.observation_sha256
                 or not runtime_filesystem.same_retained_root(source_identity, layout(source))):
             raise CopyError("Source or copied contents changed", "source-changed")

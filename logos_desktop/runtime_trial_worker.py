@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -53,7 +54,7 @@ def children():
                 fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
                 if fields[0] != "Z":
                     processes[int(path.name)] = int(fields[1])
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 pass
     owned = {os.getpid()}
     while True:
@@ -224,11 +225,11 @@ def registry_value(path, name, kind):
     if result.returncode == 1:
         return None
     if result.returncode or len(text) > 16384:
-        raise RuntimeError("Copied recipe observation failed")
+        raise RuntimeError("Recipe observation failed")
     pattern = r"\s{4}" + re.escape(name) + r"\s{4}" + kind + r"(?:\s{4}(.*))?"
     values = [match.group(1) or "" for line in text.splitlines() if (match := re.fullmatch(pattern, line))]
     if len(values) != 1:
-        raise RuntimeError("Copied recipe observation has unexpected type")
+        raise RuntimeError("Recipe observation has unexpected type")
     return int(values[0], 0) if kind == "REG_DWORD" else values[0]
 
 
@@ -260,9 +261,32 @@ def application_pids(pids, name):
         try:
             if Path(f"/proc/{pid}/comm").read_text().strip().lower() == name:
                 result.add(pid)
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             pass
     return result
+
+
+def live_applications(owned, name, observed):
+    """Retain observed application lifetimes even after unmapping or comm changes."""
+    for pid in application_pids(owned, name):
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            observed.add((pid, int(fields[19])))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    if len(observed) > 4096:
+        raise RuntimeError("Application lifetime inventory exceeds its bound")
+    active = set()
+    for pid, start_ticks in observed:
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if int(fields[19]) == start_ticks and fields[0] != "Z":
+            if pid not in owned:
+                raise RuntimeError("A live application left the owned process tree")
+            active.add(pid)
+    return active
 
 
 def prepare(job):
@@ -305,7 +329,7 @@ def prepare(job):
                 destination = prefix / "drive_c/windows" / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if not destination.parent.resolve().is_relative_to(prefix.resolve()):
-                    raise RuntimeError("Copied ICU target escapes prefix")
+                    raise RuntimeError("ICU target escapes the admitted prefix")
                 descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(descriptor, "wb") as output, (staged / name).open("rb") as source:
                     shutil.copyfileobj(source, output, 1024 * 1024)
@@ -321,7 +345,17 @@ def prepare(job):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 close_fds=True, timeout=60, check=False)
         if result.returncode or registry_value(path, name, kind) != expected:
-            raise RuntimeError("Copied recipe write failed verification")
+            raise RuntimeError("Recipe write failed verification")
+
+
+def validate_apply_prefix(job):
+    expected = job.get("prefix_identity") if isinstance(job, dict) else None
+    if (not isinstance(expected, dict) or set(expected) != {"device", "inode"}
+            or any(type(value) is not int or value <= 0 for value in expected.values())):
+        raise RuntimeError("Apply prefix identity is missing or invalid")
+    current = Path(os.environ["WINEPREFIX"]).lstat()
+    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (expected["device"], expected["inode"]):
+        raise RuntimeError("Apply prefix identity changed before namespace mutation")
 
 
 def main():
@@ -329,6 +363,10 @@ def main():
     os.umask(0o077)
     if ctypes.CDLL(None).prctl(36, 1, 0, 0, 0):
         raise RuntimeError("Cannot own application descendants")
+    job = None
+    if "--apply" in sys.argv:
+        job = json.loads(Path("/trial/job.json").read_text())
+        validate_apply_prefix(job)
     with open("/trial/display.log", "wb") as log:
         server = subprocess.Popen(
             ["Xwayland", ":77", "-geometry", "1280x800", "-decorate", "-shm",
@@ -347,16 +385,50 @@ def main():
             server.terminate()
             server.wait(timeout=5)
             return
-        job = json.loads(Path("/trial/job.json").read_text())
+        if job is None:
+            job = json.loads(Path("/trial/job.json").read_text())
         OPERATION_ID = job["id"]
         worker = identity()
         write({"schema": 1, "phase": "preparing", "identity": worker, "reason": "", "returncode": None})
         try:
+            if "--apply" in sys.argv:
+                for role in ("wine", "wine64", "wineserver"):
+                    probe = subprocess.run(["/runner/" + role, "--version"], capture_output=True,
+                                           text=True, close_fds=True, timeout=30, check=False)
+                    expected = job["companions"][role]
+                    stream = probe.stderr if role == "wineserver" else probe.stdout
+                    matches = stream.splitlines().count(expected) if role == "wineserver" else int(
+                        stream.strip() == expected
+                    )
+                    if probe.returncode != 0 or len(stream) > 1024 * 1024 or matches != 1:
+                        raise RuntimeError("Exact managed companion probe failed")
             prepare(job)
             # Addon bootstrap suppression applies to preparation, not native .NET launch.
             os.environ["WINEDLLOVERRIDES"] = "winemenubuilder.exe=d"
             checkpoint()
             write({"schema": 1, "phase": "prepared", "identity": worker, "reason": "", "returncode": None})
+            if "--apply" in sys.argv:
+                helper = subprocess.Popen(["/runner/wine", "wineboot.exe", "-e", "-s"],
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, close_fds=True)
+                deadline = time.monotonic() + 120
+                while True:
+                    helper.poll()
+                    reap((server.pid, helper.pid))
+                    alive = [pid for pid in children() if pid != server.pid]
+                    if not alive and helper.returncode == 0:
+                        break
+                    if helper.returncode not in (None, 0) or time.monotonic() > deadline:
+                        terminal({"schema": 1, "phase": "unknown", "identity": worker,
+                                  "reason": "recipe-helper-settlement-unknown", "returncode": None})
+                        return
+                    time.sleep(0.1)
+                display.close()
+                server.terminate()
+                server.wait(timeout=5)
+                terminal({"schema": 1, "phase": "ended", "identity": worker,
+                          "reason": "recipe-settled", "returncode": 0})
+                return
             while True:
                 if checkpoint() == {"action": "launch"}:
                     break
@@ -381,6 +453,9 @@ def main():
         stop_requested = False
         close_sent = False
         session_helper = None
+        restart_requested = False
+        restart_generation = 0
+        observed_applications = set()
 
         def end_session():
             # End only this namespace's Windows session, with no force or kill option.
@@ -388,7 +463,10 @@ def main():
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, close_fds=True)
 
-        while True:
+        def supervise_iteration():
+            nonlocal launcher, ready, failure_reason, shutdown_deadline, closing
+            nonlocal stop_requested, close_sent, session_helper, restart_requested, restart_generation
+
             launcher.poll()
             server.poll()
             if session_helper is not None:
@@ -396,7 +474,7 @@ def main():
             excluded = (server.pid, launcher.pid) + (() if session_helper is None else (session_helper.pid,))
             reap(excluded)
             alive = [pid for pid in children() if pid != server.pid]
-            applications = application_pids(alive, application_name)
+            applications = live_applications(alive, application_name, observed_applications)
             if server.poll() is not None:
                 failure_reason = failure_reason or "display-lost"
             helper_failed = session_helper is not None and session_helper.poll() not in (None, 0)
@@ -404,6 +482,22 @@ def main():
                 failure_reason = failure_reason or "normal-session-shutdown-failed"
             if not alive:
                 launcher.poll()
+                if launcher.returncode != 0:
+                    failure_reason = failure_reason or "application-exited-with-error"
+                if restart_requested and not failure_reason:
+                    launcher = subprocess.Popen(arguments, close_fds=True, stdin=subprocess.DEVNULL)
+                    restart_generation += 1
+                    restart_requested = False
+                    ready = False
+                    closing = False
+                    stop_requested = False
+                    close_sent = False
+                    shutdown_deadline = None
+                    session_helper = None
+                    observed_applications.clear()
+                    write({"schema": 1, "phase": "prepared", "identity": worker,
+                           "reason": "restarting", "returncode": None})
+                    return False
                 if server.poll() is None:
                     display.close()
                 if server.poll() is None:
@@ -414,13 +508,19 @@ def main():
                           "reason": failure_reason or
                           ("processes-settled" if ready else "application-exited-before-readiness"),
                           "returncode": launcher.returncode})
-                return
-            # A lost display does not release the source while Wine remains alive.
-            if server.returncode is not None:
+                return True
+            # Failed supervision does not release the source while Wine remains alive.
+            if failure_reason:
                 write({"schema": 1, "phase": "unknown", "identity": worker,
-                       "reason": "display-lost", "returncode": None})
+                       "reason": failure_reason, "returncode": None})
             command = take_request()
             if command is not None:
+                if (command == {"action": "restart"} and job.get("allow_restart") is True
+                        and ready and not stop_requested and not failure_reason):
+                    restart_requested = True
+                    command = {"action": "stop"}
+                elif command in ({"action": "stop"}, {"action": "cancel"}):
+                    restart_requested = False
                 if command in ({"action": "stop"}, {"action": "cancel"}) and server.returncode is None:
                     stop_requested = True
                     closing = True
@@ -434,8 +534,20 @@ def main():
             if server.returncode is None and not ready and not stop_requested:
                 if display.viewable(applications):
                     ready = True
-                    write({"schema": 1, "phase": "running", "identity": worker, "reason": "", "returncode": None})
-            if (ready or stop_requested) and not applications and session_helper is None:
+                    write({"schema": 1, "phase": "unknown" if failure_reason else "running", "identity": worker,
+                           "reason": failure_reason or ("restart-" + str(restart_generation)
+                                                        if restart_generation else ""),
+                           "returncode": None})
+            if closing and server.returncode is None and not close_sent:
+                close_sent = bool(display.close_windows(applications))
+            if (ready or stop_requested) and session_helper is None:
+                # A normal session end must follow application exit, never race its window close.
+                fresh_owned = [pid for pid in children() if pid != server.pid]
+                fresh_applications = live_applications(fresh_owned, application_name, observed_applications)
+                application_exited = not fresh_applications and (observed_applications or launcher.poll() is not None)
+            else:
+                application_exited = False
+            if application_exited:
                 closing = True
                 if shutdown_deadline is None:
                     shutdown_deadline = time.monotonic() + SHUTDOWN_TIMEOUT
@@ -443,14 +555,27 @@ def main():
             if helper_failed:
                 write({"schema": 1, "phase": "unknown", "identity": worker,
                        "reason": failure_reason, "returncode": None})
-            if closing and server.returncode is None and not close_sent:
-                close_sent = bool(display.close_windows(applications))
             if shutdown_deadline and time.monotonic() >= shutdown_deadline:
                 failure_reason = failure_reason or "shutdown-timeout"
                 write({"schema": 1, "phase": "unknown", "identity": worker,
-                       "reason": "shutdown-timeout", "returncode": None})
+                        "reason": failure_reason, "returncode": None})
                 shutdown_deadline = None
                 closing = False
+
+        while True:
+            try:
+                if supervise_iteration():
+                    return
+            except Exception:
+                # Keep the namespace owner alive even when supervision or publication fails.
+                failure_reason = failure_reason or "worker-supervision-failed"
+                restart_requested = False
+                try:
+                    write({"schema": 1, "phase": "unknown", "identity": worker,
+                           "reason": failure_reason, "returncode": None})
+                except Exception:
+                    # Durable pins remain held while status storage is unavailable.
+                    pass
             time.sleep(0.2)
 
 

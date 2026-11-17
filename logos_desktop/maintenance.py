@@ -288,13 +288,21 @@ def _known_recovery_locations(directory, context):
         prefix_key = hashlib.sha256(os.fsencode(location['prefix'])).hexdigest()
         restore = base / 'maintenance' / prefix_key
         if restore.resolve() != current_restore and _pending_records(restore, ('restore.pending', 'restore.json')):
-            raise RecoveryRequired(f'Restore recovery is required in another state location: {restore}')
+            from . import runtime_recovery
+
+            owned = (not os.path.lexists(restore / 'restore.json')
+                     and runtime_recovery.owns_marker(restore / 'restore.pending', context))
+            if not owned:
+                raise RecoveryRequired(f'Restore recovery is required in another state location: {restore}')
         install = location['install']
         if install is not None:
             key = hashlib.sha256(os.fsencode(Path(install).resolve())).hexdigest()
             selection = base / 'runtime-selection' / key
             if selection.resolve() != current_runtime and _pending_records(selection, ('runtime.json',)):
-                raise RecoveryRequired(f'Runtime recovery is required in another state location: {selection}')
+                from . import runtime_recovery
+
+                if not runtime_recovery.owns_activation(selection / 'runtime.json', context):
+                    raise RecoveryRequired(f'Runtime recovery is required in another state location: {selection}')
 
 
 class Lease:
@@ -337,6 +345,9 @@ class Lease:
                 fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise MaintenanceBusy("Another controller is using this installation") from error
+            from . import runtime_recovery
+
+            runtime_recovery.check_admission(context)
             _known_recovery_locations(directory, context)
             if context.needs_recovery() and not recovery:
                 raise RecoveryRequired(f"Restore recovery is required. Preserved state: {context.state}")
@@ -589,6 +600,21 @@ def changes_installation(function):
 
 def installation_owned():
     return getattr(_local, "installing", None) is not None
+
+
+@contextmanager
+def recovery_installation(context):
+    """Allow checked Wine helpers within the complete recovery owner's lease."""
+    from . import runtime_recovery
+
+    if (getattr(_local, "active", None) != (context, True)
+            or not runtime_recovery.operation_owned(context) or installation_owned()):
+        raise MaintenanceError("Recovery execution requires its exclusive operation owner")
+    _local.installing = context
+    try:
+        yield
+    finally:
+        _local.installing = None
 
 
 def reconcile(app):

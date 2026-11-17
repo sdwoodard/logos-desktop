@@ -2,12 +2,14 @@
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import tarfile
 
-from . import artifacts, maintenance, runtime_stacks
+from . import artifacts, maintenance, runtime_copies, runtime_stacks
 
 
 MAX_ICU_FILES = 4096
@@ -130,6 +132,73 @@ def _setting_entries(key, value):
         "renderer": (r"HKCU\Software\Wine\Direct3D", "renderer", "REG_SZ", None if value == "absent" else value),
     }
     return (writes[key],)
+
+
+def observe_prefix_settings(prefix):
+    """Read HKCU settings and distinguish a missing global version from custom values."""
+    descriptor = os.open(Path(prefix) / "user.reg", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise maintenance.MaintenanceError("Cannot inspect owned Wine settings")
+        content = source.read(32 * 1024 * 1024 + 1)
+        if (len(content) > 32 * 1024 * 1024
+                or runtime_copies._signature(info) != runtime_copies._signature(os.fstat(source.fileno()))):
+            raise maintenance.MaintenanceError("Wine settings changed or exceeded the inspection bound")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeError as error:
+        raise maintenance.MaintenanceError("Wine settings encoding is unsupported") from error
+    wanted = {(path[5:].casefold(), name.casefold()): kind for key, options in runtime_stacks.SETTING_VALUES.items()
+              for option in options for path, name, kind, _ in _setting_entries(key, option)}
+    wanted_names = {identity[1] for identity in wanted}
+    found = {}
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            header = re.fullmatch(r"\[((?:[^\\\]]|\\.)*)\](?:\s+[0-9]+)?", line)
+            if header is None:
+                raise maintenance.MaintenanceError("Wine registry section syntax is unsupported")
+            section = header[1].replace("\\\\", "\\").casefold()
+        elif section is not None and line.lstrip().startswith('"'):
+            assignment = re.fullmatch(r'("(?:[^"\\]|\\.)*")\s*=\s*(.*)', line.strip())
+            if assignment is None:
+                raise maintenance.MaintenanceError("Wine registry value syntax is unsupported")
+            try:
+                name = json.loads(assignment[1])
+            except ValueError as error:
+                raise maintenance.MaintenanceError("Wine registry value name is unsupported") from error
+            identity = (section, name.casefold())
+            if (section.startswith("software\\wine\\appdefaults\\logos")
+                    and name.casefold() in wanted_names):
+                raise maintenance.MaintenanceError("Per-application Wine overrides need a matching recipe")
+            if identity not in wanted:
+                continue
+            if identity in found:
+                raise maintenance.MaintenanceError("Duplicate supported Wine setting")
+            raw = assignment[2]
+            try:
+                if wanted[identity] == "REG_DWORD" and re.fullmatch("dword:[0-9a-fA-F]{8}", raw):
+                    found[identity] = int(raw[6:], 16)
+                elif wanted[identity] == "REG_SZ" and raw.startswith('"'):
+                    found[identity] = json.loads(raw)
+                    if not isinstance(found[identity], str):
+                        raise ValueError
+                else:
+                    raise ValueError
+            except (ValueError, TypeError) as error:
+                raise maintenance.MaintenanceError("Unsupported effective Wine setting") from error
+    observed = {}
+    for key, options in runtime_stacks.SETTING_VALUES.items():
+        matches = [option for option in options if all(
+            found.get((path[5:].casefold(), name.casefold())) == expected
+            for path, name, _, expected in _setting_entries(key, option)
+        )]
+        observed[key] = matches[0] if len(matches) == 1 else None
+    if ("software\\wine", "version") not in found:
+        observed["windows-version"] = "absent"
+    return observed
 
 
 def _registry_value(app, binary, path, name, kind):

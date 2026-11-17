@@ -137,6 +137,13 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(self.assess(settings={"renderer": "gl"}).evidence, "custom")
         self.assertEqual(self.assess(dependencies={}).evidence, "custom")
 
+    def test_product_padding_matches_the_same_build_without_bypassing_known_failure(self):
+        self.assertTrue(self.assess(product_build="54.3.0.5").selectable)
+        evidence(self.data, "known-affected")
+        self.assertEqual(self.assess(product_build="54.3.0.5").evidence, "known-affected")
+        for build in ("54.3.0.6", "54.3.0.5-patched", "54.3.5", "54.3.0.65536"):
+            self.assertFalse(self.assess(product_build=build).selectable)
+
     def test_experimental_and_extra_addon_observations_are_not_tested(self):
         evidence(self.data, "experimental")
         result = self.assess()

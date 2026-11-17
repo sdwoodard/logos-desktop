@@ -10,6 +10,7 @@ import configparser
 from contextlib import contextmanager
 import csv
 from dataclasses import dataclass
+from datetime import datetime
 from email.parser import BytesParser
 import fcntl
 import hashlib
@@ -34,6 +35,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import uuid
 import zipfile
 
 
@@ -1042,7 +1044,7 @@ def _wheel_update(identity, release, config_path, frontend, *, before_tui_launch
     return _launch(root, record, config_path, frontend)
 
 
-def _installed_bytes(prefix, path):
+def _installed_bytes(prefix, path, *, limit=8 * 1024 * 1024, private=False):
     """Read bounded owned installation data without following package symlinks."""
     path = Path(os.path.abspath(path))
     if not path.is_relative_to(prefix) or path == prefix:
@@ -1056,11 +1058,12 @@ def _installed_bytes(prefix, path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as source:
         info = os.fstat(source.fileno())
+        forbidden_mode = 0o077 if private else 0o022
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-                or info.st_mode & 0o022 or info.st_size > 8 * 1024 * 1024):
+                or info.st_mode & forbidden_mode or info.st_size > limit):
             raise InstallError("Installed metadata requires bounded owned ordinary files")
-        content = source.read(8 * 1024 * 1024 + 1)
-    if len(content) > 8 * 1024 * 1024:
+        content = source.read(limit + 1)
+    if len(content) > limit:
         raise InstallError("Installed file exceeds the inspection limit")
     return content
 
@@ -1295,6 +1298,118 @@ def _migration_reservation(config_path):
         yield verify
 
 
+def _migration_recovery_record(root, path):
+    def object_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate complete recovery key")
+            value[key] = item
+        return value
+
+    def nonfinite(value):
+        raise ValueError("Nonfinite complete recovery number")
+
+    content = _installed_bytes(root, path, limit=4 * 1024 * 1024, private=True)
+    try:
+        return json.loads(content.decode("utf-8"), object_pairs_hook=object_pairs, parse_constant=nonfinite)
+    except (ValueError, RecursionError) as error:
+        raise InstallError("Recheck the invalid complete recovery record before migration") from error
+
+
+def _migration_recovery_identity(root):
+    result = subprocess.run(
+        ["findmnt", "--json", "--target", str(root), "--output", "UUID,FSTYPE,FSROOT,TARGET,ID"],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    if len(result.stdout) > 65536:
+        raise ValueError("Recovery mount facts exceeded their budget")
+    mounts = json.loads(result.stdout)["filesystems"]
+    if len(mounts) != 1 or mounts[0]["fstype"] not in ("ext4", "btrfs"):
+        raise ValueError("Recovery filesystem is unsupported or ambiguous")
+    mount = mounts[0]
+    info = root.stat()
+    return {"canonical_path": str(root), "filesystem_uuid": str(uuid.UUID(mount["uuid"])),
+            "filesystem_root": str(Path(mount["fsroot"]) / root.relative_to(Path(mount["target"]))),
+            "inode": info.st_ino, "owner_uid": info.st_uid}
+
+
+def _migration_complete_recovery(registered, install, prefix):
+    # Migration bootstrap runs before application dependencies are installed.
+    # Keep this admission reader standalone and aligned with complete recovery.
+    try:
+        fields = "schema prefix install root root_identity id secondary".split()
+        if (set(registered) != set(fields) or registered["schema"] != "complete-recovery-registration-1"
+                or registered["prefix"] != str(prefix) or registered["secondary"] is not False
+                or not Path(registered["install"]).is_absolute()
+                or prefix.parent != Path(registered["install"]) / "data"
+                or (install is not None and registered["install"] != str(install))
+                or str(uuid.UUID(registered["id"])) != registered["id"]):
+            raise ValueError("Complete recovery registration differs")
+        root = Path(registered["root"])
+        if not root.is_absolute() or root != root.resolve():
+            raise ValueError("Complete recovery location changed")
+        _private(root, directory=True)
+        identity = _migration_recovery_identity(root)
+        if any(registered["root_identity"][key] != value for key, value in identity.items()):
+            raise ValueError("Complete recovery storage identity changed")
+
+        journal = _migration_recovery_record(root, root / "journal.json")
+        fields = ("schema id revision phase result reason point stage newer stage_identity newer_identity gate "
+                  "configs selection stages activation runners inspection resume capability").split()
+        if (set(journal) != set(fields) or journal["schema"] != "complete-recovery-journal-1"
+                or journal["id"] != registered["id"] or type(journal["revision"]) is not int
+                or journal["revision"] < 1 or journal["phase"] not in ("applied", "kept-current", "resumed")
+                or journal["result"] != "succeeded" or type(journal["configs"]) is not list
+                or len(journal["configs"]) > 8 or type(journal["stages"]) is not list
+                or len(journal["stages"]) > 64):
+            raise ValueError("Complete recovery journal is pending or malformed")
+        point = journal["point"]
+        if point is not None and str(uuid.UUID(point)) != point:
+            raise ValueError("Complete recovery point identity differs")
+        if journal["newer"] is not None and journal["newer"] != str(prefix.with_name(".runtime-newer-" + point)):
+            raise ValueError("Retained generation path differs")
+        for stage in journal["stages"]:
+            path = Path(stage)
+            start = ".runtime-old-" + point + "-"
+            if (path.parent != prefix.parent or not path.name.startswith(start)
+                    or str(uuid.UUID(path.name[len(start):])) != path.name[len(start):]):
+                raise ValueError("Return staging identity differs")
+        if journal["stage"] is not None and journal["stage"] not in journal["stages"]:
+            raise ValueError("Return stage is unregistered")
+
+        if journal["phase"] == "applied" and (
+            point is None or journal["capability"] is None or type(journal["runners"]) is not list
+            or len(journal["runners"]) < 2 or journal["activation"] is None or not journal["selection"]
+        ):
+            raise ValueError("Applied runtime has no complete recovery graph")
+        if journal["phase"] == "resumed":
+            record, inspection = journal["resume"], journal["inspection"]
+            if set(record) != {"confirmation", "retained_work_acknowledged", "confirmed"}:
+                raise ValueError("Online resume acknowledgment is malformed")
+            confirmation = record["confirmation"]
+            if (set(confirmation) != {"point", "active", "retained", "inspection", "message"}
+                    or set(inspection) != {"id", "sha256"}
+                    or str(uuid.UUID(inspection["id"])) != inspection["id"]
+                    or DIGEST.fullmatch(inspection["sha256"]) is None
+                    or datetime.fromisoformat(record["confirmed"]).tzinfo is None
+                    or record["retained_work_acknowledged"] is not True or journal["gate"] != "online-resumed"
+                    or confirmation["point"] != point or confirmation["active"] != str(prefix)
+                    or confirmation["retained"] != journal["newer"] or confirmation["inspection"] != inspection
+                    or not isinstance(confirmation["message"], str) or not confirmation["message"]):
+                raise ValueError("Online resume acknowledgment differs from this generation")
+        elif journal["gate"] is not None or journal["resume"] is not None:
+            raise ValueError("Ordinary recovery state is contradictory")
+
+        marker = _migration_recovery_record(root, root / "marker.json")
+        expected = {"schema": "runtime-admission-1", "operation_id": registered["id"], "directory": str(root)}
+        if (set(marker) != {"path", "marker"} or marker["marker"] != expected
+                or not Path(marker["path"]).is_absolute() or os.path.lexists(marker["path"])):
+            raise ValueError("Complete recovery marker is pending or malformed")
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+        raise InstallError("Recheck complete recovery with its matching controller before migration") from error
+
+
 def _migration_recovery_clear(coordination, install, prefix):
     """Leave pending prefix transactions to the predecessor before replacing it."""
     state_home = os.environ.get("XDG_STATE_HOME", "")
@@ -1312,6 +1427,10 @@ def _migration_recovery_clear(coordination, install, prefix):
         else:
             _private(directory.parent, directory=True)
             _private(directory, directory=True)
+            complete = directory / "complete-recovery.json"
+            if os.path.lexists(complete):
+                registered = _migration_recovery_record(coordination, complete)
+                _migration_complete_recovery(registered, install, prefix)
             entries = list(directory.iterdir())
             if len(entries) > 128:
                 raise InstallError("Too many recorded recovery locations. Inspect them with the previous controller")

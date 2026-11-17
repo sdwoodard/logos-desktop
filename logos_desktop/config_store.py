@@ -263,7 +263,11 @@ def require_ready(document, overrides=None):
         selected = context(document, overlay)
         if selected is None:
             continue
-        if runtime.pending(selected.install) or selected.needs_recovery():
+        from . import runtime_recovery
+
+        runtime_recovery.check_admission(selected)
+        owned = runtime_recovery.owns_marker(selected.state_path / "restore.pending", selected)
+        if runtime.pending(selected.install) or (selected.needs_recovery() and not owned):
             raise maintenance.RecoveryRequired("Reconcile pending installation records before saving settings")
 
 

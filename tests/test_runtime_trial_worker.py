@@ -70,6 +70,55 @@ main()
 """
 
 
+class ProcessEnumerationTests(unittest.TestCase):
+    def test_application_exit_during_comm_read_does_not_crash_namespace_owner(self):
+        def comm(path, *arguments, **options):
+            if path.parent.name == "41111":
+                raise ProcessLookupError(3, "process exited during comm read")
+            return "Logos.exe\n"
+
+        with patch.object(Path, "read_text", new=comm):
+            self.assertEqual(worker.application_pids((41111, 41112), "logos.exe"), {41112})
+
+    def test_descendant_exit_during_stat_read_preserves_other_owned_children(self):
+        def process_stat(path, *arguments, **options):
+            if path.parent.name == "41111":
+                raise ProcessLookupError(3, "process exited during stat read")
+            return "41112 (owned child) S " + str(os.getpid()) + " 0 0 0\n"
+
+        with (patch.object(Path, "iterdir", return_value=iter((Path("/proc/41111"), Path("/proc/41112")))),
+              patch.object(Path, "read_text", new=process_stat)):
+            self.assertEqual(worker.children(), [41112])
+
+    def test_uninspectable_live_process_is_not_treated_as_a_confirmed_exit(self):
+        with patch.object(Path, "read_text", side_effect=PermissionError("still-live identity is unavailable")):
+            with self.assertRaises(PermissionError):
+                worker.application_pids((41111,), "logos.exe")
+            with patch.object(Path, "iterdir", return_value=iter((Path("/proc/41111"),))):
+                with self.assertRaises(PermissionError):
+                    worker.children()
+
+    def test_observed_application_lifetime_survives_comm_change(self):
+        fields = ["S", *(["0"] * 19)]
+        fields[19] = "17"
+        with (patch.object(worker, "application_pids", return_value=set()),
+              patch.object(Path, "read_text", return_value="41111 (Renamed.exe) " + " ".join(fields))):
+            self.assertEqual(worker.live_applications([41111], "logos.exe", {(41111, 17)}), {41111})
+
+    def test_reused_pid_is_not_the_retained_original_application(self):
+        fields = ["S", *(["0"] * 19)]
+        fields[19] = "18"
+        with (patch.object(worker, "application_pids", return_value=set()),
+              patch.object(Path, "read_text", return_value="41111 (helper) " + " ".join(fields))):
+            self.assertEqual(worker.live_applications([41111], "logos.exe", {(41111, 17)}), set())
+
+    def test_live_application_identity_denial_does_not_authorize_session_shutdown(self):
+        with (patch.object(worker, "application_pids", return_value=set()),
+              patch.object(Path, "read_text", side_effect=PermissionError("live identity unavailable"))):
+            with self.assertRaises(PermissionError):
+                worker.live_applications([41111], "logos.exe", {(41111, 17)})
+
+
 class WorkerProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -115,11 +164,13 @@ class WorkerProtocolTests(unittest.TestCase):
         self.display.bind(str(self.root / "display"))
         self.addCleanup(self.display.close)
 
-    def launch(self):
+    def launch(self, *, applying=False):
         selected = boundary.Boundary(shutil.which("bwrap"), self.root / "display", ())
         arguments = boundary.command(selected, source=self.source, copied=self.copied, private=self.private,
                                      runner=self.runner, worker=self.adapter, dependencies=self.dependencies,
-                                     wine_user=self.wine_user)
+                                      wine_user=self.wine_user)
+        if applying:
+            arguments.append("--apply")
         log = (self.root / "log").open("wb")
         self.addCleanup(log.close)
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
@@ -225,6 +276,293 @@ class WorkerProtocolTests(unittest.TestCase):
         value = self.wait_phase(process, ("ended",))
         self.assertEqual(value["reason"], "application-exited-before-readiness")
         self.assertEqual(value["returncode"], 0)
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_ignored_application_close_times_out_without_session_shutdown(self):
+        self.adapter.write_text(self.adapter.read_text().replace("Display = SyntheticDisplay\n",
+                                                               "Display = SyntheticDisplay\nSHUTDOWN_TIMEOUT = 0.3\n"))
+        (self.private / "ignore-close").touch()
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        trials.write(self.private / "request.json", {"action": "stop"})
+        unknown = self.wait_phase(process, ("unknown",))
+        self.assertEqual(unknown["reason"], "shutdown-timeout")
+        self.assertFalse((self.private / "session-ended").exists())
+        self.assertFalse((self.private / "shutdown").exists())
+        self.assertIsNone(process.poll())
+        (self.private / "shutdown").touch()
+        ended = self.wait_phase(process, ("ended",))
+        self.assertTrue((self.private / "session-ended").exists())
+        self.assertEqual(ended["reason"], "shutdown-timeout")
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_delayed_application_close_precedes_normal_helper_settlement(self):
+        (self.private / "ignore-close").touch()
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        trials.write(self.private / "request.json", {"action": "stop"})
+        time.sleep(0.6)
+        self.assertTrue((self.private / "close-requests").exists())
+        self.assertFalse((self.private / "session-ended").exists())
+        self.assertIsNone(process.poll())
+        (self.private / "shutdown").touch()
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "processes-settled")
+        self.assertTrue((self.private / "session-ended").exists())
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_renamed_live_application_still_blocks_session_shutdown(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER.replace(
+            "while not Path('/trial/shutdown').exists():\n",
+            "while not Path('/trial/shutdown').exists():\n"
+            "    if Path('/trial/rename-application').exists():\n"
+            "        ctypes.CDLL(None).prctl(15, b'Renamed.exe', 0, 0, 0)\n"
+            "        Path('/trial/renamed').touch()\n",
+        ))
+        self.runner.chmod(0o500)
+        (self.private / "ignore-close").touch()
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        (self.private / "rename-application").touch()
+        deadline = time.monotonic() + 5
+        while not (self.private / "renamed").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue((self.private / "renamed").exists())
+        trials.write(self.private / "request.json", {"action": "stop"})
+        time.sleep(0.6)
+        self.assertFalse((self.private / "session-ended").exists())
+        (self.private / "shutdown").touch()
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "processes-settled")
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_surviving_same_name_wrapper_conservatively_blocks_session_shutdown(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER.replace(
+            "subprocess.Popen(['/usr/bin/python3', '-c',",
+            "while not Path('/trial/release-wrapper').exists():\n"
+            "    time.sleep(0.05)\n"
+            "subprocess.Popen(['/usr/bin/python3', '-c',",
+        ))
+        self.runner.chmod(0o500)
+        self.adapter.write_text(self.adapter.read_text().replace("Display = SyntheticDisplay\n",
+                                                               "Display = SyntheticDisplay\nSHUTDOWN_TIMEOUT = 0.3\n"))
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        trials.write(self.private / "request.json", {"action": "stop"})
+        unknown = self.wait_phase(process, ("unknown",))
+        self.assertTrue((self.private / "shutdown").exists())
+        self.assertEqual(unknown["reason"], "shutdown-timeout")
+        self.assertFalse((self.private / "session-ended").exists())
+        (self.private / "release-wrapper").touch()
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "shutdown-timeout")
+        self.assertTrue((self.private / "session-ended").exists())
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_apply_worker_probes_companions_and_settles_without_launching_product(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER.replace(
+            "if len(sys.argv) > 1 and sys.argv[1] == 'wineboot.exe':",
+            "if len(sys.argv) > 1 and sys.argv[1] == '--version':\n"
+            "    print('Wine 11.0' if Path(sys.argv[0]).name == 'wineserver' else 'wine-11.0',\n"
+            "          file=sys.stderr if Path(sys.argv[0]).name == 'wineserver' else sys.stdout)\n"
+            "    raise SystemExit(0)\n"
+            "if len(sys.argv) > 1 and sys.argv[1] == 'wineboot.exe':",
+        ))
+        self.runner.chmod(0o500)
+        trials.write(self.private / "job.json", {
+            "id": self.operation_id, "registry": [], "dependencies": [],
+            "companions": {"wine": "wine-11.0", "wine64": "wine-11.0", "wineserver": "Wine 11.0"},
+            "prefix_identity": {"device": self.copied.stat().st_dev, "inode": self.copied.stat().st_ino},
+        })
+        process = self.launch(applying=True)
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "recipe-settled")
+        self.assertTrue((self.private / "session-ended").exists())
+        self.assertFalse((self.private / "application-started").exists())
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_apply_worker_refuses_replaced_mount_before_any_runner_execution(self):
+        expected = {"device": self.copied.stat().st_dev, "inode": self.copied.stat().st_ino}
+        original = self.copied.with_name("preserved-original-copy")
+        self.copied.rename(original)
+        self.copied.mkdir()
+        (self.copied / "valuable-canary").write_text("do not mutate this replacement")
+        self.runner.chmod(0o700)
+        self.runner.write_text("#!/usr/bin/python3\nfrom pathlib import Path\n"
+                               "Path('/trial/runner-invoked').touch()\nraise SystemExit(77)\n")
+        self.runner.chmod(0o500)
+        trials.write(self.private / "job.json", {
+            "id": self.operation_id, "registry": [], "dependencies": [], "prefix_identity": expected,
+            "companions": {"wine": "wine-11.0", "wine64": "wine-11.0", "wineserver": "Wine 11.0"},
+        })
+        process = self.launch(applying=True)
+        self.assertNotEqual(process.wait(timeout=5), 0)
+        self.assertFalse((self.private / "runner-invoked").exists())
+        self.assertFalse((self.private / "worker-status.json").exists())
+        self.assertEqual((self.copied / "valuable-canary").read_text(), "do not mutate this replacement")
+        self.assertTrue(original.exists())
+        self.assertIn("prefix identity changed", (self.root / "log").read_text())
+
+    def test_inspection_restart_keeps_the_same_private_copy_and_owned_namespace(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER.replace(
+            "ctypes.CDLL(None).prctl(15, b'Logos.exe', 0, 0, 0)",
+            "Path('/trial/shutdown').unlink(missing_ok=True)\n"
+            "Path('/trial/session-ended').unlink(missing_ok=True)\n"
+            "counter = Path('/trial/launch-count')\n"
+            "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n"
+            "ctypes.CDLL(None).prctl(15, b'Logos.exe', 0, 0, 0)",
+        ))
+        self.runner.chmod(0o500)
+        job = trials.read(self.private / "job.json")
+        job["allow_restart"] = True
+        trials.write(self.private / "job.json", job)
+        (self.source / "canary.txt").write_text("source unchanged")
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        first = self.wait_phase(process, ("running",))
+        (self.copied / "document.txt").write_text("private work survives restart")
+        trials.write(self.private / "request.json", {"action": "restart"})
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            value = trials.read(self.private / "worker-status.json")
+            if value["phase"] == "running" and value["reason"] == "restart-1":
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("Private inspection did not restart normally")
+        self.assertEqual(value["identity"], first["identity"])
+        self.assertEqual((self.private / "launch-count").read_text(), "2")
+        self.assertEqual((self.copied / "document.txt").read_text(), "private work survives restart")
+        self.assertEqual((self.source / "canary.txt").read_text(), "source unchanged")
+        trials.write(self.private / "request.json", {"action": "stop"})
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "processes-settled")
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_ready_application_nonzero_exit_is_not_successful_settlement(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER + "\nraise SystemExit(23)\n")
+        self.runner.chmod(0o500)
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        trials.write(self.private / "request.json", {"action": "stop"})
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "application-exited-with-error")
+        self.assertEqual(ended["returncode"], 23)
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def exercise_live_supervision_failure(self, injection, *, malformed=False, storage=False, stop=False):
+        code = self.adapter.read_text()
+        self.adapter.write_text(code.removesuffix("main()\n") + injection + "\nmain()\n")
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        running = self.wait_phase(process, ("running",))
+        descriptor = self.owned_worker_handle(process)
+        self.addCleanup(os.close, descriptor)
+        (self.private / "inject-failure").touch()
+        if malformed:
+            (self.private / "request.json").write_text("{invalid request")
+        if stop:
+            trials.write(self.private / "request.json", {"action": "stop"})
+        if storage:
+            time.sleep(0.7)
+            self.assertIsNone(process.poll())
+            (self.private / "inject-failure").unlink()
+        unknown = self.wait_phase(process, ("unknown",))
+        self.assertEqual(unknown["reason"], "worker-supervision-failed")
+        self.assertEqual(unknown["identity"], running["identity"])
+        self.assertIsNone(process.poll())
+        if not stop:
+            self.assertFalse((self.private / "shutdown").exists())
+        if not storage:
+            (self.private / "inject-failure").unlink()
+        time.sleep(0.3)
+        self.assertEqual(trials.read(self.private / "worker-status.json")["phase"], "unknown")
+        trials.write(self.private / "request.json", {"action": "stop"})
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "worker-supervision-failed")
+        self.assertEqual(ended["identity"], running["identity"])
+        trials.write(self.private / "request.json", {"action": "settle"})
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_shutdown_helper_spawn_failure_retains_live_namespace_owner(self):
+        self.exercise_live_supervision_failure("""
+_spawn = subprocess.Popen
+def failing_spawn(arguments, **kwargs):
+    if 'wineboot.exe' in arguments and Path('/trial/inject-failure').exists():
+        raise OSError('synthetic helper spawn failure')
+    return _spawn(arguments, **kwargs)
+subprocess.Popen = failing_spawn
+""", stop=True)
+
+    def test_live_process_inspection_denial_retains_namespace_until_normal_settlement(self):
+        self.exercise_live_supervision_failure("""
+_children = children
+def denied_children():
+    if Path('/trial/inject-failure').exists():
+        raise PermissionError('synthetic live inspection denial')
+    return _children()
+children = denied_children
+""")
+
+    def test_malformed_request_retains_live_namespace_and_failure_history(self):
+        self.exercise_live_supervision_failure("", malformed=True)
+
+    def test_status_storage_failure_retains_owner_and_retries_unknown_publication(self):
+        self.exercise_live_supervision_failure("""
+_write = write
+def unavailable_write(value):
+    if Path('/trial/inject-failure').exists():
+        raise OSError('synthetic status storage failure')
+    return _write(value)
+write = unavailable_write
+""", malformed=True, storage=True)
+
+    def test_failed_application_exit_during_restart_cannot_be_erased(self):
+        self.runner.chmod(0o700)
+        self.runner.write_text(RUNNER.replace(
+            "Path('/trial/application-started').touch()",
+            "with Path('/trial/launch-count').open('a') as counter:\n"
+            "    counter.write('launch\\n')\n"
+            "Path('/trial/application-started').touch()",
+        ) + "\nraise SystemExit(23)\n")
+        self.runner.chmod(0o500)
+        job = trials.read(self.private / "job.json")
+        job["allow_restart"] = True
+        trials.write(self.private / "job.json", job)
+        process = self.launch()
+        self.wait_phase(process, ("prepared",))
+        trials.write(self.private / "request.json", {"action": "launch"})
+        self.wait_phase(process, ("running",))
+        trials.write(self.private / "request.json", {"action": "restart"})
+        ended = self.wait_phase(process, ("ended",))
+        self.assertEqual(ended["reason"], "application-exited-with-error")
+        self.assertEqual(ended["returncode"], 23)
+        self.assertEqual((self.private / "launch-count").read_text(), "launch\n")
         trials.write(self.private / "request.json", {"action": "settle"})
         self.assertEqual(process.wait(timeout=5), 0)
 
@@ -350,7 +688,7 @@ class WorkerProtocolTests(unittest.TestCase):
                 break
             time.sleep(0.03)
         self.assertTrue(timed_out, "Duplicate stop requests restarted the active shutdown deadline")
-        self.assertFalse((self.private / "session-ended").exists(), "Session shutdown ran before the app closed")
+        self.assertFalse((self.private / "session-ended").exists(), "Session shutdown raced the live application")
         (self.private / "ignore-close").unlink()
         trials.write(self.private / "request.json", {"action": "stop"})
         ended = self.wait_phase(process, ("ended",))

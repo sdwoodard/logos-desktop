@@ -441,17 +441,32 @@ class Assessment:
     selectable: bool
 
 
+def same_product_build(first, second):
+    """Windows build fields retain exact numeric identity across zero padding."""
+    values = []
+    for value in (first, second):
+        if (not isinstance(value, str) or len(value) > 64
+                or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+", value) is None):
+            return False
+        parts = tuple(int(part) for part in value.split("."))
+        if any(part > 65535 for part in parts):
+            return False
+        values.append(parts)
+    return values[0] == values[1]
+
+
 def assess(catalog, stack, *, product, product_build, host, settings, dependencies, availability,
            runner_sha256=None):
     runner = catalog.runners[stack.runner_id]
     actual_digest = runner.sha256 if runner_sha256 is None else digest(runner_sha256)
     recipe = catalog.recipes[stack.recipe_id]
-    if product != "Logos" or product_build != stack.product_build:
+    if product != "Logos" or not same_product_build(product_build, stack.product_build):
         return Assessment("not-tested", availability, "product-mismatch", False)
 
     for fact in catalog.evidence.values():
         if (fact.kind != "known-affected" or fact.runner_sha256 != actual_digest
-                or fact.product_build != product_build or not matches(fact.host, host, negative=True)):
+                or not same_product_build(fact.product_build, product_build)
+                or not matches(fact.host, host, negative=True)):
             continue
         affected_recipe = catalog.recipes[catalog.stacks[fact.stack_id].recipe_id]
         settings_conflict = any(key in settings and settings[key] is not None and settings[key] != value

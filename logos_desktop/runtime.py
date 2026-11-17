@@ -20,7 +20,7 @@ _local = threading.local()
 
 
 @contextmanager
-def prepared_inputs(app, prepared):
+def prepared_inputs(app, prepared, *, wine_user=None):
     """Bind one worker to accepted inputs without publishing a profile selection."""
     if not maintenance.installation_owned() or getattr(_local, "prepared", None) is not None:
         raise maintenance.MaintenanceError("Prepared execution needs one owned installation transaction")
@@ -33,15 +33,25 @@ def prepared_inputs(app, prepared):
     if getattr(overrides, "wine_dll_overrides", None) is not None:
         raise maintenance.MaintenanceError("Explicit DLL overrides are a custom runtime")
     prepared.check()
+    if wine_user is not None:
+        from . import runtime_boundary
+
+        runtime_boundary.account_name(wine_user)
     _local.prepared = prepared
+    _local.prepared_user = wine_user
     try:
         yield
     finally:
         _local.prepared = None
+        _local.prepared_user = None
 
 
 def current_prepared():
     return getattr(_local, "prepared", None)
+
+
+def prepared_user():
+    return getattr(_local, "prepared_user", None)
 
 
 @contextmanager
@@ -271,7 +281,7 @@ def recover_startup(overrides, persistent):
 
 
 @maintenance.changes_installation
-def activate(app, accepted):
+def activate(app, accepted, *, managed=False, before_publish=None):
     """Select a prepared immutable runtime without replacing old runtime bytes."""
     if accepted.spec.kind != "appimage":
         raise artifacts.ArtifactError("Runtime activation requires an accepted AppImage")
@@ -280,9 +290,24 @@ def activate(app, accepted):
     from . import wine
 
     store = Path(conf.install_dir) / "data/bin/.artifacts"
-    if not accepted.path.is_relative_to(store):
+    if managed:
+        from . import runtime_recovery
+
+        prepared = current_prepared()
+        if (prepared is None or prepared.runner != accepted
+                or not runtime_recovery.operation_owned(maintenance.current_context())):
+            raise maintenance.MaintenanceError("Managed activation needs the complete recovery transaction")
+        from . import compatibility
+
+        runner = prepared.catalog.runners[prepared.stack.runner_id]
+        observed = compatibility.parse_wine_version(dict(runner.companions)["wine"])
+        eligible, reason = wine.check_wine_rules(observed, prepared.stack.product_build, "10")
+        if not eligible:
+            raise maintenance.MaintenanceError(reason)
+    elif not accepted.path.is_relative_to(store):
         accepted = artifacts.import_local(accepted.path, store.parent, accepted.spec)
-    wine.require_compatible(app, accepted.path)
+    if not managed:
+        wine.require_compatible(app, accepted.path)
     with activation_guard(app, exclusive=True) as context, configuration_lock():
         _recover_locked(app, context)
         links, configs = _targets(app)
@@ -326,6 +351,10 @@ def activate(app, accepted):
             }
             if source != destination:
                 record["source_hash"] = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+            if before_publish is not None:
+                if not managed:
+                    raise maintenance.MaintenanceError("Publication recording belongs to complete managed recovery")
+                before_publish(record)
             _replace_bytes(journal, json.dumps(record).encode())
             try:
                 prepared.validate()

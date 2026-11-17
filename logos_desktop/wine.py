@@ -49,8 +49,19 @@ def get_wine_release(binary: str) -> tuple[Optional[WineRelease], str]:
             from . import processes, updates
 
             cmd = [runtime.executable(binary), "--version"]
-            output, status = processes.capture(cmd, env=updates.fresh_environment(), timeout=15,
-                                               limit=16384, label="Wine version probe")
+            environment = updates.fresh_environment()
+            if Path(cmd[0]).resolve().name.lower().endswith(".appimage"):
+                environment["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+                with tempfile.TemporaryDirectory(prefix="logos-wine-probe-") as temporary:
+                    environment["TMPDIR"] = temporary
+                    output, errors, status = processes.capture(
+                        cmd, env=environment, timeout=30, limit=2 * 1024 * 1024,
+                        label="Wine AppImage version probe", separate=True,
+                    )
+                output = output or errors
+            else:
+                output, status = processes.capture(cmd, env=environment, timeout=15,
+                                                   limit=16384, label="Wine version probe")
             if status != 0:
                 raise RuntimeError("Wine version probe failed")
             version_string = output.decode("utf-8").strip()
@@ -1017,7 +1028,9 @@ def _wine_invocation(app, binary, overrides):
         )}
         env.update(WINE=str(prepared.runner.path), WINELOADER=str(prepared.runner.path),
                    WINESERVER=str(prepared.runner.path.parent / "wineserver"), WINEPREFIX=str(context.prefix),
-                   WINEDLLOVERRIDES="mscoree=;mshtml=;winemenubuilder.exe=", WINEDEBUG="err+all")
+                    WINEDLLOVERRIDES="mscoree=;mshtml=;winemenubuilder.exe=", WINEDEBUG="err+all")
+        if runtime.prepared_user() is not None:
+            env["USER"] = env["LOGNAME"] = runtime.prepared_user()
         # The existing wineboot helper requests this same code-owned addon denial.
         if overrides not in (None, "mscoree="):
             raise maintenance.MaintenanceError("Unmodeled DLL overrides cannot enter a prepared invocation")
