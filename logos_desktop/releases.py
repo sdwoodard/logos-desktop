@@ -23,7 +23,7 @@ CACHE_SCHEMA = 1
 WINE_SOURCE_API = "https://api.github.com/repos/wine-mirror/wine"
 WINE_SOURCE_RAW = "https://raw.githubusercontent.com/wine-mirror/wine"
 WINE_SOURCE_POLICY = "wine-source-1"
-WINE_RECOMMENDATION_POLICY = "Recommended Wine uses the latest available stable AppImage from mmtrt/WINE_AppImage."
+WINE_RECOMMENDATION_POLICY = "The mmtrt/WINE_AppImage provider feed tracks its latest available stable AppImage."
 
 
 @dataclass(frozen=True)

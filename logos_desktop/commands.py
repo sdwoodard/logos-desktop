@@ -61,6 +61,8 @@ def dispatch(args):
     from . import runtime_commands
 
     runtime_action = runtime_commands.selected(args)
+    if getattr(args, 'experimental_runtime', False) and runtime_action != 'apply':
+        raise maintenance.MaintenanceError('--experimental-runtime requires --runtime-apply')
     if getattr(args, 'without_successful_trial', False) and runtime_action != 'apply':
         raise maintenance.MaintenanceError('--without-successful-trial requires --runtime-apply')
     if getattr(args, 'json', False) and not runtime_action:

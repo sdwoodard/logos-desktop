@@ -156,6 +156,9 @@ def registration(context):
     return value
 
 
+APPLY_RETURN_PHASES = ("point-verified", "apply-intent", "selection-pending", "recipe-pending", "applied")
+
+
 def check_admission(context):
     """Protect every supported entry point, including callers using recovery=True."""
     value = registration(context)
@@ -480,6 +483,49 @@ class Recovery:
         validate_journal(value, current)
         return value
 
+    def record_local_feedback(self, point):
+        with self.admitted():
+            journal = self.status()
+            if journal["phase"] != "applied" or journal["point"] != point:
+                raise maintenance.RecoveryRequired("Recheck the applied installation before recording feedback")
+            write(self.root / ("feedback-" + point + ".json"), {
+                "point": point, "operation": journal["id"], "activation": journal["activation"],
+                "observation": "works-for-me", "recorded": datetime.now(timezone.utc).isoformat(),
+            })
+
+    def rebind_restored(self, app):
+        """Replace the live controller's applied selection with the returned profile."""
+        from . import runtime
+        from .config import PersistentConfiguration
+
+        with self.admitted(), runtime.configuration_lock():
+            journal = self.status()
+            if journal["phase"] not in ("returned", "resume-intent", "resumed"):
+                raise maintenance.RecoveryRequired("Finish the local return before reloading the restored profile")
+            point = self._point_record(journal["point"])
+            self._resume_configuration(journal, point)
+            conf = app.conf
+            path = conf.config_file_path
+            if str(config_store.absolute_path(path)) not in {p["path"] for p in point["preimages"][:2]}:
+                raise maintenance.RecoveryRequired("Select the profile bound to this return point")
+            current = PersistentConfiguration.load_from_path(path, environment=conf._overrides.environment)
+            effective = current._as_dict()
+            if (config_store.context(effective) != self.context
+                    or runtime_preimage(effective, self.context.install) != runtime_preimage(
+                        point["effective"], self.context.install)):
+                raise maintenance.RecoveryRequired("An invocation override conflicts with the restored installation")
+            conf.rebind(current, runtime_selection={})
+            app._config_updated_event.set()
+
+    def check_online_prerequisites(self):
+        """Keep an applied original recoverable before ordinary Wine launch."""
+        if self.registered is None or self.status()["phase"] not in ("applied", "resumed"):
+            return
+        journal = self.status()
+        self.verify_point(journal["point"])
+        boundary = runtime_boundary.inspect((self.context.install, self.root))
+        runtime_boundary.check_display(boundary, self.context.prefix)
+
     def phase(self, value, phase, *, result="pending", reason=""):
         self.checkpoint("before-phase:" + phase)
         value.update(phase=phase, result=result, reason=reason, revision=value["revision"] + 1)
@@ -588,7 +634,8 @@ class Recovery:
                 raise maintenance.RecoveryRequired("Effective runtime differs from the saved managed selection")
             # Diagnostic trials permit private empty Documents mappings. Recovery
             # refuses every external mutable link instead of omitting its data.
-            for item in runtime_copies.entries(self.context.prefix):
+            entries = runtime_copies.entries(self.context.prefix, checkpoint=lambda: self.checkpoint("point-preflight"))
+            for item in entries:
                 if item["kind"] != "symlink":
                     continue
                 relative = os.fsdecode(base64.b64decode(item["path"]))
@@ -1057,8 +1104,7 @@ class Recovery:
             journal = self.status()
             if confirmation != self.return_confirmation():
                 raise maintenance.RecoveryRequired("Confirm the exact complete local-data return scope")
-            if journal["phase"] not in ("point-verified", "apply-intent", "selection-pending",
-                                         "recipe-pending", "applied"):
+            if journal["phase"] not in APPLY_RETURN_PHASES:
                 raise maintenance.RecoveryRequired("Return is already pending. Reconcile the recorded journal")
             point = self.verify_point(journal["point"])
             journal["configs"] = self._restore_plan(journal, point)
@@ -1332,6 +1378,7 @@ class Recovery:
         boundary = runtime_boundary.inspect((self.context.install, self.context.prefix, self.root))
         if inspection_facts(boundary) != inspected["boundary"]:
             raise maintenance.RecoveryRequired("Offline inspection implementation or prerequisites changed. Reinspect")
+        runtime_boundary.check_display(boundary, self.context.prefix)
 
     def _resume_record(self, journal, confirmation):
         if journal["phase"] == "returned":
@@ -1763,13 +1810,19 @@ class Recovery:
             else:
                 saved_identity = journal["newer_identity"] if newer else journal["stage_identity"]
                 self._moved_identity(saved_identity, source)
-            baseline = runtime_copies.manifest(source, logical_root=self.context.prefix)
+            def checkpoint():
+                if stop is not None and stop.is_set():
+                    raise runtime_copies.Cancelled()
+                self.checkpoint("inspection-copy")
+
+            baseline = runtime_copies.manifest(source, logical_root=self.context.prefix, checkpoint=checkpoint)
             if before_apply and (baseline.sha256 != point["manifest"]["sha256"]
                                  or baseline.observation_sha256 != point["manifest"]["observation_sha256"]):
                 raise maintenance.RecoveryRequired("Old prefix changed after point capture. Capture a fresh point")
             reference = journal["runners"][0] if newer and journal["runners"] else point["runtime"]
             runner = self.verify_pin(reference)
             boundary = runtime_boundary.inspect((self.context.install, source, self.root))
+            runtime_boundary.check_display(boundary, self.context.prefix, checkpoint=checkpoint)
             facts = inspection_facts(boundary)
             executable = utils.find_installed_product("Logos", str(source))
             if executable is None or not Path(executable).resolve().is_relative_to(source):
@@ -1791,7 +1844,8 @@ class Recovery:
                       "copy": None, "restarts": 0}
             write(directory / "inspection.json", record, checkpoint=self.checkpoint)
             receipt = runtime_copies.copy(source, directory / "prefix", logical_root=self.context.prefix,
-                                          checkpoint=lambda: self.checkpoint("inspection-copy"))
+                                          checkpoint=checkpoint)
+            checkpoint()
             record["copy"] = receipt["copy"]
             write(directory / "inspection.json", record, checkpoint=self.checkpoint)
             (directory / "prefix/drive_c/M4Export").mkdir(mode=0o700, exist_ok=True)
@@ -1800,7 +1854,8 @@ class Recovery:
             runtime_boundary.prepare_private(private, wine_user=account)
             runtime_trials.write(private / "job.json", {"id": operation_id, "executable": executable,
                                                        "resource_uri": runtime_trials.local_resource(resource_uri),
-                                                       "registry": [], "dependencies": [], "allow_restart": True})
+                                                       "registry": [], "dependencies": [], "allow_restart": True,
+                                                       "purpose": "inspection"})
             worker_path = Path(runtime_trials.__file__).with_name("runtime_trial_worker.py")
             arguments = dict(source=self.context.prefix, copied=directory / "prefix", private=private,
                              runner=runner.path, worker=worker_path,
@@ -1808,6 +1863,7 @@ class Recovery:
             runtime_boundary.probe(runtime_boundary.command(boundary, **arguments, check=True))
             running = False
             authorized = False
+            stop_delivered = False
             deadline = time.monotonic() + timeout
             with (private / "wine.log").open("xb") as log:
                 child = subprocess.Popen(runtime_boundary.command(boundary, **arguments), stdin=subprocess.DEVNULL,
@@ -1829,11 +1885,14 @@ class Recovery:
                         record["worker"] = worker
                         if worker["phase"] == "unknown" and record["result"] != "unknown":
                             record.update(result="unknown", reason="inspection-recheck-required")
-                        if worker["phase"] == "prepared" and not authorized and record["result"] != "unknown":
+                        stopping = stop is not None and stop.is_set()
+                        may_launch = not (stopping or authorized or record["result"] == "unknown")
+                        if worker["phase"] == "prepared" and may_launch:
                             runtime_trials.write(private / "request.json", {"action": "launch"})
                             authorized = True
-                        if stop is not None and stop.is_set():
+                        if stopping and not stop_delivered:
                             runtime_trials.write(private / "request.json", {"action": "stop"})
+                            stop_delivered = True
                         if worker["phase"] == "running":
                             running = True
                             restarted = re.fullmatch(r"restart-([1-9][0-9]{0,2})", worker["reason"])
@@ -1891,8 +1950,9 @@ class Recovery:
                             worker = runtime_trials.worker_status(private, child, self.context.prefix,
                                                                  directory / "prefix", receipt, operation_id)
                             record["worker"] = worker
-                            if stop is not None and stop.is_set():
+                            if stop is not None and stop.is_set() and not stop_delivered:
                                 runtime_trials.write(private / "request.json", {"action": "stop"})
+                                stop_delivered = True
                             write(directory / "inspection.json", record)
                             status(dict(record))
                             if worker["phase"] == "ended":

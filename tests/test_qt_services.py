@@ -27,6 +27,193 @@ else:
 
 @unittest.skipUnless(QT_AVAILABLE, "Optional Qt frontend is not installed")
 class TestProductionServices(QtCase):
+    def test_trial_reservation_guidance_survives_a_completed_recovery(self):
+        from logos_desktop import runtime_recovery, runtime_trials
+        from logos_desktop.qt import runner_services
+
+        window = self.production_window()
+        trial = {"id": "selected-trial", "phase": "running", "result": "pending", "reason": ""}
+        recovered = runner_services.RecoveryView(phase="resumed")
+        with (patch.object(runtime_trials, "startup_status", return_value=trial),
+              patch.object(runtime_recovery, "registration", return_value=True),
+              patch.object(runner_services, "recovery_view", return_value=recovered)):
+            self.services.refresh(window.app, threading.Event())
+            window._render()
+        self.assertEqual(window.snapshot.trial_operation, trial["id"])
+        self.assertFalse(window.home.run.isEnabled())
+        self.assertIn("End trial", window.snapshot.health)
+
+    def test_inspection_timeout_replaces_unanswered_prompt_without_blocking_supervision(self):
+        from unittest.mock import Mock
+        from PySide6.QtWidgets import QComboBox, QDialogButtonBox
+        from logos_desktop.qt import runner_services
+        from logos_desktop.qt.bridge import Result
+
+        window = self.production_window()
+        recovery = Mock()
+        poll = threading.Event()
+
+        def supervise(*, status, **unused):
+            running = {"id": "inspection", "worker": {"phase": "running", "reason": ""},
+                       "result": "pending", "reason": "", "restarts": 0}
+            status(running)
+            self.assertTrue(poll.wait(3), "An unanswered restart prompt blocked the supervisor")
+            unknown = dict(running, result="unknown", reason="inspection-timeout")
+            for _ in range(200):
+                status(unknown)
+                if recovery.stop_helper.called:
+                    return unknown
+                time.sleep(.01)
+            raise AssertionError("Shutdown retry was not delivered")
+
+        recovery.inspect_generation.side_effect = supervise
+
+        def work(app, cancel):
+            record = runner_services.inspect_offline(app, recovery, cancel)
+            return Result(record["result"], record["reason"])
+
+        window.start(work)
+        self.pump(lambda: len(window.dialogs.pending) == 1)
+        first, = window.dialogs.pending
+        poll.set()
+        self.pump(lambda: any("inspection-timeout" in p.question for p in window.dialogs.pending))
+        self.assertTrue(first.done.is_set())
+        retry = next(p for p in window.dialogs.pending if "inspection-timeout" in p.question)
+        dialog = window.dialogs.pending[retry]
+        dialog.findChild(QComboBox).setCurrentText("Retry normal shutdown")
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+        self.pump(lambda: window.app.active is None)
+        recovery.stop_helper.assert_called_once_with("inspection-inspection")
+        self.assertFalse(window.app._prompts)
+
+    def test_runner_page_download_retry_side_by_side_and_draft_without_profile_write(self):
+        from logos_desktop import artifacts, constants, runtime_runners, runtime_stacks
+        from tests.artifact_fixtures import appimage
+        from tests.test_artifacts import response
+
+        self.config.write_text("{}")
+        self.original = self.config.read_bytes()
+        catalog = runtime_stacks.bundled()
+        contents = [appimage(), appimage() + b"second runner"]
+        runners = [replace(r, size=len(content), sha256=hashlib.sha256(content).hexdigest())
+                   for r, content in zip(catalog.runners.values(), contents)]
+        model = replace(catalog, runners={r.id: r for r in runners})
+        store = runtime_runners.RunnerStore(self.root / "runners", self.root / "coordination")
+        window = self.production_window()
+        owner_thread = threading.get_ident()
+
+        def filesystem(path):
+            info = Path(path).stat()
+            return {"canonical_path": str(path), "filesystem_uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "filesystem_root": str(path), "boot_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "device": info.st_dev, "inode": info.st_ino, "mount_id": 1, "owner_uid": os.geteuid()}
+
+        def fetch(url, **kwargs):
+            self.assertNotEqual(threading.get_ident(), owner_thread)
+            return response(contents[0] if url == runners[0].url else contents[1])
+
+        with (patch.object(runtime_runners, "RunnerStore", return_value=store),
+              patch.object(runtime_runners.runtime_filesystem, "identity", side_effect=filesystem),
+              patch.object(runtime_stacks, "bundled", return_value=model),
+              patch.object(constants, "CONFIG_DIR", self.root / "logos-desktop"),
+              patch.object(window.app.conf._network, "product_release", return_value=SimpleNamespace(
+                  stale=False, status="ok", versions=["55.1.0.9"])),
+              patch.object(artifacts.requests, "get", side_effect=fetch)):
+            window._open_runners(setup=True)
+            self.pump(lambda: window.app.active is None)
+            page = window.runners
+            self.assertEqual(page.list.count(), 2)
+            self.assertEqual(page.view.target, "55.1.0.9")
+            with patch.object(artifacts.requests, "get", return_value=response(b"unexpected bytes")):
+                page.buttons["download"].click()
+                self.pump(lambda: window.app.active is None)
+            self.assertFalse(store.inventory())
+            for dialog in tuple(window.dialogs.dialogs):
+                dialog.close()
+            page.buttons["retry"].click()
+            self.pump(lambda: window.app.active is None)
+            self.assertEqual(len(store.inventory()), 1)
+            page.list.setCurrentRow(1)
+            page.buttons["download"].click()
+            self.pump(lambda: window.app.active is None)
+            page.installed.click()
+            self.assertIn("2 of 2", page.installed.text())
+            self.assertEqual(page.list.count(), 2)
+            self.assertEqual(self.config.read_bytes(), self.original)
+            page.list.setCurrentRow(0)
+            selected = page.row
+            profile_dir = Path(constants.CONFIG_DIR)
+            profile_dir.mkdir()
+            other_profile = profile_dir / "second.json"
+            other_profile.write_text(json.dumps({"wine_binary": selected.path}))
+            import uuid
+
+            owner = self.root / "point-owner.json"
+            record = {"schema": "runtime-runner-owner-2", "record": "return-point", "id": str(uuid.uuid4()),
+                      "revision": 1, "phase": "active", "runner_generations": [selected.generation]}
+            owner.write_bytes(runtime_stacks.canonical(record))
+            owner.chmod(0o600)
+            store.pin(selected.generation, kind="return-point", owner_path=owner,
+                      owner_sha256=artifacts.regular_hash(owner))
+            page.buttons["recheck"].click()
+            self.pump(lambda: window.app.active is None)
+            self.assertEqual(set(page.row.blockers), {"return-point", "profile-selection"})
+            self.assertFalse(page.buttons["remove"].isEnabled())
+            with self.assertRaisesRegex(runtime_runners.RunnerError, "profile-selection"):
+                store.remove(selected.generation)
+            page.buttons["draft"].click()
+            self.assertEqual(window.install.runtime.currentText(), selected.path)
+            self.assertEqual(window.pages.currentIndex(), window.install_page_index)
+            self.assertEqual(self.config.read_bytes(), self.original)
+
+            window._open_runners(setup=True)
+            self.pump(lambda: window.app.active is None)
+            page.list.setCurrentRow(1)
+            with patch.object(window.app, "approve", return_value=True):
+                page.buttons["remove"].click()
+                self.pump(lambda: window.app.active is None)
+            self.assertEqual([item.sha256 for item in store.inventory()], [selected.digest])
+
+            page.installed.click()
+            page.list.setCurrentRow(1)
+            entered = threading.Event()
+
+            def transfer(spec, staging, candidates, *, checkpoint, status):
+                entered.set()
+                for _ in range(200):
+                    checkpoint()
+                    time.sleep(.005)
+                self.fail("The active Qt transfer did not see cancellation")
+
+            with patch.object(artifacts, "acquire", side_effect=transfer):
+                page.buttons["download"].click()
+                self.pump(entered.is_set)
+                page.cancel.click()
+                self.pump(lambda: window.app.active is None)
+            self.assertEqual(len(store.inventory()), 1)
+            self.assertIn("cancelled", window.status.text().lower())
+            self.assertEqual(self.config.read_bytes(), self.original)
+
+            # Stop at the MSI boundary. Publish config, aliases and pins with the real installer.
+            from logos_desktop import installer, wine
+
+            window.install.destination.setText(str(self.root / "new-install"))
+            draft = window.install.draft()
+            self.assertEqual(draft.generation, selected.generation)
+            with (patch.object(window.app, "approve", return_value=True),
+                  patch.object(self.services, "_preflight"),
+                  patch.object(installer, "ensure_launcher_shortcuts", side_effect=installer.ensure_wine_executables),
+                  patch.object(installer, "ensure_sys_deps"), patch.object(installer, "check_opengl"),
+                  patch.object(wine, "require_compatible")):
+                window.start(self.services.install(draft))
+                self.pump(lambda: window.app.active is None)
+            self.assertEqual(window.status.text(), "Installation completed")
+            actual = Path(window.app.conf.wine_binary)
+            self.assertEqual(actual.resolve(), Path(selected.path))
+            self.assertEqual((self.root / "new-install/data/bin/selected_wine.AppImage").resolve(), actual)
+            self.assertIn("profile-selection", store.removal_reasons(selected.digest))
+            self.original = self.config.read_bytes()
+
     def test_managed_controller_checks_are_explicit_cached_and_off_the_gui_thread(self):
         from logos_desktop import constants, controller_install
 

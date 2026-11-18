@@ -43,6 +43,9 @@ class TrialTests(unittest.TestCase):
         expansion = patch.object(boundary, "expansion_budget", return_value={"bytes": 1024, "entries": 1})
         expansion.start()
         self.addCleanup(expansion.stop)
+        display = patch.object(boundary, "check_display")
+        display.start()
+        self.addCleanup(display.stop)
         previous_umask = os.umask(0o077)
         self.addCleanup(os.umask, previous_umask)
         store = runtime_runners.RunnerStore(self.root / "store", self.root / "runner-coordination")
@@ -104,6 +107,18 @@ class TrialTests(unittest.TestCase):
         context = maintenance.Context(prefix, self.root / "install", "Logos")
         self.assertTrue(context.pending.exists())
         self.assertIn("trial", " ".join(store.removal_reasons(store.inventory()[0].sha256)))
+
+    def test_unusable_compositor_refuses_before_allocating_a_trial_copy(self):
+        directory, prefix, store = self.supervised_fixture()
+        with (patch.object(boundary, "inspect", return_value=Mock()),
+              patch.object(boundary, "check_display", side_effect=boundary.Unavailable("Missing compositor module")),
+              patch.object(trials.os, "getppid", return_value=os.getpid()),
+              patch.object(trials.runtime_copies, "copy") as copy):
+            trials.supervise(directory, "test-capability")
+        copy.assert_not_called()
+        self.assertEqual(trials.status(directory)["result"], "failed")
+        self.assertFalse(maintenance.Context(prefix).pending.exists())
+        self.assertFalse(store._registry()["references"])
 
     def test_prelaunch_cancel_releases_guard_only_after_unchanged_source_check(self):
         directory, prefix, store = self.supervised_fixture()

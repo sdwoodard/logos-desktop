@@ -629,6 +629,11 @@ class RunnerStore:
         registry = self._registry()
         return dict(self._inventory(registry)["operations"][operation_id])
 
+    def download_states(self):
+        registry = self._registry()
+        return tuple((key, item["runner"], item["phase"], item["result"], item["reason"])
+                     for key, item in self._inventory(registry)["operations"].items() if item["kind"] == "download")
+
     def cancel_download(self, operation_id):
         """Serialize cancellation with the transfer's final publication checkpoint."""
         with self._admission():
@@ -670,14 +675,18 @@ class RunnerStore:
             return self._download(runner, operation_id=operation_id, cancel=cancel, status=status,
                                    candidates=candidates)
 
-    def import_file(self, source, catalog):
-        digest = artifacts.regular_hash(source)
+    def import_file(self, source, catalog, *, cancel=None):
+        def checkpoint():
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("Local import cancelled")
+
+        digest = artifacts.regular_hash(source, checkpoint=checkpoint)
         matches = [runner for runner in catalog.runners.values() if runner.sha256 == digest]
         if len(matches) != 1:
             raise RunnerError('Import needs one exact bundled runner identity. Keep this file as an external runtime')
         self.initialize()
         with self._worker():
-            return self._download(matches[0], local_source=source)
+            return self._download(matches[0], local_source=source, cancel=cancel)
 
     def _download(self, runner, *, operation_id=None, cancel=None, status=None, candidates=(), local_source=None):
         operation_id = str(uuid.uuid4()) if operation_id is None else _uuid(operation_id)

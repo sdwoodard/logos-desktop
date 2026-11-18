@@ -154,13 +154,19 @@ class CLI(App):
         raise SystemExit(process.returncode)
 
     def set_appimage(self):
-        utils.set_appimage_symlink(app=self)
+        from . import runtime_commands
+
+        path = self.conf._overrides.wine_appimage_path
+        result = runtime_commands.execute("import", path, self.conf)
+        self.print(f"Download prepared: {result['result']}. Open Backups & tools → Wine runners and recovery, "
+                   "or use --runtime-stacks and --runtime-apply STACK_ID to change this installation.")
 
     def toggle_app_logging(self):
         self.logos.switch_logging()
 
     def update_latest_appimage(self):
-        utils.update_to_latest_recommended_appimage(self)
+        self.print("Open Backups & tools → Wine runners and recovery to review the current installation. "
+                   "Use --runtime-stacks, --runtime-download RUNNER_ID, then --runtime-apply STACK_ID.")
 
     def update_self(self):
         from . import updates

@@ -11,13 +11,14 @@ import shlex
 import threading
 
 from logos_desktop import backup, backup_store, constants, control, installer, maintenance
-from logos_desktop import desktop, doctor, network, processes, support
+from logos_desktop import desktop, doctor, network, processes, runtime_copies, runtime_runners, support
 from logos_desktop import config_store, releases, repair, runtime, updates, utils, wine
 from logos_desktop import controller_install
 from logos_desktop.app import UserExitedFromAsk
 from logos_desktop.config import Config, EphemeralConfiguration, PersistentConfiguration
 from logos_desktop.logos import State
 from .bridge import Result
+from . import runner_services
 from .window import Installation
 
 
@@ -34,6 +35,7 @@ class Services:
         self.controller_standalone = False
         self.doctor_report = ""
         self._doctor_profile = None
+        self._runner_retries = {}
 
     def snapshot(self):
         with self._lock:
@@ -59,6 +61,8 @@ class Services:
             controller_channel=conf.app_release_channel, logging=conf.faithlife_product_logging,
             selected=bool(raw.install_dir and raw.faithlife_product == "Logos"),
             runtimes=previous.runtimes if previous.profile == profile else (),
+            library=previous.library if previous.profile == profile else None,
+            retry_runners=tuple(key[1] for key in self._runner_retries if key[0] == profile),
             wine_status=self._wine_status(conf, selected_runtime),
             controller_owner="standalone" if self.controller_standalone else self.controller_identity.owner,
             controller_status=self.controller_result.status if self.controller_result else "unchecked",
@@ -71,11 +75,35 @@ class Services:
             health = "Set up Logos to get started."
             if snapshot.selected:
                 context = maintenance.Context.from_app(app, prompt=False)
+                from logos_desktop import runtime_trials
+
+                trial = runtime_trials.startup_status(context.prefix)
+                if trial:
+                    active = trial["phase"] != "ended"
+                    status = f"{trial['phase']}: {trial['result']}"
+                    if trial["reason"]:
+                        status += f" ({trial['reason']})"
+                    snapshot = replace(snapshot, trial_operation=trial["id"] if active else "",
+                                       trial_status=status,
+                                       trial_passed=not active and trial["result"] == "succeeded")
                 health = "Installation is ready" if installed else "Product executable was not found"
-                if context.needs_recovery() or runtime.pending(context.install):
-                    health = "Pending recovery records. Use explicit Repair before changing this installation."
-                elif repair.inspect(context):
-                    health = "A failed product upgrade needs explicit Repair."
+                if snapshot.trial_operation:
+                    health = "Use End trial and recheck status before opening the original installation."
+                from logos_desktop import runtime_recovery
+
+                registration = runtime_recovery.registration(context)
+                if registration:
+                    recovery = runner_services.recovery_view(context)
+                    if snapshot.library:
+                        snapshot = replace(snapshot, library=replace(snapshot.library, recovery=recovery))
+                    if recovery.blocked:
+                        health = "Open Wine runners and recovery in Backups & tools. " + recovery.description
+                    snapshot = replace(snapshot, launch_blocked=recovery.blocked)
+                elif not snapshot.trial_operation:
+                    if context.needs_recovery() or runtime.pending(context.install):
+                        health = "Pending recovery records. Use explicit Repair before changing this installation."
+                    elif repair.inspect(context):
+                        health = "A failed product upgrade needs explicit Repair."
             version = (conf.installed_faithlife_product_release or "Unknown") if installed else ""
             snapshot = replace(snapshot, installed=installed, version=version,
                                health=app.logos.enforcement_error or health,
@@ -89,6 +117,41 @@ class Services:
                 return Result("succeeded", "Discarded refresh for a changed installation profile")
             self._snapshot = snapshot
         return Result("succeeded", "Installation state refreshed")
+
+    def runner_action(self, action, profile, view=None, row=None, operation=None, *, import_path=None):
+        def run(app, cancel):
+            if profile != app.conf.config_file_path:
+                raise maintenance.MaintenanceError("The selected profile changed. Reopen Wine runners.")
+            if action in ("stop", "restart"):
+                from logos_desktop import runtime_commands
+
+                report = runtime_commands.execute("trial_" + action, operation, app.conf)
+                if action == "stop":
+                    for _ in range(40):
+                        if report["phase"] in ("ended", "conflict") or cancel.wait(1):
+                            break
+                        app.status("Ending offline trial. Check the trial window for a save or close prompt.")
+                        report = runtime_commands.execute("trial_status", operation, app.conf)
+                    if report["phase"] not in ("ended", "conflict"):
+                        return Result("unknown", "Trial shutdown is still running. Recheck on Home or retry End trial.")
+                outcome = "unknown" if report["result"] == "unknown" else "succeeded"
+                return Result(outcome, f"Trial: {report['phase']} ({report['reason']}). Recheck status on Home.")
+            if action != "recheck":
+                result = runner_services.act(app, cancel, action, row, view, self._runner_retries,
+                                             import_path=import_path)
+                if cancel.is_set():
+                    return result
+            else:
+                result = Result("succeeded", "Wine runners refreshed")
+            self.refresh(app, cancel)
+            snapshot = self.snapshot()
+            if snapshot.profile != profile:
+                raise maintenance.MaintenanceError("The selected profile changed. Reopen Wine runners.")
+            library = runner_services.library(app, snapshot, metadata_retry=action == "recheck")
+            with self._lock:
+                self._snapshot = replace(self._snapshot, library=library)
+            return result
+        return self._settled(run)
 
     def _identify_controller(self):
         identity = controller_install.identify()
@@ -123,7 +186,8 @@ class Services:
     @staticmethod
     def _wine_status(conf, selected):
         """Project cached release facts without probing the selected runtime or refreshing metadata."""
-        parts = [releases.WINE_RECOMMENDATION_POLICY]
+        parts = ["Wine runners compares the selected Logos build with the bundled catalog.",
+                 releases.WINE_RECOMMENDATION_POLICY]
         if selected in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL):
             parts.append("Selected recommendation has not been resolved.")
         elif selected:
@@ -303,6 +367,8 @@ class Services:
             app.checkpoint()
 
             target_draft = replace(draft, release=self._latest_target(app))
+            target_draft, setup = runner_services.setup_runtime(app, cancel, target_draft, self.snapshot())
+            changes["wine_binary"] = target_draft.runtime
             changes["faithlife_product_release"] = target_draft.release
             document = config_store.apply_changes(app.conf._raw._saved, changes, app.conf.config_file_path)
             self._validate_proposal(app.conf, target_draft, document)
@@ -314,6 +380,8 @@ class Services:
             validate_install = partial(self._validate_proposal, app.conf, target_draft)
             with app.conf.validated_writes(validate_install):
                 with maintenance.change_selection(app.conf, str(destination), document=document):
+                    if setup:
+                        setup.check_destination(expected_prefix)
                     app.conf._change(**changes)
             with app.conf.validated_writes(validate_release):
                 app.conf.skip_install_system_dependencies = not draft.install_dependencies
@@ -323,7 +391,10 @@ class Services:
                     raise maintenance.MaintenanceError("Installation context changed after confirmation")
                 self._validate_proposal(app.conf, target_draft, app.conf._raw._saved)
 
-                installer.install(app)
+                if setup:
+                    installer.install(app, setup=setup)
+                else:
+                    installer.install(app)
             return Result("succeeded", "Installation completed")
         return self._settled(run)
 
@@ -554,14 +625,9 @@ class Services:
                 return Result("succeeded", f"Logos updated to {target}")
 
             if name == "runtime_update":
-                raw = app.conf._raw
-                appimage = (raw.wine_binary or "").lower().endswith(".appimage")
-                recommended = raw.wine_binary in (constants.WINE_RECOMMENDED_SIGIL, constants.WINE_BETA_SIGIL)
-                if raw.wine_binary_code not in ("AppImage", "Recommended") and not appimage and not recommended:
-                    return Result("unknown", "Recommended Wine updates apply only to managed AppImage runtimes")
+                return Result("unknown", "Open Wine runners and recovery to review a guarded change.")
 
             actions = {
-                "runtime_update": (utils.update_to_latest_recommended_appimage, "Runtime update completed"),
                 "dependencies": (utils.install_dependencies, "Dependency installation completed"),
                 "icu": (wine.enforce_icu_data_files, "ICU installation completed"),
                 "catalog": (control.remove_library_catalog, "Library catalog removed"),
@@ -592,17 +658,6 @@ class Services:
             raise maintenance.MaintenanceError("An invocation override selects a non-stable release channel")
         return changes
 
-    def select_runtime(self, path):
-        def run(app, cancel):
-            if not path or not Path(path).is_absolute() or not Path(path).is_file():
-                raise ValueError("Choose an existing absolute AppImage file")
-            if not app.approve("Change Wine runtime?", path):
-                return Result("cancelled", "Runtime was not changed")
-            app.checkpoint()
-            utils.set_appimage_symlink(app, source=path)
-            return Result("succeeded", "Wine runtime changed and saved")
-        return self._settled(run)
-
     def discover(self, app, cancel):
         conf, raw = app.conf, app.conf._raw
         profile = conf.config_file_path
@@ -619,7 +674,8 @@ class Services:
         def run(app, cancel):
             try:
                 return operation(app, cancel)
-            except (backup_store.CopyCancelled, support.SupportCancelled, UserExitedFromAsk):
+            except (backup_store.CopyCancelled, support.SupportCancelled, runtime_copies.Cancelled,
+                    runtime_runners.Cancelled, UserExitedFromAsk):
                 return Result("cancelled", "Operation cancelled at a safe boundary. Earlier completed steps remain")
             finally:
                 try:

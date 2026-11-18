@@ -546,12 +546,13 @@ class Config:
         self._download_dir = self._user_download_dir = None
         self._network = self._create_network_requests_with_hook()
 
-    def rebind(self, raw):
+    def rebind(self, raw, *, runtime_selection=None):
         """Publish one saved/effective context after save, reload or journal recovery."""
         previous = self._overrides
         path = getattr(raw, "_file_path", previous.config_path)
         environment = getattr(previous, "environment", getattr(raw, "_environment", {}))
-        runtime_selection = getattr(previous, "runtime_selection", {})
+        if runtime_selection is None:
+            runtime_selection = getattr(previous, "runtime_selection", {})
         if hasattr(raw, "_saved"):
             transient = config_store.apply_changes(environment, runtime_selection, path)
             rebound = PersistentConfiguration.from_document(raw._saved, transient)

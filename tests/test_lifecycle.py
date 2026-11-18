@@ -4,6 +4,7 @@ from functools import wraps
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -93,6 +94,7 @@ class TestLifecycle(unittest.TestCase):
         self.app.status = Mock()
         self.manager = self.app.logos
         self.context = maintenance.Context.from_app(self.app)
+        self.context.prefix.mkdir(parents=True, exist_ok=True)
         self.addCleanup(self.app.close)
         self.stack.enter_context(patch("logos_desktop.runtime.executable", return_value="fixture-runtime"))
         self.stack.enter_context(patch.object(
@@ -412,6 +414,7 @@ class TestLifecycle(unittest.TestCase):
             self.assertIs(self.app.logos, self.manager)
             self.assertIsNone(self.manager._context)
             selected = maintenance.Context.from_app(self.app)
+            selected.prefix.mkdir(parents=True)
             child = self.child(candidate.logos_system_exe_windows_path, prefix=selected.prefix)
             clock.return_value = 101
             self.manager.monitor()
@@ -496,11 +499,74 @@ class TestLifecycle(unittest.TestCase):
         self.assertIsNone(unrelated.poll())
         self.assertIsNone(selected.poll())
 
+    @unittest.skipUnless(shutil.which("bwrap"), "Private prefix comparison requires Bubblewrap")
+    def test_offline_copy_with_original_logical_prefix_is_not_a_selected_stop_target(self):
+        copied = self.root / "offline-copy"
+        copied.mkdir()
+        query = self.app.conf.logos_system_exe_windows_path
+        program = """\
+import os
+import sys
+
+print(os.getpid(), flush=True)
+sys.stdin.read()
+"""
+        with subprocess.Popen(
+            ["bwrap", "--die-with-parent", "--unshare-net", "--ro-bind", "/", "/",
+             "--bind", str(copied), str(self.context.prefix), "--setenv", "WINEPREFIX", str(self.context.prefix),
+             "--", sys.executable, "-c", program, query],
+            env={k: v for k, v in os.environ.items() if k != "WINEPREFIX"}, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ) as helper:
+            try:
+                pid = helper.stdout.readline().strip()
+                if not pid:
+                    reason = helper.stderr.read()
+                    if "Operation not permitted" in reason or "No permissions" in reason:
+                        self.skipTest("This host restricts disposable mount namespaces")
+                    self.fail(reason)
+                child = psutil.Process(int(pid))
+                self.assertFalse(self.manager._prefix_member(child, self.context))
+                self.assertNotIn(child, self.manager.get_logos_pids(self.context)[query])
+                self.manager.stop()
+                self.assertTrue(child.is_running())
+            finally:
+                helper.stdin.close()
+
+    def test_escalation_refuses_when_the_process_prefix_can_no_longer_be_verified(self):
+        query = self.app.conf.logos_system_exe_windows_path
+        child = self.child(query)
+        viewed = Path("/proc") / str(child.pid) / "root" / self.context.prefix.relative_to("/")
+        samefile = Path.samefile
+
+        for failure in (PermissionError, FileNotFoundError):
+            rechecking = False
+
+            def after_terminate(candidates, timeout):
+                nonlocal rechecking
+                rechecking = True
+                return candidates
+
+            def compare(path, other):
+                if path == viewed and rechecking:
+                    raise failure()
+                return samefile(path, other)
+
+            with (self.subTest(failure=failure), patch.object(Path, "samefile", compare),
+                  patch.object(psutil.Process, "terminate") as terminate,
+                  patch.object(self.manager, "_wait_selected", side_effect=after_terminate),
+                  patch.object(psutil.Process, "kill") as escalate):
+                with self.assertRaises(maintenance.MaintenanceBusy):
+                    self.manager.stop()
+                terminate.assert_called_once()
+                escalate.assert_not_called()
+                self.assertIsNone(child.poll())
+
     def test_discovery_excludes_invalid_vertices_without_pruning_live_children(self):
         parents = [self.process_candidate(900001, uid=os.geteuid() + 1),
                    self.process_candidate(900002, status=psutil.STATUS_ZOMBIE),
                    self.process_candidate(900003, status=psutil.STATUS_DEAD)]
-        children = [self.process_candidate(900011 + index, parent=parent.pid)
+        children = [self.process_candidate(os.getpid() if index == 0 else 900011 + index, parent=parent.pid)
                     for index, parent in enumerate(parents)]
         with patch.object(psutil, "process_iter", return_value=[*parents, *children]):
             self.manager.get_logos_pids(self.context)

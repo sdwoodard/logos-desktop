@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from contextlib import contextmanager
 
 from logos_desktop.app import App, UserExitedFromAsk
 from logos_desktop import processes
@@ -118,7 +119,8 @@ class QtApp(App):
             prompt.complete()
             self.bridge.cancel_prompt.emit(prompt)
 
-    def _ask(self, question, options):
+    @contextmanager
+    def pending_prompt(self, question, options):
         if threading.current_thread() is threading.main_thread():
             raise RuntimeError("Blocking questions must run outside the Qt event thread")
         prompt = Prompt(question, tuple(options) if isinstance(options, list) else options)
@@ -128,14 +130,19 @@ class QtApp(App):
             self._prompts.add(prompt)
         try:
             self.bridge.prompt.emit(prompt)
-            while not prompt.done.wait(.05):
-                if self.stop_requested.is_set() or self._cancel.is_set():
-                    prompt.complete()
-                    self.bridge.cancel_prompt.emit(prompt)
-            return prompt.answer
+            yield prompt
         finally:
+            if not prompt.done.is_set():
+                prompt.complete()
+                self.bridge.cancel_prompt.emit(prompt)
             with self._prompt_lock:
                 self._prompts.discard(prompt)
+
+    def _ask(self, question, options):
+        with self.pending_prompt(question, options) as prompt:
+            while not prompt.done.wait(.05):
+                self.checkpoint()
+            return prompt.answer
 
     def _info(self, message):
         self.bridge.information.emit("Information", message)

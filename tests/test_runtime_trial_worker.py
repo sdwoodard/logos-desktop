@@ -53,8 +53,25 @@ def spawn(arguments, **kwargs):
     if arguments[0] == 'Xwayland':
         arguments = ['/usr/bin/python3', '-c', SERVER]
     return _popen(arguments, **kwargs)
-subprocess.Popen = spawn
+class FixtureSurface:
+    def __init__(self, log, purpose):
+        self.server = spawn(['Xwayland'], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        self.pids = (self.server.pid,)
+    def poll(self):
+        return self.server.poll()
+    def close_requested(self):
+        try:
+            Path('/trial/frame-close').unlink()
+            return True
+        except FileNotFoundError:
+            return False
+    def close(self):
+        self.server.terminate()
+        self.server.wait(timeout=5)
+PrivateDisplay = FixtureSurface
 class SyntheticDisplay:
+    def fit_main(self, application_pids):
+        pass
     def viewable(self, application_pids):
         return bool(application_pids)
     def close_windows(self, application_pids):
@@ -306,7 +323,7 @@ class WorkerProtocolTests(unittest.TestCase):
         self.wait_phase(process, ("prepared",))
         trials.write(self.private / "request.json", {"action": "launch"})
         self.wait_phase(process, ("running",))
-        trials.write(self.private / "request.json", {"action": "stop"})
+        (self.private / "frame-close").touch()
         time.sleep(0.6)
         self.assertTrue((self.private / "close-requests").exists())
         self.assertFalse((self.private / "session-ended").exists())

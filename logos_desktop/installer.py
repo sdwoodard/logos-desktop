@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,22 @@ class ProductInstaller:
     """Keep the target release attached to the exact accepted MSI generation."""
     release: str
     artifact: artifacts.AcceptedArtifact
+
+
+@dataclass(frozen=True)
+class ManagedSetup:
+    generation: str
+    artifact: artifacts.AcceptedArtifact
+    release: str
+    prepared: object | None
+    host: tuple
+
+    def check_destination(self, prefix):
+        if prefix.is_symlink() or (prefix.exists() and any(prefix.iterdir())):
+            raise maintenance.RecoveryRequired("Use an empty installation for new setup. Existing data needs recovery.")
+
+
+_new_setup = ContextVar("managed_new_setup", default=None)
 
 
 # This step doesn't do anything per-say, but "collects" all the choices in one step
@@ -252,6 +269,13 @@ def ensure_appimage_download(app: App):
 
 def ensure_wine_executables(app: App):
     app.installer_step_count += 1
+    setup = _new_setup.get()
+    if setup:
+        ensure_sys_deps(app)
+        app.checkpoint()
+        check_opengl(app)
+        runtime.activate(app, setup.artifact, setup_generation=setup.generation)
+        return
     ensure_appimage_download(app=app)
     app.checkpoint()
     app.installer_step += 1
@@ -275,7 +299,12 @@ def ensure_winetricks_executable(app: App):
     app.installer_step += 1
     app.status("Ensuring winetricks executable is available…")
 
-    system.ensure_winetricks(app=app)
+    setup = _new_setup.get()
+    if setup and setup.prepared:
+        asset = next(d for d in setup.prepared.dependencies if d.dependency.role == "winetricks")
+        system.ensure_winetricks(app, prepared=asset)
+    else:
+        system.ensure_winetricks(app=app)
 
     logging.debug(f"> {app.conf.winetricks_binary} is executable?: {os.access(app.conf.winetricks_binary, os.X_OK)}")
 
@@ -321,7 +350,8 @@ def configure_prepared_stack(app: App, prepared, *, observed_settings, host_fact
     if context.prefix.exists() and any(context.prefix.iterdir()):
         raise maintenance.MaintenanceError("Existing prefixes require complete recovery before recipe application")
     raw = app.conf._raw
-    if (raw.faithlife_product != "Logos" or raw.faithlife_product_release != prepared.stack.product_build
+    if (raw.faithlife_product != "Logos" or not runtime_stacks.same_product_build(
+            raw.faithlife_product_release, prepared.stack.product_build)
             or not runtime_stacks.matches(prepared.recipe.host, host_facts)):
         raise maintenance.MaintenanceError("Prepared product or host facts do not match")
     if any(key not in prepared.recipe.settings or prepared.recipe.settings[key] != value
@@ -361,6 +391,11 @@ def ensure_wineprefix_init(app: App):
     app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring wineprefix is initialized…")
+    setup = _new_setup.get()
+    if setup and setup.prepared:
+        configure_prepared_stack(app, setup.prepared, observed_settings={}, host_facts=dict(setup.host))
+        wine.wineserver_wait(app)
+        return accepted
 
     init_file = Path(f"{app.conf.wine_prefix}/system.reg")
     logging.debug(f"{init_file=}")
@@ -382,6 +417,10 @@ def ensure_wineprefix_config(app: App):
     app.checkpoint()
     app.installer_step += 1
     app.status("Ensuring wineprefix configuration…")
+    setup = _new_setup.get()
+    if setup and setup.prepared:
+        wine.sync_desktop_theme(app)
+        return accepted
 
     # Force winemenubuilder.exe='' in registry.
     logging.debug("Setting wineprefix registry to ignore winemenubuilder.exe.")
@@ -414,7 +453,9 @@ def ensure_icu_data_files(app: App):
     app.status("Ensuring ICU data files are installed…")
     logging.debug('- ICU data files')
 
-    wine.enforce_icu_data_files(app=app)
+    setup = _new_setup.get()
+    if not (setup and setup.prepared):
+        wine.enforce_icu_data_files(app=app)
 
     logging.debug('> ICU data files installed')
     return accepted
@@ -509,7 +550,7 @@ def ensure_login_handler(app: App):
     return None
 
 
-def install(app: App):
+def install(app: App, *, setup=None):
     if not app.conf._raw.faithlife_product:
         app.conf.faithlife_product
     if not getattr(app.conf._raw, "faithlife_product_version", None):
@@ -517,7 +558,17 @@ def install(app: App):
     if not (getattr(app.conf._overrides, "install_dir", None) or app.conf._raw.install_dir):
         app.conf.install_dir
     with maintenance.installing(app):
-        return _install(app)
+        if setup is None:
+            return _install(app)
+        setup.check_destination(maintenance.current_context().prefix)
+        if (app.conf.faithlife_product_release != setup.release
+                or Path(app.conf.wine_binary).resolve(strict=True) != setup.artifact.path):
+            raise maintenance.RecoveryRequired("The new setup selection changed before installation")
+        token = _new_setup.set(setup)
+        try:
+            return _install(app)
+        finally:
+            _new_setup.reset(token)
 
 
 def _install(app: App):
@@ -545,6 +596,16 @@ def create_wine_appimage_symlinks(app: App):
     if app.conf.wine_appimage_path is None:
         return
     source = Path(app.conf.wine_appimage_path).resolve(strict=True)
+    from . import runtime_runners
+
+    store = runtime_runners.RunnerStore()
+    if source.is_relative_to(store.root):
+        copy = next((c for c in store.inventory() if c.path == source and c.state == "published"), None)
+        bindir = Path(app.conf.installer_binary_dir)
+        links = [bindir / name for name in ("selected_wine.AppImage", "wine", "wine64", "wineserver")]
+        if copy and all(link.is_symlink() and link.resolve(strict=True) == source for link in links):
+            return
+        raise maintenance.RecoveryRequired("Recheck the managed selection in Wine runners before changing its links")
     if source.parent.parent.parent.name == ".artifacts":
         accepted = artifacts.installed(source, "appimage")
     else:

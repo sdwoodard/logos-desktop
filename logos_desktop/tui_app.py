@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import threading
 from pathlib import Path
 from typing import Optional
@@ -798,12 +799,24 @@ class TUI(App):
         if not choice or choice == "Return to Main Menu":
             self.go_to_main_menu()
             return
+        if choice == "Wine runners and recovery":
+            command = shlex.join(["logos-desktop", "-c", str(self.conf.config_file_path)])
+            self.ui.push_screen(InfoModal(
+                      "Close this controller before changing the installation. Use these terminal commands:\n"
+                      f"{command} --runtime-stacks\n{command} --runtime-runners\n"
+                      f"{command} --runtime-runner-details RUNNER_ID\n{command} --runtime-download RUNNER_ID\n"
+                      f"{command} --runtime-trial STACK_ID\n{command} --runtime-trial-status\n"
+                      f"{command} --runtime-trial-stop OPERATION_ID\n{command} --runtime-apply STACK_ID\n"
+                      "For an experimental target, add --experimental-runtime to apply. To explicitly skip the "
+                      "candidate checklist, add --without-successful-trial. Recovery is required in either case.\n"
+                      f"{command} --runtime-recovery-status\n{command} --runtime-return RECOVERY_ID\n"
+                      f"{command} --runtime-inspect RECOVERY_ID\n{command} --runtime-resume-online RECOVERY_ID"))
+            return
         operations = {
             "Remove Library Catalog": control.remove_library_catalog,
             "Remove All Index Files": control.remove_all_index_files,
             "Uninstall": control.uninstall,
             "Install ICU": wine.enforce_icu_data_files,
-            "Update to Latest AppImage": utils.update_to_latest_recommended_appimage,
             "Install Dependencies": utils.install_dependencies,
             "Edit Config": lambda app: control.edit_file(app.conf.config_file_path),
             "Reload Config": lambda app: app.conf.reload(),
@@ -854,7 +867,7 @@ class TUI(App):
             or (getattr(self.conf._raw, "install_dir", None) and Path(self.conf._raw.install_dir).exists())
         ):
             labels.append("Uninstall")
-        labels.extend(["Install Dependencies", "Edit Config", "Reload Config"])
+        labels.extend(["Wine runners and recovery", "Install Dependencies", "Edit Config", "Reload Config"])
         if self.is_installed():
             labels.extend([
                 "Change Logos Release Channel",

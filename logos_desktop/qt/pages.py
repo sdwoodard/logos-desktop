@@ -125,6 +125,7 @@ class CarePage(QWidget):
         self.wine_status = description("")
         self.wine_status.setTextFormat(Qt.TextFormat.PlainText)
         wine.content.addWidget(self.wine_status)
+        wine.content.addWidget(self.button("wine_runners", "Wine runners and recovery…"))
         wine.content.addWidget(self.button("runtime_update", "Update recommended Wine…"))
         wine.content.addWidget(self.button("dependencies", "Install system dependencies…"))
         self.cards = (self.backups, repair, indexing, wine)

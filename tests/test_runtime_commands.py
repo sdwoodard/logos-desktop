@@ -9,6 +9,21 @@ from logos_desktop import maintenance, runtime_commands
 
 
 class InspectionInputTests(unittest.TestCase):
+    def test_terminal_experimental_opt_in_binds_target_and_preserves_trial_choice(self):
+        conf = Mock()
+        context = Mock()
+        target = next(iter(runtime_commands.runtime_stacks.bundled().stacks))
+        with (patch.object(maintenance.Context, "from_app", return_value=context),
+              patch.object(runtime_commands, "apply_stack") as apply):
+            with self.assertRaisesRegex(maintenance.MaintenanceError, "not confirmed"):
+                runtime_commands.execute("apply", target, conf, experimental=True, confirm=lambda _: "yes")
+            apply.assert_not_called()
+            confirm = Mock(return_value="experimental " + target)
+            runtime_commands.execute("apply", target, conf, experimental=True, skip_trial=True, confirm=confirm)
+            args, options = apply.call_args
+            self.assertEqual((args[0], args[1], args[3], args[4], args[5]), (context, conf, target, confirm, True))
+            self.assertEqual(options, {"experimental": True})
+
     def test_open_terminal_can_remain_idle_then_restart_and_retry_normal_stop(self):
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)

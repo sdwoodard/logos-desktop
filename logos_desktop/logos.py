@@ -366,13 +366,24 @@ class LogosManager:
         self._snapshot = snapshot
         return groups
 
+    def _selected_prefix(self, process, context):
+        prefix = process.environ().get("WINEPREFIX")
+        if not prefix or not Path(prefix).is_absolute() or Path(prefix).resolve() != context.prefix:
+            return False
+        # Offline Wine sees the selected path mounted over a different directory.
+        viewed = Path("/proc") / str(process.pid) / "root" / context.prefix.relative_to("/")
+        try:
+            return viewed.samefile(context.prefix)
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+
     def _prefix_member(self, process, context):
         try:
             if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
                 return False
-            prefix = process.environ().get("WINEPREFIX")
-            return (process.uids().real == os.geteuid() and prefix is not None
-                    and Path(prefix).is_absolute() and Path(prefix).resolve() == context.prefix)
+            return process.uids().real == os.geteuid() and self._selected_prefix(process, context)
+        except PermissionError as error:
+            raise maintenance.MaintenanceBusy("Cannot verify a selected program's prefix directory") from error
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             return False
 
@@ -439,16 +450,17 @@ class LogosManager:
         try:
             if not process.is_running() or process.uids().real != os.geteuid():
                 return False
-            prefix = process.environ().get("WINEPREFIX")
-            if not prefix or not Path(prefix).is_absolute() or Path(prefix).resolve() != context.prefix:
+            if process.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                return False
+            if not self._selected_prefix(process, context):
                 return False
             if expected is None:
                 conf = self.app.conf
                 expected = (conf.logos_exe, conf.logos_system_exe_windows_path,
                             conf.logos_indexer_exe_windows_path, conf.logos_cef_exe_windows_path)
             return (bool((set(expected) - {None}).intersection(process.cmdline()))
-                    and process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
-        except psutil.AccessDenied as error:
+                    and process.is_running())
+        except (psutil.AccessDenied, PermissionError) as error:
             if strict:
                 raise maintenance.MaintenanceBusy("Cannot verify a selected program's process identity") from error
             return False
@@ -588,8 +600,9 @@ class LogosManager:
         context = lease.context
         configuration = self.app.conf
         try:
-            from . import repair
+            from . import repair, runtime_recovery
 
+            runtime_recovery.Recovery(context).check_online_prerequisites()
             if repair.inspect(maintenance.Context.from_app(self.app)) == repair.FailureType.FailedUpgrade:
                 raise maintenance.RecoveryRequired("A failed upgrade requires explicit --repair before launch")
             selected_runtime = runtime.executable(self.app.conf.wine_binary, self.app)

@@ -455,16 +455,9 @@ def same_product_build(first, second):
     return values[0] == values[1]
 
 
-def assess(catalog, stack, *, product, product_build, host, settings, dependencies, availability,
-           runner_sha256=None):
-    runner = catalog.runners[stack.runner_id]
-    actual_digest = runner.sha256 if runner_sha256 is None else digest(runner_sha256)
-    recipe = catalog.recipes[stack.recipe_id]
-    if product != "Logos" or not same_product_build(product_build, stack.product_build):
-        return Assessment("not-tested", availability, "product-mismatch", False)
-
+def affected(catalog, runner_sha256, product_build, host, settings, dependencies):
     for fact in catalog.evidence.values():
-        if (fact.kind != "known-affected" or fact.runner_sha256 != actual_digest
+        if (fact.kind != "known-affected" or fact.runner_sha256 != runner_sha256
                 or not same_product_build(fact.product_build, product_build)
                 or not matches(fact.host, host, negative=True)):
             continue
@@ -475,7 +468,20 @@ def assess(catalog, stack, *, product, product_build, host, settings, dependenci
                                     and dependencies[asset.role] != asset.sha256
                                     for asset in affected_recipe.dependencies)
         if not settings_conflict and not dependencies_conflict:
-            return Assessment("known-affected", availability, fact.reason, False)
+            return fact
+    return None
+
+
+def assess(catalog, stack, *, product, product_build, host, settings, dependencies, availability,
+           runner_sha256=None):
+    runner = catalog.runners[stack.runner_id]
+    actual_digest = runner.sha256 if runner_sha256 is None else digest(runner_sha256)
+    recipe = catalog.recipes[stack.recipe_id]
+    if product != "Logos" or not same_product_build(product_build, stack.product_build):
+        return Assessment("not-tested", availability, "product-mismatch", False)
+    failure = affected(catalog, actual_digest, product_build, host, settings, dependencies)
+    if failure:
+        return Assessment("known-affected", availability, failure.reason, False)
 
     settings_match = all(key in settings and type(settings[key]) is type(value) and settings[key] == value
                          for key, value in recipe.settings.items())

@@ -98,6 +98,8 @@ def main():
         arguments = dict(source=source, copied=root / "copy", private=private,
                          runner=placeholder, worker=worker)
         runtime_boundary.probe(runtime_boundary.command(boundary, **arguments, check=True))
+        # Trial admission runs a display-only check, then opens the same private workspace again.
+        runtime_boundary.probe(runtime_boundary.command(boundary, **arguments, check=True))
         probe = root / "probe.py"
         probe.write_text(PROBE)
         copied = (root / "copy").stat()

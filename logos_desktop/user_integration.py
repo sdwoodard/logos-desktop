@@ -152,7 +152,11 @@ def install(root, *, modify_path=True):
              f"Exec={desktop_exec([str(root / 'logos-desktop'), '--dialog', 'qt'])}\n"
              f"Icon={icon_value}\n"
              "Terminal=false\nCategories=Education;\nKeywords=Logos;Bible;Wine;\n").encode()
+    offline = ("[Desktop Entry]\nType=Application\nName=Logos offline copy\nNoDisplay=true\n"
+               f"Exec={desktop_exec([str(root / 'logos-desktop'), '--dialog', 'qt'])}\n"
+               f"Icon={icon_value}\nTerminal=false\nStartupWMClass=logos-desktop-offline\n").encode()
     fixed = {binary: (command_content(root), 0o700), desktop: (entry, 0o600),
+             desktop.with_name("logos-desktop-offline.desktop"): (offline, 0o600),
              icon: ((Path(constants.APP_IMAGE_DIR) / "logos-desktop.svg").read_bytes(), 0o600)}
     in_path = str(binary.parent) in os.environ.get("PATH", "").split(os.pathsep)
     try:

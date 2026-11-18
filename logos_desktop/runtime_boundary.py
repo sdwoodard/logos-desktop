@@ -8,11 +8,12 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 
 from . import artifacts, paths, processes, runtime_copies
 
 
-REVISION = "private-xwayland-software-1"
+REVISION = "private-xwayland-purpose-window-2"
 SYSTEM_PATHS = ("/usr", "/etc/fonts", "/etc/ld.so.cache", "/etc/ssl/certs", "/etc/ssl/openssl.cnf",
                 "/etc/ca-certificates", "/etc/alternatives")
 
@@ -138,7 +139,9 @@ def inspect(source_roots, *, checkpoint=lambda: None):
     except OSError as error:
         raise Unavailable("Cannot inspect required read-only system dependencies. Check their permissions",
                           "dependency-inspection-unavailable") from error
-    dependencies = [Path("/usr/share/glvnd/egl_vendor.d/50_mesa.json")]
+    dependencies = [Path("/usr/share/glvnd/egl_vendor.d/50_mesa.json"),
+                    Path(__file__).with_name("runtime_surface.py"),
+                    Path(__file__).with_name("img") / "logos-desktop-icon.png"]
     for name in ("libEGL_mesa.so.0", "dri/swrast_dri.so"):
         candidates = [Path("/usr/lib") / name, Path("/usr/lib/x86_64-linux-gnu") / name]
         selected = next((candidate for candidate in candidates if candidate.is_file()), None)
@@ -218,6 +221,8 @@ def command(boundary, *, source, copied, private, runner, worker, dependencies=(
                  "--ro-bind", str(private / "group"), "/etc/group",
                  "--ro-bind", str(runner), "/runner/image.AppImage",
                  "--ro-bind", str(worker), "/worker.py",
+                 "--ro-bind", str(Path(__file__).with_name("runtime_surface.py")), "/offline-window.py",
+                 "--ro-bind", str(Path(__file__).with_name("img") / "logos-desktop-icon.png"), "/offline-icon.png",
                  "--ro-bind", str(boundary.wayland), "/trial/runtime/host-display"]
     for role in ("wine", "wine64", "wineserver"):
         arguments.extend(["--symlink", "image.AppImage", "/runner/" + role])
@@ -265,4 +270,21 @@ def probe(arguments):
     except (OSError, subprocess.TimeoutExpired) as error:
         raise Unavailable("Offline display preflight failed. Check user namespaces and Wayland access") from error
     if result.returncode:
-        raise Unavailable("Offline display preflight failed. Check user namespaces and Wayland access")
+        raise Unavailable("Offline display preflight failed. Check Wayland, user namespaces, system PyQt6 "
+                          "and the Qt 6 Wayland compositor QML module, then recheck.")
+
+
+def check_display(boundary, source, *, checkpoint=lambda: None):
+    """Exercise the actual private compositor on empty disposable bytes before copying an installation."""
+    checkpoint()
+    with tempfile.TemporaryDirectory(prefix="logos-display-") as temporary:
+        root = Path(temporary)
+        copied = root / "empty"
+        copied.mkdir(mode=0o700)
+        runner = root / "unused"
+        runner.touch(mode=0o600)
+        private = root / "private"
+        prepare_private(private)
+        probe(command(boundary, source=source, copied=copied, private=private, runner=runner,
+                      worker=Path(__file__).with_name("runtime_trial_worker.py"), check=True))
+    checkpoint()

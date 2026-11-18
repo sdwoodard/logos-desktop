@@ -762,14 +762,31 @@ finally:
         journal["capability"] = {"id": inspection_id, "sha256": artifacts.regular_hash(directory / "inspection.json")}
         service.phase(journal, "point-verified", result="succeeded")
         original = runtime_copies.manifest(service.context.prefix)
+        app = self.app_fixture(service)
         with (patch.object(recovery.runtime_boundary, "inspect", return_value=object()),
               patch.object(recovery, "inspection_facts", return_value={}),
               patch.object(recovery.runtime_boundary, "command", return_value=["synthetic-probe"]),
               patch.object(recovery.runtime_boundary, "probe"), patch.object(service, "_run_recipe")):
-            service.apply(self.app_fixture(service), prepared, store=self.store, generation=target.generation,
+            service.apply(app, prepared, store=self.store, generation=target.generation,
                           host={"architecture": "x86_64", "font-arial": "present"}, without_successful_trial=True)
         (service.context.prefix / "synthetic-recipe-work").write_text("preserve newer recipe bytes")
+        before_feedback = service.status()
+        before_references = self.store.removal_reasons(target.sha256)
+        service.record_local_feedback(point)
+        saved = recovery.read(service.root / ("feedback-" + point + ".json"))
+        self.assertEqual(saved["observation"], "works-for-me")
+        self.assertEqual(saved["activation"], before_feedback["activation"])
+        self.assertEqual(service.status(), before_feedback)
+        self.assertEqual(self.store.removal_reasons(target.sha256), before_references)
+        with (patch.object(recovery.runtime_boundary, "inspect", side_effect=recovery.runtime_boundary.Unavailable(
+                "Repair the missing display before launch", "display-unavailable")),
+              self.assertRaisesRegex(maintenance.MaintenanceError, "Repair.*display")):
+            service.check_online_prerequisites()
         self.fresh_complete_return(service, original)
+        self.assertEqual(Path(app.conf._raw.wine_binary), target.path)
+        service.rebind_restored(app)
+        self.assertEqual(Path(app.conf._raw.wine_binary), self.runner.path)
+        self.assertFalse(app.conf._overrides.runtime_selection)
         with (patch.object(recovery.runtime_boundary, "inspect", side_effect=recovery.runtime_boundary.Unavailable(
                 "Repair the missing display before offline inspection", "display-unavailable")),
               self.assertRaisesRegex(maintenance.MaintenanceError, "Repair.*display")):
@@ -922,6 +939,64 @@ finally:
         self.assertTrue(directory.exists())
         self.service.verify_point(first)
         self.service.verify_point(second)
+
+    def test_retained_storage_includes_historical_point_and_unknown_inspection_without_following_links(self):
+        from logos_desktop import runtime_storage
+
+        first, second = self.two_points()
+        operation, directory = self.synthetic_inspection(first)
+        record = recovery.read(directory / "inspection.json")
+        recovery.write(directory / "inspection.json", dict(record, result="unknown"))
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "large").write_bytes(b"x" * 300000)
+        (directory / "prefix/external").symlink_to(outside)
+        rows = {r.location: r for r in runtime_storage.retained(self.context, checkpoint=lambda: None)}
+        for point in (first, second):
+            row = rows[str(self.service.root / ("point-" + point) / "prefix")]
+            self.assertGreater(row.logical, 0)
+            self.assertGreater(row.allocated, 0)
+        inspection = rows[str(directory / "prefix")]
+        self.assertIn("unknown", inspection.purpose)
+        self.assertLess(inspection.logical, 300000)
+        self.assertEqual(self.service.inspection_record(operation)["result"], "unknown")
+
+    def test_cancellation_at_point_copy_leaves_original_unchanged_and_keep_current_available(self):
+        original = runtime_copies.manifest(self.prefix)
+        def cancel(phase):
+            if phase == "point-copy":
+                raise runtime_copies.Cancelled()
+
+        self.service.checkpoint = cancel
+        with self.assertRaises(runtime_copies.Cancelled):
+            self.capture()
+        journal = self.service.status()
+        self.assertEqual(journal["phase"], "preparing")
+        self.service.keep_current(expected_revision=journal["revision"])
+        self.assertEqual(runtime_copies.manifest(self.prefix), original)
+        self.assertEqual(self.profile.read_bytes(), self.portable.read_bytes())
+
+    def test_inspection_copy_observes_close_event_before_any_wine_launch(self):
+        point = self.capture()
+        original = runtime_copies.manifest(self.prefix)
+        stop = threading.Event()
+        copy = runtime_copies.copy
+
+        def closing(*args, **options):
+            stop.set()
+            return copy(*args, **options)
+
+        with (patch.object(recovery.runtime_boundary, "inspect", return_value=object()),
+              patch.object(recovery.runtime_boundary, "check_display"),
+              patch.object(recovery, "inspection_facts", return_value={}),
+              patch.object(runtime_copies, "copy", side_effect=closing),
+              patch.object(recovery.runtime_boundary, "command") as launch,
+              self.assertRaises(runtime_copies.Cancelled)):
+            self.service.inspect_generation(stop=stop, observe=lambda: self.fail("No worker started"))
+        launch.assert_not_called()
+        self.assertEqual(runtime_copies.manifest(self.prefix), original)
+        self.assertEqual(self.service.verify_point(point)["id"], point)
+        self.assertIsNone(self.service.status()["capability"])
 
     def test_point_cleanup_refuses_history_with_retained_generation(self):
         service, _, facts = self.resume_fixture("cleanup-retained-history")
@@ -1200,6 +1275,9 @@ print(json.dumps({'retired': first, 'remaining_verified': second}))
         return inspection_id, directory
 
     def resume_fixture(self, name):
+        probe = patch.object(recovery.runtime_boundary, "check_display")
+        probe.start()
+        self.addCleanup(probe.stop)
         service = self.case_service(name)
         point = service.status()["point"]
         (service.context.prefix / "newer-work").write_text("preserve retained work")
@@ -1228,6 +1306,12 @@ print(json.dumps({'retired': first, 'remaining_verified': second}))
         with (patch.object(recovery, "ONLINE_RESUME_SUPPORTED", True),
               patch.object(recovery.runtime_boundary, "inspect", return_value=object()),
               patch.object(recovery, "inspection_facts", return_value=facts)):
+            with (patch.object(recovery.runtime_boundary, "check_display",
+                               side_effect=maintenance.RecoveryRequired("Private compositor unavailable")),
+                  self.assertRaisesRegex(maintenance.RecoveryRequired, "compositor")):
+                recovery.Recovery(service.context).resume_online(confirmation, retained_work_acknowledged=True)
+            self.assertEqual(service.status()["gate"], "online-resume-pending")
+            self.assert_blocked(service.context)
             service.resume_online(confirmation, retained_work_acknowledged=True)
             result = service.status()
             self.assertEqual((result["phase"], result["gate"]), ("resumed", "online-resumed"))
@@ -1514,6 +1598,7 @@ def filesystem(path):
 runtime_filesystem.identity = filesystem
 runtime_recovery.ONLINE_RESUME_SUPPORTED = True
 runtime_boundary.inspect = lambda roots: object()
+runtime_boundary.check_display = lambda boundary, source: None
 runtime_recovery.inspection_facts = lambda boundary: json.loads(sys.argv[4])
 context = maintenance.Context(install / 'data/wine64_bottle', install, 'Logos')
 service = runtime_recovery.Recovery(context)

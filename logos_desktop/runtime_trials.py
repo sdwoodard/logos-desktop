@@ -293,27 +293,37 @@ def startup_status(prefix):
     return selected_operation(context)
 
 
-def require_successful_trial(context, prepared, generation, profile, current, operation, observations):
-    """Validate the latest trial and the user's observations under apply admission."""
+def successful_inputs(context, profile, current, operation=None):
+    """Identify a settled trial with unchanged source, profile and a verified restart."""
     record = selected_operation(context)
-    if record['result'] != 'succeeded' or record['id'] != operation:
+    if record['result'] != 'succeeded' or (operation is not None and record['id'] != operation):
         raise maintenance.RecoveryRequired('The latest trial did not pass for this installation')
     registration = read(_lookup_root(context) / (record['id'] + '.json'))
     directory = runtime_copies.checked_directory(registration['directory'])
     job = read(directory / 'job.json')
-    if (directory.name != record['id'] or job['id'] != operation
+    if (directory.name != record['id'] or job['id'] != record['id']
             or hashlib.sha256(runtime_stacks.canonical(job)).hexdigest() != record['job_sha256']
-            or job['profile'] != profile_snapshot(profile) or job['generation'] != generation
-            or job['sha256'] != prepared.runner.sha256 or job['accepted']['stack'] != prepared.stack.id
-            or job['accepted']['catalog'] != prepared.catalog_sha256
-            or job['accepted']['recipe'] != prepared.recipe.sha256
+            or job['profile'] != profile_snapshot(profile)
             or record['copy']['manifest']['sha256'] != current.sha256
             or record['copy']['manifest']['observation_sha256'] != current.observation_sha256
             or not runtime_copies.runtime_filesystem.same_live_root(record['copy']['source'], context.prefix)):
         raise maintenance.RecoveryRequired('Trial inputs or original installation changed. Run a fresh trial')
-    restart = read(directory / 'restart.json')
-    if restart != {'id': operation, 'job_sha256': record['job_sha256']}:
+    if not os.path.lexists(directory / 'restart.json') or read(directory / 'restart.json') != {
+        'id': record['id'], 'job_sha256': record['job_sha256'],
+    }:
         raise maintenance.RecoveryRequired('No verified offline restart for this trial')
+    return job
+
+
+def require_successful_trial(context, prepared, generation, profile, current, operation, observations):
+    """Validate the exact candidate and the user's observations under apply admission."""
+    if operation is None:
+        raise maintenance.RecoveryRequired("Select a verified trial operation before applying")
+    job = successful_inputs(context, profile, current, operation)
+    if (job['generation'] != generation or job['sha256'] != prepared.runner.sha256
+            or job['accepted']['stack'] != prepared.stack.id or job['accepted']['catalog'] != prepared.catalog_sha256
+            or job['accepted']['recipe'] != prepared.recipe.sha256):
+        raise maintenance.RecoveryRequired('Trial inputs or original installation changed. Run a fresh trial')
     runtime_stacks.fields(observations, 'library search typing scrolling restart')
     if not all(value is True for value in observations.values()):
         raise maintenance.RecoveryRequired('Trial checklist is incomplete')
@@ -747,6 +757,7 @@ def supervise(directory, capability):
             publish("resolved", reason="owned-inspection")
             maintenance.assert_quiescent(context, controller=job["controller"])
             boundary = runtime_boundary.inspect((context.install, Path(job["profile"]["path"])), checkpoint=checkpoint)
+            runtime_boundary.check_display(boundary, context.prefix, checkpoint=checkpoint)
             baseline_identity = runtime_copies.layout(context.prefix)
             verify_profile(job["profile"], context)
             if source_account(context.prefix) != job["wine_user"]:

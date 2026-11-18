@@ -18,6 +18,8 @@ from .app import QtApp
 from .bridge import Bridge
 from .dialogs import DialogHost
 from .pages import Card, CarePage, HelpPage, ProfileSettings, UpdateCards
+from .runner_page import WineRunners
+from .runner_services import Library
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,12 @@ class Installation:
     controller_status: str = "unchecked"
     controller_message: str = "Controller installation has not been identified."
     controller_standalone: bool = False
+    library: Library | None = None
+    retry_runners: tuple = ()
+    trial_operation: str = ""
+    trial_status: str = ""
+    trial_passed: bool = False
+    launch_blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,8 @@ class InstallDraft:
     runtime: str
     install_dependencies: bool
     release: str = ""
+    generation: str = ""
+    stack: str = ""
 
 
 def label(text, *, heading=False, secondary=False):
@@ -148,6 +158,10 @@ class HomePage(QWidget):
         self.product.setText(product)
         state = {"Stopped": "Ready to open", "Starting": "Opening Logos…", "Stopping": "Stopping Logos…"}.get(
             snapshot.state, snapshot.state or ("Running" if snapshot.running else "Ready to open"))
+        if snapshot.trial_operation:
+            state = "Reserved for the offline trial"
+        elif snapshot.launch_blocked:
+            state = "Recovery required before opening Logos"
         if snapshot.indexing != "Stopped":
             state += f" · Indexer: {snapshot.indexing}"
         self.state.setText(state if snapshot.installed else "Not installed")
@@ -233,8 +247,11 @@ class InstallPage(QWidget):
         layout.addStretch()
 
     def draft(self):
+        chosen = getattr(self, "runner_choice", None)
+        bound = chosen is not None and chosen.path == self.runtime.currentText()
         return InstallDraft(self.product.currentText(), expanduser(self.destination.text()),
-                             self.runtime.currentText(), self.dependencies.isChecked(), self.release.text().strip())
+                            self.runtime.currentText(), self.dependencies.isChecked(), self.release.text().strip(),
+                            chosen.generation if bound else "", chosen.stack if bound else "")
 
     @staticmethod
     def display_location(path):
@@ -317,6 +334,7 @@ class MainWindow(QMainWindow):
         self._refreshing = False
         self._queued_operation = None
         self._settings_profile = None
+        self._transfer_runner = None
         self.bridge = Bridge(self)
         self.dialogs = DialogHost(self, self.bridge)
 
@@ -371,6 +389,9 @@ class MainWindow(QMainWindow):
             discover.clicked.connect(lambda: self.start(self.services.discover))
             self.install.layout().insertWidget(4, discover)
             self.install.discover = discover
+            self.setup_runners = QPushButton("Browse Wine runners…")
+            self.setup_runners.clicked.connect(lambda: self._open_runners(setup=True))
+            options_form.addRow(self.setup_runners)
             advanced = QToolButton()
             advanced.setText("Advanced setup")
             advanced.setCheckable(True)
@@ -378,7 +399,7 @@ class MainWindow(QMainWindow):
             advanced.setArrowType(Qt.ArrowType.RightArrow)
             options_form.addRow(advanced)
             for widget in (self.install.runtime, options_form.labelForField(self.install.runtime),
-                           self.install.dependencies, discover):
+                           self.install.dependencies, discover, self.setup_runners):
                 widget.hide()
                 advanced.toggled.connect(widget.setVisible)
             advanced.toggled.connect(lambda opened: advanced.setArrowType(
@@ -390,13 +411,24 @@ class MainWindow(QMainWindow):
             self.profile_settings.runtime_requested.connect(self._select_runtime)
             self.profile_settings.rollback_requested.connect(self._rollback_desktop)
             self.maintenance = CarePage()
+            self.runners = WineRunners()
+            self.runners.requested.connect(self._runner_action)
+            self.end_trial = QPushButton("End trial")
+            self.end_trial.clicked.connect(lambda: self._runner_action("stop"))
+            self.home.layout().insertWidget(1, self.end_trial)
+            self.trial_summary = label("")
+            self.home.layout().insertWidget(1, self.trial_summary)
+            self.trial_refresh = QPushButton("Recheck trial status")
+            self.trial_refresh.clicked.connect(lambda: self._action("refresh"))
+            self.home.layout().insertWidget(2, self.trial_refresh)
             self.diagnostics = HelpPage()
             for page in (self.home.updates, self.maintenance, self.diagnostics):
                 page.requested.connect(self._action)
             self.navigation.clear()
             self.navigation.addItems(["Home", "Install Logos", "Backups & tools", "Help & logs", "Settings"])
             self.navigation.setCurrentRow(0)
-            page_widgets = [self.home, self.install, self.maintenance, self.diagnostics, self.settings]
+            page_widgets = [self.home, self.install, self.maintenance, self.diagnostics, self.settings, self.runners]
+            self.runners_index = page_widgets.index(self.runners)
         self.install_page_index = page_widgets.index(self.install)
         for page in page_widgets:
             scroll = QScrollArea()
@@ -482,6 +514,21 @@ class MainWindow(QMainWindow):
                 self.home.run.setEnabled(False)
             if self.production:
                 self.install.load_destination(self.snapshot)
+                active_trial = bool(self.snapshot.trial_operation)
+                self.end_trial.setVisible(active_trial)
+                self.end_trial.setEnabled(self.app.active is None)
+                self.trial_refresh.setVisible(active_trial)
+                self.trial_summary.setVisible(active_trial)
+                self.trial_summary.setText(f"Source reserved for the offline trial. {self.snapshot.trial_status}. "
+                                           "If shutdown times out, review Help & logs, recheck and retry End trial.")
+                if active_trial or (self.snapshot.launch_blocked and not self.snapshot.running):
+                    self.home.run.setEnabled(False)
+                view = self.snapshot.library
+                if view is not None and self.pages.currentIndex() == self.runners_index:
+                    self.runners.load(self.snapshot, view, self.snapshot.retry_runners)
+                transferring = bool(self._transfer_runner and self.app.active)
+                self.runners.setEnabled(view is not None and (self.app.active is None or transferring))
+                self.runners.transfer_state(self._transfer_runner if transferring else None)
                 self.navigation.item(self.install_page_index).setHidden(self.snapshot.installed)
                 if self.snapshot.installed and self.navigation.currentRow() == self.install_page_index:
                     self.navigation.setCurrentRow(0)
@@ -520,7 +567,7 @@ class MainWindow(QMainWindow):
                     for name, button in page.buttons.items():
                         allowed = name in ("refresh", "open_log", "support", "edit_config", "dependencies",
                                             "controller_check", "controller_update", "doctor", "open_logs")
-                        allowed = allowed or (name == "repair" and self.snapshot.selected)
+                        allowed = allowed or name == "wine_runners" or (name == "repair" and self.snapshot.selected)
                         button.setEnabled(self.app.active is None and (allowed or self.snapshot.installed))
                         tooltip = self.snapshot.wine_status if name == "runtime_update" else ""
                         button.setToolTip("Wait for the current operation" if self.app.active is not None else tooltip)
@@ -587,6 +634,9 @@ class MainWindow(QMainWindow):
         self.start(self.services.preview(draft))
 
     def _action(self, name):
+        if name in ("runtime_update", "wine_runners"):
+            self._open_runners()
+            return
         if name == "check" and self.app.active is None:
             self.home.updates.summary.setText("Checking stable Logos releases…")
         operation = (getattr(self.services, name) if name in ("refresh", "open_log")
@@ -613,10 +663,43 @@ class MainWindow(QMainWindow):
         self.dialogs.picker("Use an existing installation profile", PROMPT_OPTION_FILE, chosen)
 
     def _select_runtime(self):
-        def chosen(path):
-            if path and not self._closing and self.app.active is None:
-                self.start(self.services.select_runtime(path))
-        self.dialogs.picker("Select a Wine AppImage", PROMPT_OPTION_FILE, chosen)
+        self._open_runners()
+
+    def _open_runners(self, setup=False):
+        self.runners.setup = setup
+        self.navigation.setCurrentRow(2)
+        self.pages.setCurrentIndex(self.runners_index)
+        self.runners.family.setFocus()
+        self._runner_action("recheck")
+
+    def _runner_action(self, action):
+        view, row = self.runners.view, self.runners.row
+        if action == "cancel":
+            self._cancel()
+            return
+        if action == "import":
+            profile = self.snapshot.profile
+
+            def chosen(path):
+                if path and not self._closing and self.app.active is None:
+                    self.start(self.services.runner_action(action, profile, view, import_path=path))
+
+            self.dialogs.picker("Import a catalog Wine AppImage without selecting it", PROMPT_OPTION_FILE, chosen)
+            return
+        if action in ("back", "draft"):
+            if action == "draft":
+                if not row or view.profile != self.snapshot.profile or self.snapshot.selected:
+                    return
+                self.install.runtime.setCurrentText(row.path)
+                self.install.runner_choice = row
+            page = self.install_page_index if self.runners.setup else 2
+            self.navigation.setCurrentRow(page)
+            self.pages.setCurrentIndex(page)
+            return
+        if action in ("download", "retry") and self.app.active is None:
+            self._transfer_runner = row.version
+        self.start(self.services.runner_action(action, self.snapshot.profile, view, row,
+                                               self.snapshot.trial_operation))
 
     def _rollback_desktop(self):
         def chosen(path):
@@ -666,6 +749,8 @@ class MainWindow(QMainWindow):
             return
         if not self.app._cancel.is_set():
             self.status.setText(progress.message)
+            if self.production and self._transfer_runner:
+                self.runners.transfer.setText(progress.message)
         if self.production and progress.message == "Checking stable Logos releases…":
             self.home.updates.summary.setText(progress.message)
         if self.production and progress.message == "Checking the controller installation provider":
@@ -684,6 +769,7 @@ class MainWindow(QMainWindow):
         if self._closing or completion.ticket != self._ticket:
             return
         self._ticket = None
+        self._transfer_runner = None
         self.cancel.setEnabled(False)
         if self.production:
             self.cancel.hide()

@@ -107,6 +107,7 @@ class Display:
         library.XFlush.argtypes = [ctypes.c_void_p]
         library.XCloseDisplay.argtypes = [ctypes.c_void_p]
         library.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(Attributes)]
+        library.XResizeWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_uint, ctypes.c_uint]
         library.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
                                               ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
                                               ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
@@ -121,6 +122,11 @@ class Display:
         self.delete = library.XInternAtom(self.connection, b"WM_DELETE_WINDOW", 0)
         self.pid_atom = library.XInternAtom(self.connection, b"_NET_WM_PID", 0)
         self.transient_atom = library.XInternAtom(self.connection, b"WM_TRANSIENT_FOR", 0)
+        self.window_type = library.XInternAtom(self.connection, b"_NET_WM_WINDOW_TYPE", 0)
+        self.normal_type = library.XInternAtom(self.connection, b"_NET_WM_WINDOW_TYPE_NORMAL", 0)
+        self.size_hints = library.XInternAtom(self.connection, b"WM_NORMAL_HINTS", 0)
+        self.hints_type = library.XInternAtom(self.connection, b"WM_SIZE_HINTS", 0)
+        self.fitted = None
 
     def property_values(self, window, atom, expected_type, maximum):
         actual, count, remaining = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_ulong()
@@ -170,6 +176,35 @@ class Display:
 
     def viewable(self, application_pids):
         return bool(self.client_windows(application_pids))
+
+    def fit_main(self, application_pids):
+        """Fill the private canvas only with one large, normal, resizable application window."""
+        if self.fitted is not None:
+            return
+        canvas = Attributes()
+        if not self.library.XGetWindowAttributes(self.connection, self.root, ctypes.byref(canvas)):
+            return
+        candidates = []
+        for window in self.client_windows(application_pids):
+            if self.property_values(window, self.transient_atom, 33, 1) != ():
+                continue
+            if self.property_values(window, self.window_type, 4, 16) != (self.normal_type,):
+                continue
+            hints = self.property_values(window, self.size_hints, self.hints_type, 18)
+            if hints is None:
+                continue
+            if hints and hints[0] & 32 and (len(hints) < 9 or hints[7] < canvas.width or hints[8] < canvas.height):
+                continue
+            area = Attributes()
+            if (self.library.XGetWindowAttributes(self.connection, window, ctypes.byref(area))
+                    and area.width >= canvas.width * .7 and area.height >= canvas.height * .7):
+                if 0 <= area.x < canvas.width and 0 <= area.y < canvas.height:
+                    candidates.append((window, canvas.width - area.x, canvas.height - area.y))
+        if len(candidates) == 1:
+            # Wine keeps its own top-level origin for pointer delivery. Preserve that origin.
+            self.fitted, width, height = candidates[0]
+            self.library.XResizeWindow(self.connection, self.fitted, width, height)
+            self.library.XFlush(self.connection)
 
     def close_windows(self, application_pids):
         targets = []
@@ -358,6 +393,58 @@ def validate_apply_prefix(job):
         raise RuntimeError("Apply prefix identity changed before namespace mutation")
 
 
+class PrivateDisplay:
+    def __init__(self, log, purpose):
+        # Preflight and launch use separate endpoints even if the previous compositor exited abruptly.
+        self.runtime = tempfile.TemporaryDirectory(dir="/trial/runtime", prefix="frame-")
+        window_env = dict(os.environ, QT_QPA_PLATFORM="wayland", QSG_RHI_BACKEND="opengl",
+                          DBUS_SESSION_BUS_ADDRESS="unix:path=/trial/runtime/no-session-bus",
+                          XDG_RUNTIME_DIR=self.runtime.name, WAYLAND_DISPLAY="/trial/runtime/host-display")
+        self.close_fd, writer = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            self.frame = subprocess.Popen(
+                ["/usr/bin/python3", "-I", "/offline-window.py", purpose, str(writer)],
+                env=window_env, pass_fds=(writer,),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
+        finally:
+            os.close(writer)
+        try:
+            socket = Path(self.runtime.name) / "offline-display"
+            deadline = time.monotonic() + 12
+            while not socket.is_socket():
+                if self.frame.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("Offline window unavailable. Check the system Qt Wayland compositor.")
+                time.sleep(.05)
+            self.server = subprocess.Popen(
+                ["Xwayland", ":77", "-geometry", "1120x720", "-shm", "-noreset", "-nolisten", "tcp",
+                 "-extension", "MIT-SHM"], env=dict(os.environ, WAYLAND_DISPLAY=str(socket)),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
+        except BaseException:
+            self.frame.terminate()
+            self.frame.wait(timeout=5)
+            self.runtime.cleanup()
+            raise
+        self.pids = (self.server.pid, self.frame.pid)
+
+    def poll(self):
+        server = self.server.poll()
+        return self.frame.poll() if server is None else server
+
+    def close_requested(self):
+        try:
+            return bool(os.read(self.close_fd, 4096))
+        except BlockingIOError:
+            return False
+
+    def close(self):
+        for process in (self.server, self.frame):
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        self.runtime.cleanup()
+        os.close(self.close_fd)
+
+
 def main():
     global OPERATION_ID
     os.umask(0o077)
@@ -368,11 +455,12 @@ def main():
         job = json.loads(Path("/trial/job.json").read_text())
         validate_apply_prefix(job)
     with open("/trial/display.log", "wb") as log:
-        server = subprocess.Popen(
-            ["Xwayland", ":77", "-geometry", "1280x800", "-decorate", "-shm",
-             "-noreset", "-nolisten", "tcp", "-extension", "MIT-SHM"],
-            stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-        )
+        if job is None and "--check" not in sys.argv:
+            job = json.loads(Path("/trial/job.json").read_text())
+        purpose = "apply" if "--apply" in sys.argv else (job or {}).get("purpose", "trial")
+        if "--check" in sys.argv:
+            purpose = "check"
+        server = PrivateDisplay(log, purpose)
         deadline = time.monotonic() + 15
         while not Path("/tmp/.X11-unix/X77").is_socket():
             if server.poll() is not None or time.monotonic() > deadline:
@@ -382,8 +470,7 @@ def main():
         display = Display()
         if "--check" in sys.argv:
             display.close()
-            server.terminate()
-            server.wait(timeout=5)
+            server.close()
             return
         if job is None:
             job = json.loads(Path("/trial/job.json").read_text())
@@ -414,8 +501,8 @@ def main():
                 deadline = time.monotonic() + 120
                 while True:
                     helper.poll()
-                    reap((server.pid, helper.pid))
-                    alive = [pid for pid in children() if pid != server.pid]
+                    reap((*server.pids, helper.pid))
+                    alive = [pid for pid in children() if pid not in server.pids]
                     if not alive and helper.returncode == 0:
                         break
                     if helper.returncode not in (None, 0) or time.monotonic() > deadline:
@@ -424,19 +511,19 @@ def main():
                         return
                     time.sleep(0.1)
                 display.close()
-                server.terminate()
-                server.wait(timeout=5)
+                server.close()
                 terminal({"schema": 1, "phase": "ended", "identity": worker,
                           "reason": "recipe-settled", "returncode": 0})
                 return
             while True:
+                if server.close_requested():
+                    raise PreparationCancelled()
                 if checkpoint() == {"action": "launch"}:
                     break
                 time.sleep(0.1)
         except PreparationCancelled:
             display.close()
-            server.terminate()
-            server.wait(timeout=5)
+            server.close()
             terminal({"schema": 1, "phase": "ended", "identity": worker,
                       "reason": "cancelled-before-launch", "returncode": 0})
             return
@@ -471,9 +558,9 @@ def main():
             server.poll()
             if session_helper is not None:
                 session_helper.poll()
-            excluded = (server.pid, launcher.pid) + (() if session_helper is None else (session_helper.pid,))
+            excluded = (*server.pids, launcher.pid) + (() if session_helper is None else (session_helper.pid,))
             reap(excluded)
-            alive = [pid for pid in children() if pid != server.pid]
+            alive = [pid for pid in children() if pid not in server.pids]
             applications = live_applications(alive, application_name, observed_applications)
             if server.poll() is not None:
                 failure_reason = failure_reason or "display-lost"
@@ -495,14 +582,13 @@ def main():
                     shutdown_deadline = None
                     session_helper = None
                     observed_applications.clear()
+                    display.fitted = None
                     write({"schema": 1, "phase": "prepared", "identity": worker,
                            "reason": "restarting", "returncode": None})
                     return False
                 if server.poll() is None:
                     display.close()
-                if server.poll() is None:
-                    server.terminate()
-                    server.wait(timeout=5)
+                server.close()
                 reap()
                 terminal({"schema": 1, "phase": "ended", "identity": worker,
                           "reason": failure_reason or
@@ -514,6 +600,8 @@ def main():
                 write({"schema": 1, "phase": "unknown", "identity": worker,
                        "reason": failure_reason, "returncode": None})
             command = take_request()
+            if server.close_requested():
+                command = {"action": "stop"}
             if command is not None:
                 if (command == {"action": "restart"} and job.get("allow_restart") is True
                         and ready and not stop_requested and not failure_reason):
@@ -521,7 +609,7 @@ def main():
                     command = {"action": "stop"}
                 elif command in ({"action": "stop"}, {"action": "cancel"}):
                     restart_requested = False
-                if command in ({"action": "stop"}, {"action": "cancel"}) and server.returncode is None:
+                if command in ({"action": "stop"}, {"action": "cancel"}) and server.poll() is None:
                     stop_requested = True
                     closing = True
                     if shutdown_deadline is None:
@@ -531,18 +619,20 @@ def main():
                             if session_helper.returncode:
                                 failure_reason = failure_reason or "normal-session-shutdown-failed"
                             session_helper = None
-            if server.returncode is None and not ready and not stop_requested:
+            if server.poll() is None and not ready and not stop_requested:
                 if display.viewable(applications):
                     ready = True
                     write({"schema": 1, "phase": "unknown" if failure_reason else "running", "identity": worker,
                            "reason": failure_reason or ("restart-" + str(restart_generation)
                                                         if restart_generation else ""),
                            "returncode": None})
-            if closing and server.returncode is None and not close_sent:
+            if ready and not closing and server.poll() is None:
+                display.fit_main(applications)
+            if closing and server.poll() is None and not close_sent:
                 close_sent = bool(display.close_windows(applications))
             if (ready or stop_requested) and session_helper is None:
                 # A normal session end must follow application exit, never race its window close.
-                fresh_owned = [pid for pid in children() if pid != server.pid]
+                fresh_owned = [pid for pid in children() if pid not in server.pids]
                 fresh_applications = live_applications(fresh_owned, application_name, observed_applications)
                 application_exited = not fresh_applications and (observed_applications or launcher.poll() is not None)
             else:

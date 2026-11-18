@@ -51,7 +51,10 @@ class UserIntegrationTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.rc.stat().st_mode), 0o640)
         if shutil.which("desktop-file-validate"):
             subprocess.run(["desktop-file-validate", str(self.entry)], check=True, capture_output=True)
-        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (self.binary, self.entry, self.rc)}
+        offline = self.entry.with_name("logos-desktop-offline.desktop")
+        self.assertIn(b"NoDisplay=true\n", offline.read_bytes())
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                  for path in (self.binary, self.entry, offline, self.rc)}
         integration.install(self.root)
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before})
         self.rc.write_bytes(self.rc.read_bytes() + b"# later user content\n")

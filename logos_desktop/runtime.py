@@ -281,7 +281,7 @@ def recover_startup(overrides, persistent):
 
 
 @maintenance.changes_installation
-def activate(app, accepted, *, managed=False, before_publish=None):
+def activate(app, accepted, *, managed=False, before_publish=None, setup_generation=None):
     """Select a prepared immutable runtime without replacing old runtime bytes."""
     if accepted.spec.kind != "appimage":
         raise artifacts.ArtifactError("Runtime activation requires an accepted AppImage")
@@ -304,11 +304,28 @@ def activate(app, accepted, *, managed=False, before_publish=None):
         eligible, reason = wine.check_wine_rules(observed, prepared.stack.product_build, "10")
         if not eligible:
             raise maintenance.MaintenanceError(reason)
+    elif setup_generation is not None:
+        from . import runtime_runners
+
+        copy = next((item for item in runtime_runners.RunnerStore().inventory()
+                     if item.generation == setup_generation and item.state == "published"), None)
+        if copy is None or (copy.path, copy.sha256) != (accepted.path, accepted.sha256):
+            raise maintenance.RecoveryRequired("Setup runner identity changed. Reopen Wine runners.")
     elif not accepted.path.is_relative_to(store):
         accepted = artifacts.import_local(accepted.path, store.parent, accepted.spec)
     if not managed:
+        from . import runtime_stacks
+
+        build = getattr(conf._raw, "faithlife_product_release", None)
+        failure = runtime_stacks.affected(runtime_stacks.bundled(), accepted.sha256, build,
+                                         {"architecture": os.uname().machine}, {}, {})
+        if failure:
+            raise maintenance.RecoveryRequired("This Wine build is known affected: " + failure.reason)
         wine.require_compatible(app, accepted.path)
     with activation_guard(app, exclusive=True) as context, configuration_lock():
+        if setup_generation is not None:
+            if context.prefix.is_symlink() or (context.prefix.exists() and any(context.prefix.iterdir())):
+                raise maintenance.RecoveryRequired("Existing prefix requires guarded apply rather than new setup")
         if not managed:
             from . import utils
 

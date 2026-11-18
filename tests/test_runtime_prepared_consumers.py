@@ -109,6 +109,109 @@ class PreparedConsumers(unittest.TestCase):
         self.assertEqual((self.context.prefix / "drive_c/windows/globalization/ICU/icudtl.dat").read_bytes(), b"data")
         settings.assert_called_once_with(self.app, prepared, {})
 
+    def test_cold_tested_setup_reassesses_download_before_binding_prepared_inputs(self):
+        try:
+            from logos_desktop.qt import runner_services as gui
+            from logos_desktop.qt.window import Installation, InstallDraft
+        except ModuleNotFoundError as error:
+            if error.name == "PySide6":
+                self.skipTest("Optional Qt frontend is not installed")
+            raise
+        prepared = self.prepared()
+        runner = prepared.catalog.runners[prepared.stack.runner_id]
+        choice = gui.RecipeChoice(prepared.stack.id, prepared.recipe.id, "tested", False, False, "unchecked")
+        row = gui.Version(runner.id, runner.family, runner.version, runner.sha256, runner.size, "", "", False,
+                          (), choice.stack, "Tested", False, (choice,), True)
+        snapshot = Installation("Logos", "", "", "", installed=False)
+        release = prepared.stack.product_build
+        cold = gui.Library("", release, (row,), "", gui.RecoveryView())
+        cached = replace(cold, rows=(replace(row, generation="bound-generation", path=str(prepared.runner.path),
+                                              choices=(replace(choice, selectable=True),)),))
+        draft = InstallDraft("Logos", str(self.context.install), constants.WINE_RECOMMENDED_SIGIL, True, release)
+        store = Mock()
+        store.inventory.return_value = (SimpleNamespace(generation="bound-generation", state="published",
+                                                        path=prepared.runner.path, sha256=runner.sha256,
+                                                        size=runner.size),)
+        self.app.conf._overrides.assume_yes = False
+        with (patch.object(gui, "library", side_effect=[cold, cached]),
+              patch.object(gui.runtime_runners, "RunnerStore", return_value=store),
+              patch.object(runtime_stacks, "bundled", return_value=prepared.catalog),
+              patch.object(gui.runtime_commands, "managed_candidate",
+                           return_value=(store, "bound-generation", prepared)) as bind):
+            selected, setup = gui.setup_runtime(self.app, None, draft, snapshot)
+        store.download.assert_called_once()
+        bind.assert_called_once_with(prepared.catalog, choice.stack, checkpoint=self.app.checkpoint)
+        self.assertIs(setup.prepared, prepared)
+        self.assertEqual(selected.runtime, str(prepared.runner.path))
+
+    def test_setup_selector_and_service_refuse_experimental_sibling_of_tested_recipe(self):
+        import json
+        from tests.test_runtime_stacks import document, evidence
+        try:
+            from PySide6.QtWidgets import QApplication
+            from logos_desktop.qt import runner_services as gui
+            from logos_desktop.qt.runner_page import WineRunners
+            from logos_desktop.qt.window import Installation, InstallDraft
+        except ModuleNotFoundError as error:
+            if error.name == "PySide6":
+                self.skipTest("Optional Qt frontend is not installed")
+            raise
+        data = document()
+        data["recipes"][0]["required_host_facts"] = []
+        fact = evidence(data)
+        recipe = dict(data["recipes"][0], id="experimental-recipe")
+        stack = dict(data["stacks"][0], id="experimental-stack", recipe_id=recipe["id"], evidence_ids=["experiment"])
+        data["recipes"].append(recipe)
+        data["stacks"].append(stack)
+        data["evidence"].append(dict(fact, id="experiment", kind="experimental", stack_id=stack["id"],
+                                     recipe_sha256=runtime_stacks.fingerprint(recipe)))
+        catalog = runtime_stacks.parse(json.dumps(data).encode())
+        tested = data["stacks"][0]
+        runner = catalog.runners[tested["runner_id"]]
+        store = Mock(root=self.root, coordination=self.root)
+        copy = SimpleNamespace(path=self.root / "wine", generation="selected", size=runner.size, sha256=runner.sha256,
+                               state="published", content_key=runner.content_key)
+        store.inventory.return_value = (copy,)
+        store.download_states.return_value = store.removal_reasons.return_value = ()
+        self.app.conf.config_file_path = self.root / "conf"
+        self.app.conf._network = Mock()
+        self.app.conf._overrides.assume_yes = False
+        snapshot = Installation("Logos", "", "", "", installed=False)
+        draft = InstallDraft("Logos", str(self.context.install), str(copy.path), True, tested["product_build"],
+                             copy.generation, tested["id"])
+        qt = QApplication.instance() or QApplication([])
+        page = WineRunners()
+        page.setup = True
+        with (patch.object(runtime_stacks, "bundled", return_value=catalog),
+              patch.object(gui.runtime_runners, "RunnerStore", return_value=store),
+              patch.object(gui.network, "product_update_state",
+                           return_value=Mock(target=draft.release, actionable=True)),
+              patch.object(gui.runtime_commands, "managed_candidate") as bind):
+            page.load(snapshot, gui.library(self.app, snapshot), ())
+            self.assertTrue(page.buttons["draft"].isEnabled())
+            bind.return_value = (store, copy.generation, object())
+            _, setup = gui.setup_runtime(self.app, None, draft, snapshot)
+            self.assertIs(setup.prepared, bind.return_value[2])
+            bind.assert_called_once_with(catalog, tested["id"], checkpoint=self.app.checkpoint)
+            page.recipe.setCurrentIndex(page.recipe.findData(stack["id"]))
+            self.assertEqual(page.row.stack, stack["id"])
+            self.assertFalse(page.buttons["draft"].isEnabled())
+            with self.assertRaisesRegex(maintenance.RecoveryRequired, "selected settings"):
+                gui.setup_runtime(self.app, None, replace(draft, stack=page.row.stack), snapshot)
+            self.assertEqual(bind.call_count, 1)
+            data["stacks"].remove(stack)
+            data["evidence"].pop()
+            with patch.object(runtime_stacks, "bundled", return_value=runtime_stacks.parse(json.dumps(data).encode())):
+                page.load(snapshot, gui.library(self.app, snapshot), ())
+                page.recipe.setCurrentIndex(page.recipe.findData(""))
+                self.assertTrue(page.buttons["draft"].isEnabled())
+                self.assertEqual(page.row.stack, "")
+                _, fallback = gui.setup_runtime(self.app, None, replace(draft, stack=""), snapshot)
+                self.assertIsNone(fallback.prepared)
+                self.assertEqual(bind.call_count, 1)
+        page.close()
+        qt.processEvents()
+
     def test_existing_prefix_and_custom_override_are_refused_before_mutation(self):
         prepared = self.prepared()
         self.context.prefix.mkdir(parents=True)
